@@ -1,0 +1,3940 @@
+[
+  {
+    "id": "s00_softmax",
+    "stage": 0,
+    "backend": "cuda",
+    "kind": "softmax",
+    "title": "固定契约稳定 row-wise softmax",
+    "prerequisites": [],
+    "cases": [
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "constant"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "shifted"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "第一关只处理 4 行、每行 128 个 FP32 数，建立从 CUDA 源码到误差报告的闭环。性能不是通关门槛。",
+    "math": "对每行 x，m=max(x)，y_j=exp(x_j-m)/Σ_k exp(x_k-m)。对任意有限常数 c，softmax(x+c)=softmax(x)。从分子分母同时乘 exp(-m) 推导稳定性；不要求先支持所有宽度。",
+    "task": "自行设计 reduction、线程到行/元素的映射、存储位置和 launch。实现完整的一行稳定 softmax 模块；不得调用现成 softmax。",
+    "evidence": "画出一行数据由哪些线程拥有；解释最大值和分母如何传播。所有输出非负、每行和约为 1，偏移 10000 仍有限。",
+    "experiment": "记录一次正确实现的耗时与 launch 配置；解释小规模运行为何可能由 launch 开销主导。比较 constant 和 large 输入误差，不以速度决定正确性。",
+    "symptoms": "大正数输入出现 NaN/Inf；每行和不是 1；只有第一行正确；运行之间随机变化。"
+  },
+  {
+    "id": "s01_reduce",
+    "stage": 0,
+    "backend": "cuda",
+    "kind": "reduce",
+    "title": "独立 reduction 与尾部元素",
+    "prerequisites": [
+      "s00_softmax"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          1,
+          1
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          1,
+          1
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          7,
+          31
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          7,
+          31
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          7,
+          31
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          7,
+          31
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      }
+    ],
+    "purpose": "把第一关的 reduction 独立出来，加入非整 warp 和非整块长度，为后续分块状态验证提供基础。",
+    "math": "maximum_r=max_j x_rj；sum_r=Σ_j x_rj。空参与线程不等于真实的零输入；本关没有空行。浮点加法不满足结合律。",
+    "task": "实现行最大值与行总和两个输出；选择线程分工、局部/跨线程 reduction 及尾部谓词。",
+    "evidence": "说明所有有效元素恰好参与一次；记录 negative 输入和单元素输入的边界处理；不规定一个 CTA 必须对应一行。",
+    "experiment": "比较宽度 31、128、257 的通信与空闲线程；用 NCU LaunchStats/MemoryWorkloadAnalysis 解释实际布局访问。",
+    "symptoms": "负数行最大值变成 0；C=257 漏最后一个值；取消相加时误差异常；线程不一致到达同步点。"
+  },
+  {
+    "id": "s02_naive",
+    "stage": 0,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "朴素 attention forward",
+    "prerequisites": [
+      "s00_softmax",
+      "s01_reduce"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          32,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          32,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          32,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          64,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          64,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          64,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          32,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      }
+    ],
+    "purpose": "从独立 softmax 连接到 attention 数学定义，作为允许显式中间矩阵的 FP32 基线。",
+    "math": "S=scale QKᵀ；P=softmax_row(S)；O=PV；LSE_i=log Σ_j exp(S_ij)。默认 scale=1/√D。",
+    "task": "自行实现 QK、softmax 和 PV，可以多次 launch 并把 S/P 写入 global memory。在 workspace_spec 中自行声明需要的临时张量。",
+    "evidence": "列出 Q/K/V/S/P/O 的产生者、保存位置、读者和生存期。输出 O 与 FP32 LSE；未使用 Tensor Core。",
+    "experiment": "估算物化 S/P 的字节数并与 NCU DRAM 计数比较；解释 L2 缓存为何使二者不同。",
+    "symptoms": "K 转置方向错误；漏乘 scale；batch/head 索引混叠；LSE 中自然对数与 log2 混用。"
+  },
+  {
+    "id": "s03_online",
+    "stage": 0,
+    "backend": "cuda",
+    "kind": "online",
+    "title": "online softmax 与状态不变量",
+    "prerequisites": [
+      "s00_softmax",
+      "s01_reduce"
+    ],
+    "cases": [
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "shifted"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "shifted"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          3,
+          257
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          513
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          513
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "shifted"
+      },
+      {
+        "shape": [
+          2,
+          513
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          2,
+          513
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "从完整行转向分块统计，为 FA1 的跨块更新做准备；此关完成不等于完成 FA1。",
+    "math": "对已处理的索引集合 A，m_A=max_{j∈A}x_j，l_A=Σ_{j∈A}exp(x_j-m_A)。用不变量推导不相交集合合并后同一归一化基准下的表示。最终 y 是整行 softmax。",
+    "task": "实现按块处理的 online 统计和最终归一化输出 y,m,l。块大小、扫描与输出组织均由你决定，不能退回一次性整行统计冒充 online。",
+    "evidence": "给出跨块状态不变量及初始化依据；至少演示两个不同块大小以及尾块。无需在 API 中返回全部中间状态。",
+    "experiment": "固定输入比较块大小对舍入误差、读入次数和存储量的影响；解释输出概率是否要求再读取输入。",
+    "symptoms": "新块最大值更大时旧统计失效；尾块影响分母；只归一化了最后一块。"
+  },
+  {
+    "id": "s10_fa1",
+    "stage": 1,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "FA1：KV 外层循环与 IO 复用",
+    "prerequisites": [
+      "s02_naive",
+      "s03_online"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "实现论文算法结构的 FP32 教学版。通过 KV tile 外层、Q tile 内层观察反复更新输出状态的代价。",
+    "math": "已处理键集合 A 的不变量：m_i=max S_iA，l_i=Σ exp(S_iA-m_i)，O_i=Σ exp(S_ij-m_i)V_j/l_i。T_c=ceil(N/B_c)，T_r=ceil(N/B_r)。",
+    "task": "实现 KV 外层/Q 内层的 tiled attention，不物化 N×N S/P。保持 K/V tile 在遍历多个 Q tile 时的复用；自行选择 CTA ownership、SMEM、寄存器及 O/m/l 的保存。",
+    "evidence": "源码和记录必须证明循环顺序、KV 复用以及每次更新后 O/m/l 的含义。先解释并发写 O 的安全性；只使用 online softmax 不算 FA1 设计验收。",
+    "experiment": "按 docs/io_model.md 对每个 tensor 的每次循环读写计数；固定 B/H/N/D 对比 s02。报告教学版 B200 性能，不代表原版 FA1。",
+    "symptoms": "多个 KV 工作者竞争同一 O；每次调用沿用旧状态；O 的归一化约定中途改变；共享内存大小超限。"
+  },
+  {
+    "id": "s11_fa1_edges",
+    "stage": 1,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "FA1：尾块与 causal 扩展",
+    "prerequisites": [
+      "s10_fa1"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          3,
+          65,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          3,
+          65,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          3,
+          65,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          3,
+          65,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          3,
+          65,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          3,
+          65,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      }
+    ],
+    "purpose": "保留 s10 独立入口，给 FA1 增加 B/H/D 扩展、非整块 N 和 causal，用于与后续 FA2 控制变量比较。",
+    "math": "causal 只允许 j≤i；被屏蔽位置数学分数为 -∞。self-attention 的对角线有效，整个有效 query 行不会全屏蔽，但某个 KV tile 可能全屏蔽。",
+    "task": "在新入口实现边界和 mask 规则；选择对全屏蔽 tile 和尾部元素的处理，不能改变 s10 的结果记录。",
+    "evidence": "区分越界 padding 与有效但被 mask 的元素；展示 N=1、65、129 和 causal/noncausal 的通过结果。",
+    "experiment": "分别报告实际有效 pair FLOPs 和 dense-equivalent FLOPs；分析对角 tile 的额外工作。",
+    "symptoms": "全屏蔽 tile 产生 -∞ 减 -∞；三角形方向反了；尾部 global 越界；不同 head 互相污染。"
+  },
+  {
+    "id": "s20_fa2_grid",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "FA2 第一变量：query 维 grid 并行",
+    "prerequisites": [
+      "s10_fa1"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "先隔离 query 分块的 grid 并行，保持 FP32 和测试形状不变；这只是 FA2 的一个组成部分。",
+    "math": "attention 的不同输出行在 forward 中相互独立。对一个 query tile，它需要覆盖完整有效 key 集合，拥有该 tile 的输出状态。",
+    "task": "自行实现 query tile ownership 和对应循环顺序；比较 FA1 输出状态驻留时间。此关尚不要求 sliced-Q 或 Tensor Core。",
+    "evidence": "给出 grid 各轴含义、每个 CTA 的输出所有权、为何无需跨 CTA 合并 O。仅增加无效 CTA 数量不算实现。",
+    "experiment": "固定精度和 tile 字节预算对比 s10；同时记录 CTA 数、寄存器、SMEM 与 GPU 利用，不把 grid 并行和 CTA 内分工混淆。",
+    "symptoms": "同一 query tile 多次写出；K 维漏遍历；grid 数变多但输出 ownership 没变。"
+  },
+  {
+    "id": "s21_fa2_sliced",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "FA2：sliced-Q 与非矩阵运算",
+    "prerequisites": [
+      "s20_fa2_grid"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "在 query 并行之上完成 CTA 内 sliced-Q 与减少非矩阵运算的关键设计，仍保持 FP32 以隔离变量。",
+    "math": "不归一化分子 U_i=Σ exp(S_ij-m_i)V_j，O_i=U_i/l_i。推导延迟归一化何时与逐块归一化等价。不同 Q 行的 reduction 是独立的。",
+    "task": "实现 warp 间 Q 行分工、K/V 复用和最终输出；重新审视每次归一化及跨 warp 合并是否必要。线程映射和通信机制由你设计。",
+    "evidence": "画 CTA 内各 warp 的 Q/K/V/O 所有权；用源码/NCU 证据解释跨 warp 部分输出合并是否消除。s20+s21 才构成本仓库 FA2 算法结构版。",
+    "experiment": "固定 grid、dtype、shape 对比 s20；计数归一化操作、SMEM 读写和同步次数。不得仅凭更快就认定 sliced-Q 已实现。",
+    "symptoms": "warp 之间仍重复计算相同 Q；输出分子和已归一化 O 混用；减少同步后出现竞争。"
+  },
+  {
+    "id": "s22_mma",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "gemm",
+    "title": "CUDA Tensor Core 小练习",
+    "prerequisites": [
+      "s01_reduce"
+    ],
+    "cases": [
+      {
+        "shape": [
+          16,
+          16,
+          16
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          16,
+          16,
+          16
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          16,
+          16,
+          16
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          16,
+          16,
+          16
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          16,
+          16,
+          16
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          16,
+          16,
+          16
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          32,
+          32,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          32,
+          32,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          32,
+          32,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          32,
+          32,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          32,
+          32,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          32,
+          32,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "cancellation"
+      }
+    ],
+    "purpose": "独立学习 warp 级 Tensor Core 输入/输出组织，再把低精度引入 attention。",
+    "math": "C=A B，A:[M,K]，B:[K,N]，C:[M,N]。A/B 为 FP16 或 BF16；乘积累加与 C 为 FP32，不做 TF32。",
+    "task": "自行选择 WMMA 或 mma.sync 的合法指令形状、fragment layout、加载和存储。不可调用 cuBLAS，也不预填 launch 和 SMEM。",
+    "evidence": "在 B200 生成代码中确认 Tensor Core 指令；说明 collective 参与线程和对齐约束；不要把 CUDA WMMA 当作 Blackwell tcgen05。",
+    "experiment": "对同一已量化输入测误差，分开记录量化与累加误差；记录选择的指令与 SM100 编译目标。",
+    "symptoms": "fragment 按普通连续矩阵访问；参与线程不完整；B layout 方向错误；输出被低精度累加。"
+  },
+  {
+    "id": "s23_fa2_tensor",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "FA2 接入 Tensor Core",
+    "prerequisites": [
+      "s21_fa2_sliced",
+      "s22_mma"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          256,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          256,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          256,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          256,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          256,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          256,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "把单独验证过的 Tensor Core 计算接入 FA2，明确这一步同时引入精度和矩阵引擎变化。",
+    "math": "Q/K/V/O 使用输入 dtype；分数、softmax 统计、O 累加和 LSE 为 FP32。若 P 转为低精度供 MMA 使用，误差必须单独记录。",
+    "task": "实现两次矩阵乘和 softmax 的数据交接；支持 FP16/BF16，保留 s21 FP32 入口。",
+    "evidence": "说明 QK 与 PV 的 accumulator 所在位置和 P 的转换点；证明 sliced-Q 所有权仍成立。",
+    "experiment": "用同一量化输入转换回 FP32 做对照，分别列出 dtype 与 Tensor Core 变化；不能将两者的总收益全部归因于 FA2。",
+    "symptoms": "softmax 统计误用 half；PV 输入 layout 错位；只在 random 小值输入上正确。"
+  },
+  {
+    "id": "s24_fa2_edges",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "FA2 低精度边界验证",
+    "prerequisites": [
+      "s23_fa2_tensor"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          65,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      }
+    ],
+    "purpose": "在 FA2 Tensor Core 版本扩展尾块和 causal，形成可供 DSL 移植比较的受限低精度基线。",
+    "math": "矩阵指令的物理 tile 与有效的 N 不同；只有有效且未 mask 的 pair 参与 softmax 的分母。",
+    "task": "完成低精度 MMA tile 的合法 padding、mask 和写回，不让无效元素改变统计。",
+    "evidence": "输出 N=1 与 N=65/129 的最大误差；说明合法 MMA shape 与逻辑边界的区别。",
+    "experiment": "比较 FP16/BF16 的 near-zero 误差与大 logits；对 causal 分开统计有效 FLOPs 和实际指令工作。",
+    "symptoms": "尾块仍使用未初始化 shared 数据；mask 在指数之后处理；首行输出不等于第一个 V。"
+  },
+  {
+    "id": "s30_layout",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "transpose",
+    "title": "CuTe DSL layout 与线程映射",
+    "prerequisites": [],
+    "cases": [
+      {
+        "shape": [
+          17,
+          33
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          17,
+          33
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          32,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          32,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      }
+    ],
+    "purpose": "独立进入 DSL：理解 shape/stride/layout 的域和值域，验证 JIT、DLPack 和线程映射。smoke 的标量写入不算完成此关。",
+    "math": "输入 X:[R,C] row-major；输出 Y:[C,R] row-major；Y[j,i]=X[i,j]。CuTe layout 将逻辑坐标映射到线性偏移；线程 layout 是另一层映射。",
+    "task": "实现 transpose；自行设计 layout、partition 和 grid/block。可先用普通 global load/store，再研究合并访问，不指定答案 layout。",
+    "evidence": "为一个小角落列出逻辑坐标、内存偏移和线程编号；证明一对一覆盖与尾部保护。",
+    "experiment": "比较读合并与写合并的取舍；记录编译时间与重复执行时间，不把首次 JIT 纳入 kernel 耗时。",
+    "symptoms": "shape 正确但 stride 错误；转置两次；把线程编号误当 tensor offset；JIT 类型/动态参数混用。"
+  },
+  {
+    "id": "s31_port",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "softmax",
+    "title": "CUDA → CuTe DSL 迁移",
+    "prerequisites": [
+      "s00_softmax",
+      "s30_layout"
+    ],
+    "cases": [
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "constant"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "shifted"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
+      },
+      {
+        "shape": [
+          4,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "由你把已经完成的 s00 小 kernel 用 DSL 重写，建立两种语言间的对应关系。",
+    "math": "数学契约与 s00 完全相同，精度和形状不变；语言变化不应改变 softmax 定义。",
+    "task": "重新实现稳定 softmax 的映射和 reduction；仅参考自己的 s00，不复制官方 attention。",
+    "evidence": "记录 CUDA 的 launch、指针、thread index 与 DSL 各构件对应关系；运行两关同一组输入。",
+    "experiment": "比较编译/调用开销与 GPU 时间；解释差异来自编译、mapping 还是数值实现。",
+    "symptoms": "Python 执行与 JIT 编译阶段混淆；错误 specialization；reduce 的逻辑轴不一致。"
+  },
+  {
+    "id": "s32_async",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "copy",
+    "title": "异步搬运与完成可见性",
+    "prerequisites": [
+      "s30_layout"
+    ],
+    "cases": [
+      {
+        "shape": [
+          32,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          32,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      }
+    ],
+    "purpose": "先在小复制任务中理解异步提交、完成与共享数据可见性，为 TMA 引入完成协议。",
+    "math": "Y=X；输入输出 FP32。异步操作的提交顺序不等于其他线程观察数据的顺序；描述 happens-before 图而非只列 barrier 名称。",
+    "task": "通过 cp.async 路径将 global 数据经 SMEM 传递到输出；自行实现分工、提交、等待和 SMEM 复用。",
+    "evidence": "标出生产者写入、完成确认、消费者读取、缓冲区释放四种事件。同步点参与范围必须与所用指令一致。",
+    "experiment": "对 copy 的字节数与实际 global 读写对照；运行 racecheck 和 synccheck。不能靠添加 host synchronize 掩盖 kernel 内竞争。",
+    "symptoms": "偶发旧数据；最后一批没有排空；只在调试模式正确；部分线程永远等待。"
+  },
+  {
+    "id": "s33_tma",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "copy",
+    "title": "TMA 与 mbarrier 单缓冲",
+    "prerequisites": [
+      "s32_async"
+    ],
+    "cases": [
+      {
+        "shape": [
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          256,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          256,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      }
+    ],
+    "purpose": "从线程驱动异步 copy 转向 TMA，先使用单缓冲建立 byte-count/phase 的正确协议。",
+    "math": "Y=X；FP16 contiguous。TMA 描述符编码全局 tensor 的 shape/stride 与传输 tile；mbarrier 同时涉及到达参与者与事务完成字节。",
+    "task": "自行创建合法 TMA atom/descriptor 和 SMEM layout，实现 load 到 SMEM 后写回。launch、alignment、transaction bytes 和 phase 由你设计。",
+    "evidence": "按 docs/blackwell.md 核对 SM100 接口、base/stride 对齐、SMEM swizzle 约束；记录实际接口签名和合法 tile。",
+    "experiment": "用不同输入重复运行同一已编译函数；测 memcheck、racecheck 和等待相关 stall。",
+    "symptoms": "描述符 invalid argument；expected bytes 不匹配而死锁；phase 翻转错误；SMEM 对齐异常。"
+  },
+  {
+    "id": "s34_warp_specialize",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "affine",
+    "title": "warp specialization 生产消费",
+    "prerequisites": [
+      "s33_tma"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          3,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          3,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      }
+    ],
+    "purpose": "把搬运和计算交给不同 warp 角色，先保持单 stage，避免同时改变多种机制。",
+    "math": "输入 X:[T,128,64] FP16，输出 Y 同 shape FP32，Y=2X+1。T 是独立数据 tile 的序列，不是线程数。",
+    "task": "用 TMA producer 和独立 consumer 实现转换；自行决定角色、参与计数和 release 协议。",
+    "evidence": "画角色间依赖图，指出每个 buffer 被谁持有、何时可覆盖；说明退出前哪些异步动作必须完成。",
+    "experiment": "比较同一任务统一 warp 分工与 specialization 的 register/SMEM 成本；不要求此小任务提速。",
+    "symptoms": "producer 等待永远不会发生的 release；consumer 读取上一 tile；角色分支跨越错误的 CTA 同步。"
+  },
+  {
+    "id": "s35_pipeline",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "affine",
+    "title": "多缓冲流水线与 drain",
+    "prerequisites": [
+      "s34_warp_specialize"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          1,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          2,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          3,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          3,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          7,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          7,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          17,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          17,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      }
+    ],
+    "purpose": "在同一计算上加入循环缓冲，独立检验 prologue、steady state、epilogue 与 phase wrap。",
+    "math": "Y=2X+1 不变。buffer 的占用区间从 producer acquire 开始，到最后一个 consumer release 结束；环形索引相同不意味着 phase 相同。",
+    "task": "自行设计至少两种 stage 数的多缓冲流水线；选择配置字段，保留 s34 单缓冲入口。",
+    "evidence": "测试 T=1/2/3/7/17 以及多次启动；提交生命周期图，证明没有提前覆盖和未完成退出。",
+    "experiment": "固定计算量研究 stage 数、SMEM 占用和 overlap；给出性能下降的一个可验证解释。",
+    "symptoms": "短循环死锁；T 大于 ring 长度才出错；第一次正确第二次错误；末尾输出遗漏。"
+  },
+  {
+    "id": "s36_tmem",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "copy",
+    "title": "TMEM 分配、访问与释放",
+    "prerequisites": [
+      "s30_layout",
+      "s32_async"
+    ],
+    "cases": [
+      {
+        "shape": [
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          128,
+          32
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          128,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      }
+    ],
+    "purpose": "独立学习 SM100 TMEM 的寻址与生存期，不能把它视为普通 shared-memory 数组。",
+    "math": "Y=X，FP32；TMEM 使用二维 lane/column 组织，分配与 ld/st 的 collective 要求由指令决定。逻辑矩阵维度不等同于申请列数。",
+    "task": "实现 global→寄存器→TMEM→寄存器→global 的 roundtrip；自行选择 TMEM copy atom、布局、allocator 参与者与释放。",
+    "evidence": "核实分配列数及参与线程约束，画输入坐标与 TMEM 地址对应；检查每次调用都释放资源。",
+    "experiment": "比较申请列数和有效数据比例；连续运行检查资源泄漏，NCU 查看 TMEM 指令与 occupancy。",
+    "symptoms": "TMEM 地址当字节指针；申请粒度错误；少线程执行 collective；dealloc 时仍有使用者。"
+  },
+  {
+    "id": "s37_tcgen05",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "gemm",
+    "title": "tcgen05 单次异步 MMA",
+    "prerequisites": [
+      "s33_tma",
+      "s36_tmem"
+    ],
+    "cases": [
+      {
+        "shape": [
+          128,
+          64,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          64,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          64,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          128,
+          64,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          64,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          64,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "cancellation"
+      }
+    ],
+    "purpose": "将 TMA、SMEM 和 TMEM 接到 Blackwell MMA；先使用单 CTA、单次计算路径。",
+    "math": "C=A B；FP16/BF16 输入、FP32 累加/输出。tcgen05 MMA 的结果位于 TMEM，发出指令并不意味着结果已经可读。",
+    "task": "自行选择 MmaF16BF16Op 的合法 major/layout/shape，安排 MMA 发起、完成通知、TMEM 读回和 epilogue。",
+    "evidence": "使用 SM100 tcgen05 指令证据；说明为什么 Hopper wgmma 的寄存器协议不能直接搬来。此关不使用 2-CTA mode。",
+    "experiment": "固定 A/B 比较 FP16/BF16，保存合法指令 shape、SMEM 对齐和 TMEM 生命周期证据。",
+    "symptoms": "等待了 TMA 却没等待 MMA；TMEM 读到未完成累加；descriptor major 错误；累加器初始化错误。"
+  },
+  {
+    "id": "s38_async_gemm",
+    "stage": 3,
+    "backend": "cute",
+    "kind": "gemm",
+    "title": "TMA + tcgen05 流水线 GEMM",
+    "prerequisites": [
+      "s35_pipeline",
+      "s37_tcgen05"
+    ],
+    "cases": [
+      {
+        "shape": [
+          128,
+          128,
+          256
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          256
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          256
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          256
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          256
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          256
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          512
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          512
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          512
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          512
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          512
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          128,
+          512
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "cancellation"
+      }
+    ],
+    "purpose": "把多缓冲和异步 MMA 合并，在简单 GEMM 上确认不同执行引擎的同步，再进入 attention。",
+    "math": "C=A B，K 被分块；每个累加片段必须包含所有 K 项恰好一次。SMEM buffer 只有在其最后一个 MMA 读者完成后才能复用。",
+    "task": "实现 pipelined GEMM，不复用官方 GEMM 内核。自行安排 TMA→MMA 与 MMA→SMEM release 的跨引擎协议。",
+    "evidence": "提交每个 buffer 的生产/消费/释放图；说明至少两个 stage 的实际重叠证据，单看 launch 个数不够。",
+    "experiment": "固定 K，比较单 stage 与多 stage；记录占用、SMEM bytes 和 stall，用 profiler 判断瓶颈而非猜测。",
+    "symptoms": "K=64 正确而 K=512 失败；TMA 覆盖正在消费的数据；累加 flag 错误；drain 漏最后一项。"
+  },
+  {
+    "id": "s40_fa4_base",
+    "stage": 4,
+    "backend": "cute",
+    "kind": "attention",
+    "title": "FA4 基础：受限 SM100 forward",
+    "prerequisites": [
+      "s31_port",
+      "s38_async_gemm"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          128,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "先把 TMA/tcgen05/TMEM 与稳定 attention 接通，形成 FA4 实验基线；仅此关不称为完成 FA4。",
+    "math": "数学定义与 s23 相同。BF16 Q/K/V/O，FP32 softmax 统计、MMA 累加与 LSE；D=128，非 causal，整块 N。",
+    "task": "自行实现单 CTA mode 的分块 forward，设计 S/P/O 的 TMEM、SMEM、寄存器交接。允许串行依赖以先保证正确，不预填 layout 或 tile。",
+    "evidence": "记录 QK 与 PV 的输入来源、TMEM accumulator 和精度转换；不得通过 DSL 包装现成 attention。",
+    "experiment": "与 s23 做相同 dtype 的受限比较（若 shape 不重合，显式增补受审阅契约，不混报不同 shape）；先画本实现的依赖时间线。",
+    "symptoms": "TMEM S/P 覆盖冲突；PV 读到未发布的 P；自然指数与 exp2 的 scale 不一致。"
+  },
+  {
+    "id": "s41_fa4_pipeline",
+    "stage": 4,
+    "backend": "cute",
+    "kind": "attention",
+    "title": "FA4：matmul/softmax/correction overlap",
+    "prerequisites": [
+      "s40_fa4_base"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      }
+    ],
+    "purpose": "对应论文 forward pipeline，把软最大值与矩阵乘的依赖拆开，研究 correction 工作从关键路径移出的可能。",
+    "math": "每个 query tile 的分母与输出分子必须处于相同缩放基准；对多个在途 tile，数据和统计具有独立的生存期。",
+    "task": "自行设计多 tile overlap、warp specialization 和 correction 协作；保留基础版本。具体角色数量、buffer layout、barrier 和 launch 全由你实现。",
+    "evidence": "提交纸面依赖图与 profiler/源码证据，分别定位 TMA、QK、softmax、PV、correction 与 epilogue。正确性测试不能证明 overlap。",
+    "experiment": "固定 dtype/shape 比较单 tile 与多 tile；研究 SMEM/TMEM/寄存器压力，报告 spills 和占用变化。",
+    "symptoms": "统计来自另一个 tile；correction 与 PV 竞争 O；扩大 tile 后寄存器溢出；epilogue 提前读回。"
+  },
+  {
+    "id": "s42_exp",
+    "stage": 4,
+    "backend": "cute",
+    "kind": "exp2",
+    "title": "FA4：独立指数近似误差实验",
+    "prerequisites": [
+      "s31_port"
+    ],
+    "cases": [
+      {
+        "shape": [
+          4096
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "先独立验证软件指数，再进入 attention，避免把 approximation 误差与流水线 bug 混淆。",
+    "math": "目标 y=2^x，FP32 输入输出；测试区间 [-16,0] 和 [-80,8]。相对误差预算 1e-4，绝对 floor 1e-38。不得通过输出 BF16 来隐藏 FP32 误差。",
+    "task": "自行设计软件近似及硬件/软件指数分配，系数、映射与求值方式均由你实现；仓库不提供多项式答案。",
+    "evidence": "对区间端点、整数及密集采样检查误差；解释输入域、溢出/下溢范围和转换到 BF16 后的误差变化。",
+    "experiment": "单独记录 FP32 误差、BF16 量化误差、MUFU/FMA 指令与耗时；全软件指数不必更快。",
+    "symptoms": "负数区间出现不连续；整数边界误差跳变；近零输出相对误差被错误分母放大。"
+  },
+  {
+    "id": "s43_fa4_exp",
+    "stage": 4,
+    "backend": "cute",
+    "kind": "attention",
+    "title": "FA4：指数吞吐优化接入",
+    "prerequisites": [
+      "s41_fa4_pipeline",
+      "s42_exp"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      }
+    ],
+    "purpose": "在已经正确的流水线中加入指数机制，观察 B200 非矩阵执行资源的约束。",
+    "math": "exp(s)=2^(s log2(e))；attention 的 scale、最大值与缩放状态必须采用一致的底数。",
+    "task": "自行把经过独立误差验证的指数实现接入 softmax，并选择软件/硬件计算比例；保持 s41 独立入口。",
+    "evidence": "解释近似误差如何影响 softmax 分母、P 转换和 O；提供与 s41 相同输入的误差分布。",
+    "experiment": "固定 pipeline 和 tile，仅改变指数实现；检查 register 增加或 FMA 争用是否抵消收益。",
+    "symptoms": "exp 与 exp2 的系数乘两次；某些分支精度不同；指数优化后 spills 导致性能下降。"
+  },
+  {
+    "id": "s44_fa4_rescale",
+    "stage": 4,
+    "backend": "cute",
+    "kind": "attention",
+    "title": "FA4：条件重缩放与数值范围",
+    "prerequisites": [
+      "s43_fa4_exp"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "max_ramp"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "constant"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "max_ramp"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "constant"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      }
+    ],
+    "purpose": "加入论文的 conditional rescaling，研究减少非矩阵运算与保持有限动态范围的平衡。",
+    "math": "选定缩放锚点 a 后，l=Σ exp(s-a)，U=Σ exp(s-a)V，O=U/l。a 不必总等于真实最大值，但 l/U/P 的动态范围必须合法，最终 LSE 要恢复真实值。",
+    "task": "自行设计保留锚点、触发重缩放和最终归一化的协议；阈值单位、输入低精度上界和 P 转换必须推导，不把论文阈值盲套到自然指数。",
+    "evidence": "对 max_ramp 与 large 输入证明锚点一致性及溢出边界；记录触发频率；不能只测试最大值不变的常量输入。",
+    "experiment": "固定 s43 其余配置比较重缩放次数、非矩阵指令和时间；分开记录数值收益/代价。",
+    "symptoms": "分母锚点与 U 不一致；跳过更新但仍用新最大值；FP16/BF16 P 溢出；LSE 错而 O 看似正确。"
+  },
+  {
+    "id": "s45_fa4_edges",
+    "stage": 4,
+    "backend": "cute",
+    "kind": "attention",
+    "title": "FA4：尾部、causal 与精度扩展",
+    "prerequisites": [
+      "s44_fa4_rescale"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          2,
+          127,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          2,
+          2,
+          129,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "zero"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          257,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      }
+    ],
+    "purpose": "对已接入关键 forward 设计的受限版本扩大接口，保留所有前面的消融版本。",
+    "math": "causal 规则仍为 j≤i；逻辑尾块不改变 Tensor Core 的物理指令约束。FP16 与 BF16 的指数范围不同，重缩放策略必须重新核对。",
+    "task": "自行实现 TMA/SMEM/MMA/softmax 各层的边界、causal 和 D=64/128 支持。仍不实现 backward、varlen、GQA 或 paged attention。",
+    "evidence": "完成所有契约案例、memcheck/racecheck/synccheck 与设计证据。明确这仍是受限 FA4 forward 学习实现。",
+    "experiment": "对 causal 分开报告有效 pair FLOPs 与 dense equivalent；比较 D 和 dtype 时独立记录配置，避免混合优化来源。",
+    "symptoms": "TMA OOB 行为与 softmax mask 混淆；部分 tile 全屏蔽导致 NaN；FP16 在条件重缩放下溢出。"
+  },
+  {
+    "id": "s46_fa4_schedule",
+    "stage": 4,
+    "backend": "cute",
+    "kind": "attention",
+    "title": "FA4：调度与资源控制实验",
+    "prerequisites": [
+      "s45_fa4_edges"
+    ],
+    "cases": [
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          512,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          1,
+          256,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random",
+        "scale": 0.25
+      }
+    ],
+    "purpose": "用固定功能比较 CTA 调度与资源分配，补齐论文 scheduling 思考；无需达到官方性能。",
+    "math": "每个合法输出 query tile 恰好执行一次；调度改变执行顺序，不能改变数学依赖。causal 下不同 query tile 的有效 key 工作量不同。",
+    "task": "实现并比较至少两种你选择的 tile 调度/资源配置；持久化 CTA 可选，不预先规定 scheduler。保留前一版。",
+    "evidence": "给出无遗漏/无重复 ownership 证明；源码说明调度策略，测量 tail 与资源占用，而非仅给总时间。",
+    "experiment": "固定 shape/dtype/数学路径比较调度；记录是否受 CTA 尾部、register、SMEM 或 TMEM 容量限制。官方结果只作独立对照。",
+    "symptoms": "persistent 循环漏任务；causal 工作分配失衡；resource 配置导致 launch 失败；多 CTA 写同一输出。"
+  }
+]

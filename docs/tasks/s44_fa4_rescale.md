@@ -1,0 +1,64 @@
+# s44_fa4_rescale · FA4：条件重缩放与数值范围
+
+## 目的与联系
+
+加入论文的 conditional rescaling，研究减少非矩阵运算与保持有限动态范围的平衡。
+
+学习前置：`s43_fa4_exp`。学习依赖不等于强制导入；默认每关独立实现。若复用自己前关代码，在 `RUNTIME_REQUIRES` 声明具体 ID，未实现时会报告缺哪个模块。
+
+## 数学定义与推导任务
+
+选定缩放锚点 a 后，l=Σ exp(s-a)，U=Σ exp(s-a)V，O=U/l。a 不必总等于真实最大值，但 l/U/P 的动态范围必须合法，最终 LSE 要恢复真实值。
+
+自行设计保留锚点、触发重缩放和最终归一化的协议；阈值单位、输入低精度上界和 P 转换必须推导，不把论文阈值盲套到自然指数。
+
+## 精确契约
+
+Q/K/V 同 shape `[B,H,N,D]` contiguous；O 同 shape/dtype，LSE `[B,H,N]` FP32。输入 dtype 的舍入在生成时完成，数学参考基于已舍入输入。 只支持下表组合，有限输入，无空维度；没有 NaN/Inf 输入语义。attention 无 dropout/bias/GQA，自注意力 forward。scale 为有限正标量，默认 `1/sqrt(D)`，另测 0.25；mask 为下三角且包含对角线。
+
+| shape | dtype | causal |
+|---|---|---|
+| `(1, 1, 256, 128)` | bf16 | False |
+| `(1, 2, 512, 128)` | bf16 | False |
+
+案例模式：constant, large, max_ramp, random。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
+
+## 学生文件与接口
+
+允许修改：`students/cute/s44_fa4_rescale/entry.py`，也可在本关目录加入自己的 `.cuh`/Python helper，以及 `experiments/s44_fa4_rescale.md`。公共设施若需扩展，应另标明基础设施修改并保留其他关入口。
+
+完成 `prepare(inputs, outputs, workspace, config, stream)` 以及你自己定义的 `@cute.kernel`/`@cute.jit`；返回无参数 launcher。DLPack 包装、compile 可在 prepare 做，设备 layout 与 launch 不预设。
+
+`workspace_spec` 返回全局 scratch 规格；host 只负责分配，**不初始化算法状态**。所有输出必须由学生写入；每次 launch 必须能独立重复运行，不能依赖上次残留。完成后手动设置 `IMPLEMENTED=True`；这只开启入口，不表示正确性通过。默认 stream 参数是 PyTorch 当前 stream，禁止硬编码 stream 0。
+
+## 可执行验收
+
+```bash
+./lab doctor --stage 4
+./lab task s44_fa4_rescale
+./lab check s44_fa4_rescale --case 0 --timeout 180
+./lab check s44_fa4_rescale --timeout 300
+./lab sanitize s44_fa4_rescale --tool memcheck --case 0
+./lab sanitize s44_fa4_rescale --tool racecheck --case 0
+./lab sanitize s44_fa4_rescale --tool synccheck --case 0
+./lab bench s44_fa4_rescale --case 0 --warmup 5 --repeats 7 --iterations 10
+./lab profile s44_fa4_rescale --case 0
+```
+
+未完成时 check/bench 非零退出（2），明确 `STUDENT_UNIMPLEMENTED`；环境问题退出 4，正确性失败退出 3，超时退出 5。首次 CUDA build/DSL JIT 允许更长 timeout，但不能无限等待。测试共享入口也可执行 `./lab python -m pytest tests/student --exercise s44_fa4_rescale -q`；该入口自动使用与 `./lab check` 相同的 Conda、单 GPU 和 Toolkit 配置。
+
+**完成标准分两层：** 所有契约案例在普通/非默认 stream、重复调用、输出预填 NaN 的条件下通过且输入未变；适用 sanitizer 无错误。再完成以下设计证据，AI review 后才记为本关学习完成。数值通过并不自动证明算法/流水线结构。
+
+对 max_ramp 与 large 输入证明锚点一致性及溢出边界；记录触发频率；不能只测试最大值不变的常量输入。
+
+## 性能实验与记录
+
+固定 s43 其余配置比较重缩放次数、非矩阵指令和时间；分开记录数值收益/代价。
+
+复制或填写 [本关实验记录](../../experiments/s44_fa4_rescale.md)。记录源代码 hash、GPU、软件、shape、dtype、scale、mask、配置、误差、median/min/max/stdev、raw artifact 与未解决问题。bench 先运行本 case 的完整检查；全关 check 是通关依据。未实现代码不存在真实性能。
+
+## 调试与常见症状
+
+分母锚点与 U 不一致；跳过更新但仍用新最大值；FP16/BF16 P 溢出；LSE 错而 O 看似正确。
+
+先 `--case 0`；失败时从报告的 case/index 固定随机种子复现，再缩到契约中最小 shape，记录第一次错误的坐标。用 `CUDA_LAUNCH_BLOCKING=1 ./lab check ... --case ...` 定位错误 launch；该模式不用于性能结论。超时终止的是本次子进程，不是其他 GPU 用户进程。参见 [调试](../debugging.md) 与 [Blackwell 接口](../blackwell.md)。

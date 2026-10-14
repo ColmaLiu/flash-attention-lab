@@ -1,0 +1,11 @@
+.venv/
+.cache/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+/artifacts/
+progress/results/
+/progress/enabled.json
+/build/
+/dist/

@@ -1,0 +1,35 @@
+[
+  {
+    "name": "FA1",
+    "url": "https://arxiv.org/abs/2205.14135",
+    "commit": null
+  },
+  {
+    "name": "FA2",
+    "url": "https://arxiv.org/abs/2307.08691",
+    "commit": null
+  },
+  {
+    "name": "FA4",
+    "url": "https://arxiv.org/html/2603.05451v1",
+    "commit": null
+  },
+  {
+    "name": "FA2 official forward",
+    "url": "https://github.com/Dao-AILab/flash-attention/blob/1fc0221183e799363001394a12dd9e78e15f5dda/csrc/flash_attn/src/flash_fwd_kernel.h",
+    "commit": "1fc0221183e799363001394a12dd9e78e15f5dda",
+    "sha256": "9b31cdff4009fcd0e1bc52f9b97907d226442db24e0a150d8dfed0711ee64dda"
+  },
+  {
+    "name": "FA4 SM100 forward",
+    "url": "https://github.com/Dao-AILab/flash-attention/blob/1fc0221183e799363001394a12dd9e78e15f5dda/flash_attn/cute/flash_fwd_sm100.py",
+    "commit": "1fc0221183e799363001394a12dd9e78e15f5dda",
+    "sha256": "c8cbc40b97c9f2a8fa5ce3da5dbe4f0eb80787158f1e4398889ca02572ec1cdb"
+  },
+  {
+    "name": "CUTLASS v4.4.1 setup",
+    "url": "https://github.com/NVIDIA/cutlass/blob/4370102f9dacab813282e1d67722fceb0b90a019/python/CuTeDSL/setup.sh",
+    "commit": "4370102f9dacab813282e1d67722fceb0b90a019",
+    "sha256": "dd07c90fbc211cdc8416bcc425eef239351b9ce3578aba27c296344279e92ae6"
+  }
+]

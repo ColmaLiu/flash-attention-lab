@@ -1,0 +1,11 @@
+name: flash-attention-lab
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - setuptools>=75
+  - wheel
+# bootstrap.sh installs the project dependencies from requirements.txt.
+# Use bootstrap.sh --with-cuda to also provision CUDA 12.8 and a host compiler.

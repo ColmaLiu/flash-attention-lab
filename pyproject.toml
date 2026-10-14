@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flash-attention-lab"
+version = "0.1.0"
+description = "B200 kernel exercises; student kernels intentionally unimplemented"
+requires-python = ">=3.12,<3.13"
+dependencies = ["torch==2.10.0", "nvidia-cutlass-dsl==4.4.1", "cuda-python==12.9.4", "cuda-bindings==12.9.4", "ninja==1.13.0", "pytest==9.0.2"]
+
+[project.scripts]
+fa-lab = "flash_attention_lab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["flash_attention_lab*", "benchmarks*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/infra"]
+addopts = "-ra"
+markers = ["gpu: requires the selected GPU", "student: explicit student acceptance, fails when unimplemented"]
