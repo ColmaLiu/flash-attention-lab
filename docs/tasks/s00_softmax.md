@@ -4,7 +4,7 @@
 
 第一关只处理 4 行、每行 128 个 FP32 数，建立从 CUDA 源码到误差报告的闭环。性能不是通关门槛。
 
-学习前置：无；先运行 `./lab doctor` 与 `./lab smoke`。。学习依赖不等于强制导入；默认每关独立实现。若复用自己前关代码，在 `RUNTIME_REQUIRES` 声明具体 ID，未实现时会报告缺哪个模块。
+学习前置：无；先运行 `./lab doctor` 与 `./lab smoke`。学习依赖不等于强制导入；默认每关独立实现。若复用自己前关代码，在 `RUNTIME_REQUIRES` 声明具体 ID，未实现时会报告缺哪个模块。
 
 ## 数学定义与推导任务
 
@@ -14,13 +14,28 @@
 
 ## 精确契约
 
-X `[R,C]` FP32 contiguous；Y 同 shape/dtype。 只支持下表组合，有限输入，无空维度；没有 NaN/Inf 输入语义。attention 无 dropout/bias/GQA，自注意力 forward。scale 为有限正标量，默认 `1/sqrt(D)`，另测 0.25；mask 为下三角且包含对角线。
+X `[R,C]` FP32 contiguous；Y 同 shape/dtype。 只支持下表组合，有限输入，无空维度；没有 NaN/Inf 输入语义。本关不应用 attention 的 scale 或 causal mask。
 
 | shape | dtype | causal |
 |---|---|---|
 | `(4, 128)` | fp32 | False |
 
 案例模式：constant, large, negative, random, shifted, zero。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
+
+### 参数字典：精确键名
+
+键名区分大小写，以下是本关完整的输入/输出集合；数学符号 `X/Y/Q/K/V` 不能直接用作字典键。所有 tensor 均位于同一 GPU、连续存储，最后一维连续；shape 描述完整逻辑 tensor，不预先规定 tile、CTA 或 warp 的划分。
+
+| 参数 | 字符串键 | shape | dtype | 含义 |
+|---|---|---|---|---|
+| `inputs` | `"x"` | `[4,128]` | FP32 | 输入 X；只读 |
+| `outputs` | `"y"` | `[4,128]` | FP32 | 逐行 softmax 概率 |
+
+C++ 使用 `inputs.at("x")` / `outputs.at("y")` 取得 `TensorView`；维度从 `shape` 读取，数据地址在 `data`，dtype 使用 `DType` 枚举。输入只读，输出指针可写；`const TensorMap&` 限制的是描述符，不是输出显存。
+
+`options` 中保留公共默认字段 `scale=1.0`、`causal=False`（C++ 中为 `0.0`），它们不参与本关数学运算，不应据此增加缩放或 mask。C++ 的 `Options` 值统一为 `double`。
+
+`workspace` 没有预设键，初始为空；其键、shape、dtype 完全来自本关 `workspace_spec`。输出和 workspace 已由 host 分配，但算法状态未经初始化。自定义数值配置来自 `entry.CONFIG` 或调用参数；shape 不会自动作为配置键传入。完整参数合并和类型约定见 [公共接口](../contracts.md)。
 
 ## 学生文件与接口
 

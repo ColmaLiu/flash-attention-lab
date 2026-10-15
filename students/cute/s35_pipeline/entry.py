@@ -13,6 +13,13 @@ def workspace_spec(inputs, config):
     return {}
 
 
+# ENTRY CONTRACT (case-sensitive keys; contiguous tensors on one GPU):
+# inputs["x"]: [T,128,64], torch.float16; input X; read-only.
+# outputs["y"]: [T,128,64], torch.float32; Y = 2X + 1; T counts data tiles.
+# config contains scale=1.0 and causal=False; neither affects this exercise.
+# workspace: no fixed keys; defined by workspace_spec; allocated but uninitialized.
+# Outputs are preallocated, not initialized; input tensors must not be modified.
+# Full contract and supported shapes: docs/tasks/s35_pipeline.md.
 def prepare(inputs, outputs, workspace, config, stream):
     # STUDENT_TODO[compile-and-launch]: implement your CuTe kernel and its
     # layout/mapping/synchronization. Compile here; return a zero-argument

@@ -13,6 +13,13 @@ def workspace_spec(inputs, config):
     return {}
 
 
+# ENTRY CONTRACT (case-sensitive keys; contiguous tensors on one GPU):
+# inputs["x"]: [M,N], torch.float32; input X; read-only.
+# outputs["y"]: [M,N], torch.float32; Y = X; no input/output aliasing.
+# config contains scale=1.0 and causal=False; neither affects this exercise.
+# workspace: no fixed keys; defined by workspace_spec; allocated but uninitialized.
+# Outputs are preallocated, not initialized; input tensors must not be modified.
+# Full contract and supported shapes: docs/tasks/s32_async.md.
 def prepare(inputs, outputs, workspace, config, stream):
     # STUDENT_TODO[compile-and-launch]: implement your CuTe kernel and its
     # layout/mapping/synchronization. Compile here; return a zero-argument

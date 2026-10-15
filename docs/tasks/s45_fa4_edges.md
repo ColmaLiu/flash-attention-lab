@@ -40,6 +40,24 @@ Q/K/V 同 shape `[B,H,N,D]` contiguous；O 同 shape/dtype，LSE `[B,H,N]` FP32�
 
 案例模式：large, random, zero。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 
+### 参数字典：精确键名
+
+键名区分大小写，以下是本关完整的输入/输出集合；数学符号 `X/Y/Q/K/V` 不能直接用作字典键。所有 tensor 均位于同一 GPU、连续存储，最后一维连续；shape 描述完整逻辑 tensor，不预先规定 tile、CTA 或 warp 的划分。
+
+| 参数 | 字符串键 | shape | dtype | 含义 |
+|---|---|---|---|---|
+| `inputs` | `"q"` | `[B,H,N,D]` | BF16 / FP16 | 输入 Q；三者同 shape/dtype/device，只读 |
+| `inputs` | `"k"` | `[B,H,N,D]` | BF16 / FP16 | 输入 K；三者同 shape/dtype/device，只读 |
+| `inputs` | `"v"` | `[B,H,N,D]` | BF16 / FP16 | 输入 V；三者同 shape/dtype/device，只读 |
+| `outputs` | `"o"` | `[B,H,N,D]` | BF16 / FP16 | attention 输出 O；与输入同 dtype |
+| `outputs` | `"lse"` | `[B,H,N]` | FP32 | 每个 query 行的自然对数 logsumexp(scale * QK^T)，只包含 mask 允许的 key |
+
+CuTe 的 host 入口使用 `inputs["q"]` / `outputs["o"]`，值是 `torch.Tensor`；这不是 CUDA C++ 的 `TensorView`。转换为 CuTe 参数的方式由你设计。
+
+`config["scale"]` 是有限正标量，默认 `1/sqrt(D)`；`config["causal"]` 指定是否只允许 `j <= i`。Python 中 causal 为布尔值。接口不提供 S/P 或中间 m/l tensor；如设计需要全局中间状态，在 `workspace_spec` 自行声明。
+
+`workspace` 没有预设键，初始为空；其键、shape、dtype 完全来自本关 `workspace_spec`。输出和 workspace 已由 host 分配，但算法状态未经初始化。自定义数值配置来自 `entry.CONFIG` 或调用参数；shape 不会自动作为配置键传入。完整参数合并和类型约定见 [公共接口](../contracts.md)。
+
 ## 学生文件与接口
 
 允许修改：`students/cute/s45_fa4_edges/entry.py`，也可在本关目录加入自己的 `.cuh`/Python helper，以及 `experiments/s45_fa4_edges.md`。公共设施若需扩展，应另标明基础设施修改并保留其他关入口。
