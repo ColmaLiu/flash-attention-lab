@@ -28,3 +28,25 @@ lab_ncu="$(python -c 'from flash_attention_lab.runtime import require_tool; prin
 先在实际输出中核对 metric 名称，再增加 counters。初期问题：s0 合并访问与 launch 开销；s1 HBM/L2 流量和输出重写；s2 CTA 数、warp 通信、非矩阵操作与 Tensor Core 指令；s3 producer/consumer stall、SMEM/TMEM 生命周期；s4 指数/MMA overlap、correction、spills 和调度尾部。吞吐低不能独自区分“等待”与“计算少”，须结合源码、数据依赖和时间线。
 
 NCU replay 会改变时间和缓存行为，正式 timing 用独立 benchmark；时间线可另用 `nsys profile -t cuda,nvtx` 包住同样的命令。计数器权限若返回 `ERR_NVGPUCTRPERM`，记录为环境限制，不修改系统权限。工具路径可通过 `LAB_NCU`、`LAB_SANITIZER` 配置。
+
+## VS Code / clangd
+
+clangd 需要项目头文件、Python/PyTorch 头文件和正确的 CUDA Toolkit 路径。
+在仓库根目录激活独立环境，再生成本机的编辑器编译数据库：
+
+```bash
+source scripts/activate.sh
+# 若 PATH 中的 nvcc 不是项目要求的 12.8，先设置 LAB_CUDA_HOME。
+python scripts/configure_clangd.py
+```
+
+脚本遵循 `LAB_CUDA_HOME` / `CUDA_HOME` / PATH 和 `LAB_GPU` / `CUDA_VISIBLE_DEVICES`，
+检查所选 GPU 与构建环境后，为 CUDA 源文件、公共头文件和 C++ 绑定生成
+`compile_commands.json`。该文件含本机绝对路径，已被 Git 忽略；切换工具链、
+Conda 环境或新增 CUDA 文件后重新生成。脚本只配置解析，不编译或运行学生 kernel。
+`.vscode/` 中的个人编辑器配置也被 Git 忽略。
+
+在 VS Code 命令面板执行 **clangd: Restart language server**。使用支持 SM100a 的
+clangd；可通过 `clangd --check=students/cuda/s00_softmax/kernel.cu` 独立检查解析诊断。
+编辑器使用 Clang CUDA 参数，实际构建仍使用 `build.py` 的 nvcc 参数；
+无编辑器诊断不代表 nvcc 构建成功或学生正确性通过。

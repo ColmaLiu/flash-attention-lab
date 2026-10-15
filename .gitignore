@@ -9,3 +9,5 @@ progress/results/
 /progress/enabled.json
 /build/
 /dist/
+/compile_commands.json
+/.vscode/
