@@ -80,7 +80,7 @@ def test_cli_rejects_invalid_case_and_bench_counts():
     assert main(["check","s00_softmax","--case","9999"]) == 6
     args=parser().parse_args(["bench","s40_fa4_base","--case","0","--warmup","2","--repeats","3","--iterations","4"])
     assert (args.warmup,args.repeats,args.iterations)==(2,3,4)
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         parser().parse_args(["bench","s40_fa4_base","--warmup","0"])
 
 

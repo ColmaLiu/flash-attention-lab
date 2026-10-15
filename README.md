@@ -17,7 +17,6 @@ bash scripts/bootstrap.sh
 ./lab doctor                  # 检查选中设备、依赖和工具链
 ./lab python -m pytest -q      # 基础设施测试，不执行学生 kernel
 ./lab smoke --timeout 600      # 实际编译、绑定、GPU 调用和计时设施检查
-./lab status                  # 查看全部关卡；初始均为未实现
 ```
 
 安装脚本创建 `flash-attention-lab` Conda 环境，并从公开包源安装项目依赖。`./lab` 自动激活该环境，可在任意目录调用其路径；无需预先存在缓存、结果文件或 Git 元数据。首次编译/JIT 较慢，后续运行复用缓存。
@@ -38,12 +37,7 @@ LAB_GPU=1 ./lab doctor
 
 先读 [协作边界](AGENTS.md)，再打开 [s00_softmax](docs/tasks/s00_softmax.md)。[路线表](docs/roadmap.md) 列出所有任务、文件、依赖和验收命令；[验证流程](docs/validation.md) 说明检查结果的含义。
 
-```bash
-./lab task s00_softmax
-./lab check s00_softmax        # 实现前应报 STUDENT_UNIMPLEMENTED，退出码 2
-```
-
-实现 `students/cuda/s00_softmax/kernel.cu` 中的 `student_launch` 及自己的设备模块。launch、线程映射、reduction 和 shared memory 均由你设计；需要全局 scratch 时填写同目录 `entry.py:workspace_spec`。完成后设置 `IMPLEMENTED=True`，运行：
+实现 `students/cuda/s00_softmax/kernel.cu` 中的 `student_launch` 及自己的设备模块。launch、线程映射、reduction 和 shared memory 均由你设计；需要全局 scratch 时填写同目录 `entry.py:workspace_spec`。实现前执行验收会报 `STUDENT_UNIMPLEMENTED`，退出码 2。完成后设置 `IMPLEMENTED=True`，运行：
 
 ```bash
 ./lab check s00_softmax --case 0
@@ -56,7 +50,23 @@ LAB_GPU=1 ./lab doctor
 
 通关要求为全部声明案例通过、必要内存安全检查无错误，并在 [实验记录](experiments/s00_softmax.md) 中解释稳定性与线程 ownership。完成设计 review 后进入 `s01_reduce`；第一关没有性能门槛。缺少 sanitizer/profiler 时会说明原因，不能将其计为通过。
 
-## 目录与阶段入口
+## 日常命令
+
+上面的验收流程适用于所有关卡，替换关卡 ID 即可。其他常用入口：
+
+| 命令 | 用途 |
+|---|---|
+| `./lab list --stage 3` | 查看该阶段的任务；doctor、smoke、status 也支持 `--stage` |
+| `./lab task ID` | 查看 tensor 键名、学生文件和完整任务文档路径；`-v` 增加目的与案例列表 |
+| `./lab status` | 查看各关状态和记录，默认不运行 kernel |
+| `./lab profile ID --case 0` | 对指定案例运行 Nsight Compute |
+| `./lab --help` | 查看全部命令；子命令加 `--help` 查看参数 |
+
+每关独立运行 `./lab check ID` 或 `./lab bench ID`。status 根据实现标记和验收记录汇总各关状态；完整状态和退出码见 [状态语义](progress/README.md)。
+
+命令默认使用英文：check 逐 case 显示 PASS/FAIL 和失败原因；bench 显示计时，不展开精度明细。`--verbose`（`-v`）展开细节及报告路径，`--json` 输出完整机器报告，例如 `./lab bench s00_softmax --json`。日志与结果保存在已忽略的 `artifacts/` 中。完整输出约定见 [终端输出说明](docs/cli.md)。
+
+## 目录
 
 ```text
 students/cuda/         11 个 CUDA C++ 练习，每关 kernel.cu + entry.py
@@ -66,26 +76,13 @@ tests/               基础设施测试与显式学生验收
 benchmarks/           可选官方 FA4 性能对照
 docs/                安装、路线、契约、算法说明和 27 关任务
 experiments/          空白实验记录模板
-progress/             默认启用配置和状态语义
+progress/             验收记录和状态语义
 scripts/              安装和基础设施验证入口
 curriculum.json       关卡支持域、案例与学习依赖
 ```
 
-```bash
-./lab list --stage 4
-./lab doctor --stage 3
-./lab smoke --stage 3
-./lab status --stage 2
-./lab check s21_fa2_sliced
-./lab bench s41_fa4_pipeline --case 0 --warmup 5 --repeats 7 --iterations 10
-./lab profile s41_fa4_pipeline --case 0
-./lab enable s01_reduce
-./lab status --check-enabled
-./lab python -m pytest tests/student --collect-only -q
-```
+各代实现保留独立入口。学习前置与代码复用依赖分别声明；缺少学生模块会报告具体名称，不调用参考或官方实现替代。
 
-各代实现保留独立入口。学习前置与代码复用依赖分别声明；缺少学生模块会报告具体名称，不调用参考或官方实现替代。详见 [状态语义](progress/README.md)。
-
-运行生成的 `artifacts/`、`.cache/`、`progress/enabled.json` 和 `progress/results/` 均被 Git 忽略，缺失时按需创建。实验模板和源代码纳入版本管理；发布公共模板时不附带个人进度、测量结果或机器快照。
+运行生成的 `artifacts/`、`.cache/` 和 `progress/results/` 均被 Git 忽略，缺失时按需创建。实验模板和源代码纳入版本管理；发布公共模板时不附带个人进度、测量结果或机器快照。
 
 进一步阅读：[接口](docs/contracts.md) · [数值](docs/numerics.md) · [IO 推导](docs/io_model.md) · [Blackwell](docs/blackwell.md) · [调试](docs/debugging.md) · [计时](docs/benchmarking.md) · [来源版本](docs/sources.md)。

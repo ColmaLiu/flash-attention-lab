@@ -18,13 +18,13 @@
 
 | 检查 | 完成标准 |
 |---|---|
-| doctor | 所选设备和所需 backend 可用；区分 driver、Toolkit、PyTorch runtime、DSL；错误时仍输出诊断 JSON |
+| doctor | 所选设备和所需 backend 可用；区分 driver、Toolkit、PyTorch runtime、DSL；默认显示摘要，`--verbose` 展开诊断，`--json` 输出完整报告 |
 | pip check | 无依赖冲突 |
 | 基础设施 pytest | 契约、独立参考、不正确输出拒绝、前置依赖、超时、运行配置测试通过 |
 | 学生测试发现 | 发现 27 个学生验收入口；发现成功不代表执行成功 |
 | verify_scaffolding | 全部学生模块导入；未实现关的 check/bench 均返回 2，错误包含关卡名；已实现关另行显式验收 |
 | smoke | 选定阶段的输入/host 校验/FP64 参考有效；CUDA 空绑定明确报 TODO；独立 CUDA/CuTe 标量 sentinel 编译、调用、计时正常 |
-| status | 列出所有关卡、启用状态和原因；新克隆无历史正确性结果 |
+| status | 列出所有关卡、验收状态和原因；新克隆无历史正确性结果 |
 
 smoke 可以用 `--stage 0` 到 `--stage 4` 分阶段运行。首次编译时间较长，可调整 timeout。sentinel 只写一个标量，不含练习答案，不进入学生调用路径；它的计时只验证设施。
 

@@ -4,7 +4,7 @@
 
 默认 warmup=5、repeats=7、每组 iterations=10，CUDA Event 测当前 stream 的时间跨度，每组末等待完成，报告 per-launch median/min/max/stdev 和全部样本。Python dispatch 可能使 GPU stream 出现空隙，尤其对微小 kernel；因此命名为 `gpu_stream_ms`，不能声称它必然等于单 kernel 的设备执行时间。host_batch 是同一预分配调用组的 host 时间，含 event 操作和最后等待，**不是分配/转换全包含的端到端延迟**。若要端到端，另对 `api.run` 记录 wall-time 并说明是否包括输入创建与首次编译。
 
-计时之后再次比较结果，防止重复执行后状态污染。JSON 包含 GPU/driver/Toolkit/PyTorch runtime/DSL、代码指纹、shape/dtype/mask/scale/seed、误差、scratch 字节、配置及完整样本。自定义 tile/stage 等参数应放入本关 entry.CONFIG（或程序调用的 config）并记录；修改 entry 中常量时也要写实验表。
+计时之后再次比较结果，防止重复执行后状态污染。英文终端输出显示输入、GPU、计时中位数/波动和采样数，不显示精度明细；`--verbose` 展开样本与配置，`--json` 输出包含精度结果的完整报告。保存的 JSON 包含 GPU/driver/Toolkit/PyTorch runtime/DSL、代码指纹、shape/dtype/mask/scale/seed、误差、scratch 字节、配置及完整样本。自定义 tile/stage 等参数应放入本关 entry.CONFIG（或程序调用的 config）并记录；修改 entry 中常量时也要写实验表。
 
 attention FLOPs 只统计 QK 与 PV，FMA=2：非因果 `4 B H N² D`；因果有效工作 `4 B H [N(N+1)/2] D`，另给 dense-equivalent `4 B H N² D`。不包括指数、reduction、重缩放、padding 或 mask tile 中无效 MMA。不要把有效 TFLOP/s 当作实际执行指令 FLOPs。
 

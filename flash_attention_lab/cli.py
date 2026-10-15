@@ -1,11 +1,21 @@
 import argparse
 import json
 import os
+from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
+import tempfile
+import time
+
 from .errors import CorrectnessFailure, EnvironmentUnsupported, StudentNotImplemented
-from .registry import CATALOG, EXERCISES, ROOT, fingerprint, load_student, selected
+from .registry import EXERCISES, ROOT, fingerprint, load_student, selected
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
 
 
 def positive_int(value):
@@ -15,18 +25,24 @@ def positive_int(value):
 
 
 def parser():
-    p = argparse.ArgumentParser(description="B200 FlashAttention learning infrastructure; no student fallback")
-    sub = p.add_subparsers(dest="command", required=True)
+    display = argparse.ArgumentParser(add_help=False)
+    display.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="full JSON report")
+    display.add_argument("--verbose", "-v", action="store_true", default=argparse.SUPPRESS, help="show diagnostics, details and report paths")
+    p = Parser(prog="./lab", description="FlashAttention Lab: GPU kernel exercises", parents=[display])
+    public = "doctor,list,task,status,check,bench,smoke,sanitize,profile,python"
+    sub = p.add_subparsers(dest="command", required=True, metavar="{" + public + "}")
+    descriptions = {"doctor": "check environment", "smoke": "check infrastructure", "status": "exercise status", "list": "list exercises", "task": "show task and tensor contract", "check": "validate student kernel", "bench": "validate, then benchmark", "sanitize": "run Compute Sanitizer", "profile": "run Nsight Compute", "python": "run Python in the project environment"}
+    def add(command):
+        kwargs = {"help": descriptions[command]} if command in descriptions else {}
+        return sub.add_parser(command, parents=[display], **kwargs)
     for command in ("doctor", "smoke", "status", "list"):
-        q = sub.add_parser(command)
-        q.add_argument("--stage", type=int, choices=range(5))
+        q = add(command)
+        q.add_argument("--stage", type=int, choices=range(5), help="select a stage")
         if command == "smoke": q.add_argument("--timeout", type=float, default=600)
-        if command == "status": q.add_argument("--check-enabled", action="store_true")
-    for command in ("task", "enable"):
-        q = sub.add_parser(command); q.add_argument("exercise", choices=EXERCISES)
+    q = add("task"); q.add_argument("exercise", choices=EXERCISES, metavar="ID")
     for command in ("check", "bench", "sanitize", "profile", "_worker", "_profile"):
-        q = sub.add_parser(command)
-        q.add_argument("exercise", choices=EXERCISES)
+        q = add(command)
+        q.add_argument("exercise", choices=EXERCISES, metavar="ID")
         q.add_argument("--case", type=int)
         q.add_argument("--timeout", type=float, default=180)
         if command in ("bench", "_worker"):
@@ -35,23 +51,35 @@ def parser():
             q.add_argument("--iterations", type=positive_int, default=10)
         if command == "sanitize": q.add_argument("--tool", choices=("memcheck", "racecheck", "synccheck", "initcheck"), default="memcheck")
         if command == "_worker": q.add_argument("--operation", choices=("check", "bench"), required=True)
-    q = sub.add_parser("_smoke"); q.add_argument("--stage", type=int, choices=range(5))
-    q = sub.add_parser("python", help="run Python with the same environment/device configuration")
-    q.add_argument("args", nargs=argparse.REMAINDER)
+        if command.startswith("_"): q.add_argument("--report-file", help=argparse.SUPPRESS)
+    q = add("_smoke"); q.add_argument("--stage", type=int, choices=range(5)); q.add_argument("--report-file", help=argparse.SUPPRESS)
+    q = add("python"); q.add_argument("args", nargs=argparse.REMAINDER)
     return p
 
 
-def bounded(command, timeout):
+def bounded(command, timeout, *, output=None):
     if timeout <= 0: raise ValueError("timeout must be positive")
-    child = subprocess.Popen(command, cwd=ROOT, start_new_session=True)
+    child = subprocess.Popen(command, cwd=ROOT, start_new_session=True, stdout=output,
+                             stderr=subprocess.STDOUT if output is not None else None)
     try: return child.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
         os.killpg(child.pid, signal.SIGTERM)
         try: child.wait(timeout=3)
         except subprocess.TimeoutExpired:
             os.killpg(child.pid, signal.SIGKILL); child.wait()
-        print(f"TIMEOUT: exceeded {timeout}s; only this command's process group was stopped", file=sys.stderr)
+        if isinstance(exc, KeyboardInterrupt): raise
         return 5
+
+
+def emit(result, args=None):
+    if args is not None and getattr(args, "report_file", None):
+        Path(args.report_file).write_text(json.dumps(result, ensure_ascii=False) + "\n")
+    elif args is not None and getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        from .presentation import render
+        render(result, verbose=getattr(args, "verbose", False),
+               stream=sys.stderr if result.get("message") and result.get("exit_code") else sys.stdout)
 
 
 def worker_command(args, operation):
@@ -62,150 +90,227 @@ def worker_command(args, operation):
     return cmd
 
 
-def show_status(stage, check_enabled=False):
+def managed(command, args, *, tool=False):
+    """Separate structured worker results from compiler/tool stdout and stderr."""
+    name = args.command
+    directory = ROOT / "artifacts/logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    log = directory / (name + "_" + str(time.time_ns()) + ".log")
+    if not getattr(args, "json", False) and (sys.stderr.isatty() or getattr(args, "verbose", False)):
+        from .presentation import Terminal, path_label
+        ui = Terminal(sys.stderr)
+        ui.note(f"Running {name}" + (f" {args.exercise}" if hasattr(args, "exercise") else "") + "...")
+        if getattr(args, "verbose", False): ui.line("Log", path_label(log))
+    with tempfile.TemporaryDirectory(prefix="falab-report-") as folder:
+        report = Path(folder) / "result.json"
+        with log.open("w") as output:
+            code = bounded([*command, "--report-file", str(report)], args.timeout, output=output)
+        try:
+            result = json.loads(report.read_text()) if report.exists() else {}
+            if not isinstance(result, dict): raise ValueError("report must be an object")
+        except (ValueError, OSError) as exc:
+            code = 6
+            result = {"state": "EXECUTION_ERROR", "exit_code": 6, "message": f"Cannot read worker report: {exc}"}
+    if code == 0 and result.get("exit_code", 0) != 0:
+        code = 6
+        result = {"state": "EXECUTION_ERROR", "exit_code": 6,
+                  "message": "Worker reported failure but exited with code 0.", "worker_report": result}
+    if code < 0: code = 128 - code
+    if code != 0 and result.get("exit_code", 0) == 0:
+        state = "TIMEOUT" if code == 5 else "TOOL_FAILED" if tool else "EXECUTION_ERROR"
+        message = f"Timed out after {args.timeout:g}s; stopped this command's processes." if code == 5 else "Worker or tool exited unsuccessfully."
+        if code != 5:
+            with log.open("rb") as handle:
+                handle.seek(0, 2); handle.seek(max(0, handle.tell() - 6000))
+                tail = handle.read().decode(errors="replace").strip()
+            if tail: message += "\n" + tail
+        result = {"state": state, "message": message}
+    if code == 0 and not result:
+        code = 6
+        result = {"state": "EXECUTION_ERROR", "message": "Worker exited without a validation report."}
+    result.update(command=name, exit_code=code, log=str(log))
+    if hasattr(args, "exercise"): result["exercise"] = args.exercise
+    if name == "sanitize" and code == 0:
+        result = {"command": name, "exit_code": 0, "state": "SANITIZER_PASSED", "exercise": args.exercise,
+                  "case_index": 0 if args.case is None else args.case, "tool": args.tool,
+                  "validation": result, "log": str(log)}
+    from .reporting import save_artifact
+    result["artifact"] = str(save_artifact(name, result))
+    return result
+
+
+def brief(e):
+    return {key: e[key] for key in ("id", "title", "stage", "backend", "prerequisites")} | {"case_count": len(e["cases"])}
+
+
+def status_report(stage):
     from .environment import require_environment
-    enabled_path = ROOT / "progress" / "enabled.json"
-    enabled = json.loads((enabled_path if enabled_path.exists() else ROOT / "progress/defaults.json").read_text())
     env = {}
-    for backend in {e["backend"] for e in selected(stage)}:
-        try: require_environment(backend); env[backend] = "ENVIRONMENT_OK (run smoke to verify compilation)"
+    for backend in sorted({e["backend"] for e in selected(stage)}):
+        try: require_environment(backend); env[backend] = "ENVIRONMENT_OK"
         except EnvironmentUnsupported as exc: env[backend] = f"ENV_UNSUPPORTED: {exc}"
-    print(json.dumps({"environment": env, "note": "inventory only; no correctness test implied"}, ensure_ascii=False))
-    rc = 0
+    records, digest = [], None
     for e in selected(stage):
         module = load_student(e)
-        reason = "entry flag is False"
-        state = "STUDENT_UNIMPLEMENTED"
+        state, reason = "STUDENT_UNIMPLEMENTED", "-"
         if module.IMPLEMENTED:
             missing = [d for d in module.RUNTIME_REQUIRES if d not in EXERCISES or not load_student(EXERCISES[d]).IMPLEMENTED]
-            if missing: reason = "missing runtime modules: " + ", ".join(missing)
+            if missing: reason = "Missing modules: " + ", ".join(missing)
             elif env[e["backend"]].startswith("ENV_UNSUPPORTED"):
-                state, reason = "ENV_UNSUPPORTED", env[e["backend"]]
+                state, reason = "ENV_UNSUPPORTED", "See environment diagnostics"
             else:
-                state, reason = "IMPLEMENTED_UNVERIFIED", "no full-contract result for current source"
-                path = ROOT / "progress" / "results" / (e["id"] + ".json")
+                state, reason = "IMPLEMENTED_UNVERIFIED", "No full check recorded"
+                path = ROOT / "progress/results" / (e["id"] + ".json")
                 if path.exists():
                     data = json.loads(path.read_text())
-                    if data.get("fingerprint") == fingerprint(e) and data.get("full_contract"):
-                        state, reason = data["state"], data.get("reason", "numerical result only; design review separate")
-                    else: reason = "previous result stale or only a single-case check"
-        print(f"{e['id']:23} {'enabled' if e['id'] in enabled else 'disabled':8} {state:24} {reason}")
-        if check_enabled and e["id"] in enabled:
-            code = bounded([sys.executable, "-m", "flash_attention_lab", "_worker", e["id"], "--operation", "check"], 300)
-            rc = max(rc, code)
-    return rc
+                    if digest is None: digest = fingerprint(e)
+                    if data.get("fingerprint") == digest and data.get("full_contract"):
+                        state, reason = data["state"], data.get("reason", "Current full check; design review separate")
+                    else: reason = "Stale or partial check"
+        records.append({**brief(e), "state": state, "reason": reason})
+    return {"command": "status", "state": "INVENTORY", "environment": env, "exercises": records,
+            "note": "inventory only; no correctness test implied", "exit_code": 0}
+
+
+def error_report(exc, args):
+    if isinstance(exc, StudentNotImplemented) or "STUDENT_TODO" in str(exc): state, code = "STUDENT_UNIMPLEMENTED", 2
+    elif isinstance(exc, (EnvironmentUnsupported, ImportError)): state, code = "ENV_UNSUPPORTED", 4
+    elif isinstance(exc, (CorrectnessFailure, AssertionError)): state, code = "CORRECTNESS_FAILED", 3
+    elif isinstance(exc, KeyboardInterrupt): state, code = "INTERRUPTED", 130
+    else: state, code = "EXECUTION_ERROR", 6
+    command = getattr(args, "command", "lab")
+    if command == "_worker": command = args.operation
+    elif command == "_smoke": command = "smoke"
+    elif command == "_profile": command = "profile"
+    result = {**getattr(exc, "check_report", {}), "command": command, "state": state, "exit_code": code, "message": str(exc) or state}
+    exercise = getattr(args, "exercise", None)
+    if exercise:
+        result["exercise"] = exercise
+        case = re.search(r"\bcase=(\d+)", str(exc))
+        case_index = int(case.group(1)) if case else getattr(args, "case", None)
+        if case_index is None:
+            case_index = next((c["case"] for c in result.get("cases", []) if c["state"] in ("FAIL", "ERROR")), None)
+        if case_index is not None: result["case_index"] = case_index
+        if state == "STUDENT_UNIMPLEMENTED": result["hint"] = f"Task: ./lab task {exercise}"
+        elif state == "CORRECTNESS_FAILED" or case_index is not None and state == "EXECUTION_ERROR":
+            result["hint"] = f"Reproduce: ./lab check {exercise} --case {case_index if case_index is not None else 0}"
+    if state == "ENV_UNSUPPORTED": result["hint"] = "Diagnose: ./lab doctor --verbose"
+    # Preserve failure bookkeeping: a counterexample invalidates an older success,
+    # including failures found by a single-case check or benchmark validation.
+    if getattr(args, "command", None) == "_worker" and code in (3, 6):
+        from .runner import save_result
+        e = EXERCISES[exercise]
+        save_result(e, {"state": "CORRECTNESS_FAILED", "fingerprint": fingerprint(e), "full_contract": True, "reason": str(exc)})
+    return result
+
+
+def execute(args):
+    if hasattr(args, "exercise"):
+        e = EXERCISES[args.exercise]
+        if getattr(args, "case", None) is not None and not 0 <= args.case < len(e["cases"]):
+            raise ValueError(f"case must be in [0,{len(e['cases'])-1}]")
+    name = args.command
+    if name == "list": return {"command": name, "exercises": [brief(e) for e in selected(args.stage)]}
+    if name == "task":
+        files = [f"students/{e['backend']}/{e['id']}/entry.py"]
+        if e["backend"] == "cuda": files.append(f"students/cuda/{e['id']}/kernel.cu")
+        document = (ROOT / "docs/tasks" / (e["id"] + ".md")).read_text()
+        tensors = re.findall(r'^\| `(inputs|outputs)` \| `"([a-z]+)"` \| `([^`]+)` \| ([^|]+) \|', document, re.M)
+        return {**brief(e), "command": name, "exercise": e["id"], "purpose": e["purpose"],
+                "dtypes": sorted({c["dtype"] for c in e["cases"]}), "student_files": files,
+                "task_file": f"docs/tasks/{e['id']}.md", "tensors": [[v.strip() for v in row] for row in tensors], "cases": e["cases"]}
+    if name == "doctor":
+        from .environment import snapshot, require_environment, probe_blackwell_interfaces
+        result = snapshot()
+        result.update(command=name, checks={})
+        for backend in sorted({e["backend"] for e in selected(args.stage)}):
+            try: require_environment(backend); result["checks"][backend] = "ENVIRONMENT_OK"
+            except EnvironmentUnsupported as exc: result["checks"][backend] = f"ENV_UNSUPPORTED: {exc}"
+        if result["checks"].get("cute") == "ENVIRONMENT_OK": result["blackwell_api_symbols"] = probe_blackwell_interfaces()
+        result["exit_code"] = 4 if any(v.startswith("ENV_UNSUPPORTED") for v in result["checks"].values()) else 0
+        result["state"] = "ENV_UNSUPPORTED" if result["exit_code"] else "ENVIRONMENT_OK"
+        return result
+    if name == "status": return status_report(args.stage)
+    if name == "smoke":
+        cmd = [sys.executable, "-m", "flash_attention_lab", "_smoke"]
+        if args.stage is not None: cmd += ["--stage", str(args.stage)]
+        return managed(cmd, args)
+    if name == "_smoke":
+        from .smoke import infrastructure_smoke
+        return {**infrastructure_smoke(args.stage), "command": "smoke"}
+    if name in ("check", "bench"): return managed(worker_command(args, name), args)
+    if name == "_worker":
+        from .runner import benchmark, check, save_result
+        if args.operation == "check":
+            result = check(e, args.case)
+            if args.case is None: save_result(e, result)
+        else: result = benchmark(e, 0 if args.case is None else args.case, args.warmup, args.repeats, args.iterations)
+        return {**result, "command": args.operation}
+    if name in ("sanitize", "profile"):
+        from .api import require_implemented
+        from .runtime import require_tool
+        require_implemented(e)
+        case = 0 if args.case is None else args.case
+        if name == "sanitize":
+            binary = require_tool("compute-sanitizer", "LAB_SANITIZER")
+            cmd = [binary, "--tool", args.tool, "--error-exitcode", "3", sys.executable,
+                   "-m", "flash_attention_lab", "_worker", args.exercise, "--operation", "check", "--case", str(case)]
+        else:
+            binary = require_tool("ncu", "LAB_NCU")
+            from .environment import require_ncu_sections
+            require_ncu_sections(binary)
+            dest = ROOT / "artifacts/profiles"; dest.mkdir(parents=True, exist_ok=True)
+            output = dest / (args.exercise + "_" + str(time.time_ns()))
+            cmd = [binary, "--nvtx", "--nvtx-include", "lab_profile/", "--section", "LaunchStats",
+                   "--section", "MemoryWorkloadAnalysis", "--section", "SpeedOfLight", "-o", str(output),
+                   sys.executable, "-m", "flash_attention_lab", "_profile", args.exercise, "--case", str(case)]
+        result = managed(cmd, args, tool=True)
+        if name == "profile" and result["exit_code"] == 0:
+            report = Path(str(output) + ".ncu-rep")
+            if report.is_file() and report.stat().st_size:
+                result["profile_report"] = str(report)
+            else:
+                result.update(state="TOOL_FAILED", exit_code=6,
+                              message="NCU did not produce a report. See the tool log.")
+            Path(result["artifact"]).write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        return result
+    if name == "_profile":
+        import torch
+        from .runner import check
+        from .cases import make_inputs
+        from .api import prepare
+        case = 0 if args.case is None else args.case
+        validation = check(e, case)
+        inputs, cfg = make_inputs(e, e["cases"][case], "cuda")
+        plan = prepare(e["id"], inputs, cfg)
+        for _ in range(3): plan.launch()
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("lab_profile")
+        plan.launch(); torch.cuda.synchronize(); torch.cuda.nvtx.range_pop()
+        return {"command": "profile", "state": "PROFILE_COLLECTED", "exercise": e["id"], "case_index": case, "validation": validation}
+    raise ValueError(f"unknown command: {name}")
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    args = argparse.Namespace(command="lab", json="--json" in argv, verbose="--verbose" in argv or "-v" in argv)
     try:
-        from .runtime import configure_runtime
-        configure_runtime()
+        # Python is a transparent passthrough, including its own flags and output.
         if argv and argv[0] == "python":
+            from .runtime import configure_runtime
+            configure_runtime()
             if len(argv) == 1: raise ValueError("usage: ./lab python -m MODULE [args] or ./lab python SCRIPT [args]")
             return subprocess.call([sys.executable, *argv[1:]], cwd=ROOT)
         args = parser().parse_args(argv)
-        if hasattr(args, "exercise"):
-            e = EXERCISES[args.exercise]
-            if getattr(args, "case", None) is not None and not 0 <= args.case < len(e["cases"]):
-                raise ValueError(f"case must be in [0,{len(e['cases'])-1}]")
-        if args.command == "list":
-            for e in selected(args.stage): print(f"{e['id']:23} {e['title']} | prerequisites: {', '.join(e['prerequisites']) or '-'}")
-        elif args.command == "task": print((ROOT / "docs/tasks" / (args.exercise + ".md")).read_text())
-        elif args.command == "enable":
-            p = ROOT / "progress/enabled.json"
-            enabled = json.loads((p if p.exists() else ROOT / "progress/defaults.json").read_text())
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(sorted(set(enabled + [args.exercise])), indent=2) + "\n")
-            print("Enabled in default checks; student implementation flag is unchanged")
-        elif args.command == "doctor":
-            from .environment import snapshot, require_environment, probe_blackwell_interfaces
-            result = snapshot()
-            result["checks"] = {}
-            for backend in sorted({e["backend"] for e in selected(args.stage)}):
-                try:
-                    require_environment(backend)
-                    result["checks"][backend] = "ENVIRONMENT_OK"
-                except EnvironmentUnsupported as exc:
-                    result["checks"][backend] = f"ENV_UNSUPPORTED: {exc}"
-            if result["checks"].get("cute") == "ENVIRONMENT_OK":
-                result["blackwell_api_symbols"] = probe_blackwell_interfaces()
-            print(json.dumps(result, indent=2))
-            return 4 if any(v.startswith("ENV_UNSUPPORTED") for v in result["checks"].values()) else 0
-        elif args.command == "status": return show_status(args.stage, args.check_enabled)
-        elif args.command == "smoke":
-            cmd = [sys.executable, "-m", "flash_attention_lab", "_smoke"]
-            if args.stage is not None: cmd += ["--stage", str(args.stage)]
-            return bounded(cmd, args.timeout)
-        elif args.command == "_smoke":
-            from .smoke import infrastructure_smoke
-            from .runner import save_artifact
-            result = infrastructure_smoke(args.stage)
-            path = save_artifact("infra_smoke", result)
-            print(json.dumps(result, indent=2)); print("ARTIFACT:", path)
-        elif args.command in ("check", "bench"):
-            return bounded(worker_command(args, args.command), args.timeout)
-        elif args.command == "_worker":
-            from .runner import benchmark, check, save_artifact, save_result
-            if args.operation == "check":
-                result = check(e, args.case)
-                if args.case is None: save_result(e, result)
-            else:
-                result = benchmark(e, 0 if args.case is None else args.case, args.warmup, args.repeats, args.iterations)
-            path = save_artifact(e["id"] + "_" + args.operation, result)
-            print(json.dumps(result, indent=2)); print("ARTIFACT:", path)
-        elif args.command in ("sanitize", "profile"):
-            from .api import require_implemented
-            from .runtime import require_tool
-            require_implemented(e)  # explicit missing-module error even if tool is absent
-            case = 0 if args.case is None else args.case
-            if args.command == "sanitize":
-                binary = require_tool("compute-sanitizer", "LAB_SANITIZER")
-                cmd = [binary, "--tool", args.tool, "--error-exitcode", "3", sys.executable,
-                       "-m", "flash_attention_lab", "_worker", args.exercise, "--operation", "check", "--case", str(case)]
-            else:
-                binary = require_tool("ncu", "LAB_NCU")
-                from .environment import require_ncu_sections
-                require_ncu_sections(binary)
-                dest = ROOT / "artifacts/profiles"; dest.mkdir(parents=True, exist_ok=True)
-                import time
-                output = dest / (args.exercise + "_" + str(time.time_ns()))
-                cmd = [binary, "--nvtx", "--nvtx-include", "lab_profile/", "--section", "LaunchStats",
-                       "--section", "MemoryWorkloadAnalysis", "--section", "SpeedOfLight", "-o", str(output),
-                       sys.executable, "-m", "flash_attention_lab", "_profile", args.exercise, "--case", str(case)]
-            return bounded(cmd, args.timeout)
-        elif args.command == "_profile":
-            import torch
-            from .runner import check
-            from .cases import make_inputs
-            from .api import prepare
-            case = 0 if args.case is None else args.case
-            check(e, case)
-            inputs, cfg = make_inputs(e, e["cases"][case], "cuda")
-            plan = prepare(e["id"], inputs, cfg)
-            for _ in range(3): plan.launch()
-            torch.cuda.synchronize()
-            torch.cuda.nvtx.range_push("lab_profile")
-            plan.launch()
-            torch.cuda.synchronize()
-            torch.cuda.nvtx.range_pop()
-        return 0
-    except StudentNotImplemented as exc:
-        print(f"STUDENT_UNIMPLEMENTED: {exc}", file=sys.stderr); return 2
-    except (EnvironmentUnsupported, ImportError) as exc:
-        print(f"ENV_UNSUPPORTED: {exc}", file=sys.stderr); return 4
-    except (CorrectnessFailure, AssertionError) as exc:
-        print(f"CORRECTNESS_FAILED: {exc}", file=sys.stderr)
-        if "args" in locals() and args.command == "_worker":
-            from .runner import save_result
-            save_result(e, {"state": "CORRECTNESS_FAILED", "fingerprint": fingerprint(e), "full_contract": True, "reason": str(exc)})
-        return 3
-    except (ValueError, RuntimeError, OSError) as exc:
-        text = str(exc)
-        if "STUDENT_TODO" in text:
-            print("STUDENT_UNIMPLEMENTED:", text, file=sys.stderr); return 2
-        print(f"EXECUTION_ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
-        if "args" in locals() and args.command == "_worker":
-            from .runner import save_result
-            save_result(e, {"state": "CORRECTNESS_FAILED", "fingerprint": fingerprint(e), "full_contract": True, "reason": "execution error: " + text})
-        return 6
+        from .runtime import configure_runtime
+        configure_runtime()
+        result = execute(args)
+        result.setdefault("exit_code", 0)
+    except (StudentNotImplemented, EnvironmentUnsupported, ImportError, CorrectnessFailure,
+            AssertionError, ValueError, RuntimeError, OSError, KeyboardInterrupt) as exc:
+        result = error_report(exc, args)
+    emit(result, args)
+    return result["exit_code"]
+
+
+if __name__ == "__main__": sys.exit(main())

@@ -106,23 +106,10 @@ def test_doctor_preserves_diagnostics_when_environment_is_missing(monkeypatch, c
     def unavailable(backend):
         raise EnvironmentUnsupported('test: no GPU')
     monkeypatch.setattr(environment, 'require_environment', unavailable)
-    assert cli.main(['doctor', '--stage', '0']) == 4
+    assert cli.main(['doctor', '--stage', '0', '--json']) == 4
     report = json.loads(capsys.readouterr().out)
     assert report['cuda_available'] is False
     assert 'test: no GPU' in report['checks']['cuda']
-
-
-def test_enable_uses_shipped_defaults_and_writes_only_personal_state(tmp_path, monkeypatch):
-    from flash_attention_lab import cli
-    monkeypatch.setattr(cli, 'ROOT', tmp_path)
-    progress = tmp_path / 'progress'
-    progress.mkdir()
-    defaults = progress / 'defaults.json'
-    defaults.write_text('["s00_softmax"]\n')
-    before = defaults.read_bytes()
-    assert cli.main(['enable', 's01_reduce']) == 0
-    assert defaults.read_bytes() == before
-    assert json.loads((progress / 'enabled.json').read_text()) == ['s00_softmax', 's01_reduce']
 
 
 def test_python_entrypoint_propagates_mask_and_exit_code():

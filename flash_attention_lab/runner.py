@@ -1,6 +1,4 @@
-import hashlib
 import json
-import time
 from datetime import datetime, timezone
 import torch
 from .accuracy import compare
@@ -11,6 +9,7 @@ from .errors import CorrectnessFailure
 from .reference import mathematical_reference
 from .registry import ROOT, fingerprint, load_student
 from .timing import measure
+from .reporting import save_artifact  # retained for callers of the original entry point
 
 
 def validate_case(e, case, *, nondefault=True):
@@ -37,18 +36,42 @@ def validate_case(e, case, *, nondefault=True):
 def check(e, case_index=None):
     require_implemented(e)
     require_environment(e["backend"])
-    indices = range(len(e["cases"])) if case_index is None else [case_index]
+    indices = list(range(len(e["cases"]))) if case_index is None else [case_index]
     results = []
-    for i in indices:
+    cases = [{"case": i, "input": e["cases"][i], "state": "NOT_RUN"} for i in indices]
+    report = {"exercise": e["id"], "state": "CORRECTNESS_PASSED", "full_contract": case_index is None,
+              "case_count": len(indices), "cases": cases, "results": results, "fingerprint": fingerprint(e),
+              "timestamp": datetime.now(timezone.utc).isoformat(), "design_review": "NOT_REVIEWED"}
+    failures = []
+    for item in cases:
+        i = item["case"]
         case = e["cases"][i]
+        item["state"] = "PASS"
         for nondefault in (False, True):
-            try: metrics = validate_case(e, case, nondefault=nondefault)
+            record = {"case": i, "nondefault_stream": nondefault}
+            try:
+                metrics = validate_case(e, case, nondefault=nondefault)
+            except CorrectnessFailure as exc:
+                # Numeric counterexamples are independent; still test the other cases.
+                item["state"] = "FAIL"
+                record.update(state="FAIL", message=str(exc))
+                failures.append(f"case={i} nondefault_stream={nondefault}: {exc}")
             except Exception as exc:
-                raise type(exc)(f"{e['id']} case={i} nondefault_stream={nondefault} {case}: {exc}") from exc
-            results.append({"case": i, "nondefault_stream": nondefault, "errors": metrics})
-    return {"exercise": e["id"], "state": "CORRECTNESS_PASSED", "full_contract": case_index is None,
-            "case_count": len(list(indices)), "results": results, "fingerprint": fingerprint(e),
-            "timestamp": datetime.now(timezone.utc).isoformat(), "design_review": "NOT_REVIEWED"}
+                # A CUDA error can poison the context. Preserve partial results and stop.
+                item["state"] = "ERROR"
+                results.append({**record, "state": "ERROR", "message": str(exc)})
+                report["state"] = "EXECUTION_ERROR"
+                exc.check_report = report
+                raise
+            else:
+                record.update(state="PASS", errors=metrics)
+            results.append(record)
+    if failures:
+        report["state"] = "CORRECTNESS_FAILED"
+        exc = CorrectnessFailure("\n".join(failures))
+        exc.check_report = report
+        raise exc
+    return report
 
 
 def save_result(e, result):
@@ -78,11 +101,3 @@ def benchmark(e, case_index, warmup, repeats, iterations):
         result["flops"] = {"convention": "QK and PV only, FMA=2; excludes softmax, padding and rescaling", "useful": useful, "dense_equivalent": dense,
                            "useful_tflops": useful / seconds / 1e12, "dense_equivalent_tflops": dense / seconds / 1e12}
     return result
-
-
-def save_artifact(prefix, result):
-    directory = ROOT / "artifacts" / "runs"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / (prefix + "_" + str(time.time_ns()) + ".json")
-    path.write_text(json.dumps(result, indent=2) + "\n")
-    return path
