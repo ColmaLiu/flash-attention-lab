@@ -14,6 +14,8 @@
 | `sanitize ID` | 工具、case 和 PASS 或错误原因 | 日志和报告路径 |
 | `profile ID` | case 和 NCU 报告路径，失败时给原因 | 日志和 JSON 报告路径 |
 
+`task`、`check`、`bench`、`sanitize`、`profile` 的 ID 均支持短编号，例如 `s20` 对应 `s20_fa2_grid`。输出和报告仍使用完整 ID。只接受完整名称或完整短编号；`s2`、`s20_fa2` 等部分前缀会报错，未知编号可用 `./lab list` 查询。
+
 `task` 不输出整篇教程；完整数学、设计验收与调试说明在其列出的任务 Markdown 中，保留中文。`status` 只查看实现标记和验收记录，不执行学生 kernel；代码变化会使旧记录失效，详见 [状态语义](../progress/README.md)。
 
 ## 正确性范围

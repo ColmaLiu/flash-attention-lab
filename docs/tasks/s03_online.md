@@ -21,6 +21,11 @@ X `[R,C]` FP32；Y 同 shape；m/l `[R]` FP32。 只支持下表组合，有限�
 | `(2, 513)` | fp32 | False |
 | `(3, 257)` | fp32 | False |
 | `(4, 128)` | fp32 | False |
+| `(7, 4097)` | fp32 | False |
+| `(32, 2048)` | fp32 | False |
+| `(32, 8192)` | fp32 | False |
+
+case `0–11` 用于小规模调试；case `12–14` 覆盖更宽的行、多行并行与尾部长度，检查 reduction/状态更新能否跨越更多数据块。 `./lab check s03_online` 默认验收全部 case。具体编号和输入模式见 `./lab task s03_online -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：large, negative, random, shifted。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 

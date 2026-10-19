@@ -20,6 +20,12 @@ Q/K/V 同 shape `[B,H,N,D]` contiguous；O 同 shape/dtype，LSE `[B,H,N]` FP32�
 |---|---|---|
 | `(1, 1, 256, 128)` | bf16 | False |
 | `(1, 2, 512, 128)` | bf16 | False |
+| `(1, 8, 1024, 128)` | bf16 | False |
+| `(1, 16, 4096, 128)` | bf16 | False |
+| `(1, 16, 8192, 128)` | bf16 | False |
+| `(2, 8, 2048, 128)` | bf16 | False |
+
+case `0–8` 用于小规模调试；case `9–12` 覆盖多 batch/head、长序列与 head dimension 的组合；先用小 case 定位，再用大 case 观察完整工作量下的并行度、重复访存与流水线。mask 仅按本关支持范围测试。 `./lab check s44_fa4_rescale` 默认验收全部 case。具体编号和输入模式见 `./lab task s44_fa4_rescale -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：constant, large, max_ramp, random。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 

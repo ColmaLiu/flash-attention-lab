@@ -6,7 +6,7 @@
 |---|---|---|
 | [FA1 原论文](https://arxiv.org/abs/2205.14135) / [PDF](https://arxiv.org/pdf/2205.14135) | §3.1/算法1、§3.2 IO、附录 C 状态证明 | arXiv:2205.14135 |
 | [FA2 原论文](https://arxiv.org/abs/2307.08691) / [全文](https://arxiv.org/html/2307.08691) | §3.1 非矩阵操作、§3.2 query 并行、§3.3 sliced-Q | arXiv:2307.08691 |
-| [FA4 原论文 v1](https://arxiv.org/html/2603.05451v1) | §2.2 Blackwell；§3.1 forward；§3.3 scheduling；§4 DSL；区分 §3.2 backward | arXiv:2603.05451v1 |
+| [FA4 原论文 v1](https://arxiv.org/html/2603.05451v1) | §2.2 Blackwell；§3.1 forward；§3.3 scheduling；§4 DSL；§5 的序列长度、head dimension 与 batch 设置；区分 §3.2 backward | arXiv:2603.05451v1 |
 | [FA1 历史作者代码 v1.0.9](https://github.com/Dao-AILab/flash-attention/tree/6d48e14a6c2f551db96f0badc658a6279a929df3) | 历史版本对照；教学版以原论文循环定义为准 | `6d48e14a6c2f551db96f0badc658a6279a929df3` |
 | [FA2 官方 forward](https://github.com/Dao-AILab/flash-attention/blob/1fc0221183e799363001394a12dd9e78e15f5dda/csrc/flash_attn/src/flash_fwd_kernel.h) | `compute_attn_1rowblock`、query block 与 key 遍历、softmax 交接 | `1fc0221183e799363001394a12dd9e78e15f5dda` |
 | [FA4 官方文档](https://github.com/Dao-AILab/flash-attention/blob/1fc0221183e799363001394a12dd9e78e15f5dda/flash_attn/cute/README.md) / [依赖](https://github.com/Dao-AILab/flash-attention/blob/1fc0221183e799363001394a12dd9e78e15f5dda/flash_attn/cute/pyproject.toml) | CuTe DSL 路线、安装与独立可选对照；该版本依赖 DSL >=4.6.2 | 同上 |

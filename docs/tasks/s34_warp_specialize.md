@@ -20,6 +20,10 @@ X `[T,128,64]` FP16 contiguous；Y 同 shape FP32。 只支持下表组合，有
 |---|---|---|
 | `(1, 128, 64)` | fp16 | False |
 | `(3, 128, 64)` | fp16 | False |
+| `(64, 128, 64)` | fp16 | False |
+| `(257, 128, 64)` | fp16 | False |
+
+case `0–3` 用于小规模调试；case `4–5` 用更长的 T 序列覆盖反复 buffer 复用和 phase wrap；T 是数据 tile 数，不是 buffer 数或 CTA 数。 `./lab check s34_warp_specialize` 默认验收全部 case。具体编号和输入模式见 `./lab task s34_warp_specialize -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：coordinate, random。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 

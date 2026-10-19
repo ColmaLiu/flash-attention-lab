@@ -218,7 +218,10 @@ def bench(ui, data, verbose):
         flops = data["flops"]
         ui.line("TFLOP/s", number(flops["useful_tflops"]) + " useful" +
                 (" | " + number(flops["dense_equivalent_tflops"]) + " dense-equivalent" if data["config"]["causal"] else ""))
-        ui.note("QK + PV, FMA=2; " + ("N(N+1)/2 valid pairs." if data["config"]["causal"] else "N^2 valid pairs."))
+        if "dense_equivalent" in flops:
+            ui.note("QK + PV, FMA=2; " + ("N(N+1)/2 valid pairs." if data["config"]["causal"] else "N^2 valid pairs."))
+        else:
+            ui.note(flops["convention"])
     ui.note("Preallocated; no JIT, setup or layout conversion. Includes stream gaps from host dispatch.")
     if verbose:
         ui.line("Samples", ", ".join(milliseconds(v) for v in timing["gpu_stream_ms_samples"]))

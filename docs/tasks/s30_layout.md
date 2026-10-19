@@ -20,6 +20,10 @@ X `[R,C]` FP32 contiguous；Y `[C,R]` contiguous。 只支持下表组合，有�
 |---|---|---|
 | `(17, 33)` | fp32 | False |
 | `(32, 64)` | fp32 | False |
+| `(1024, 2048)` | fp32 | False |
+| `(1025, 2049)` | fp32 | False |
+
+case `0–3` 用于小规模调试；case `4–5` 覆盖更大的数据量与多个工作块，检查全局索引、输出覆盖和存储复用；保持本关原有机制目标。 `./lab check s30_layout` 默认验收全部 case。具体编号和输入模式见 `./lab task s30_layout -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：coordinate, random。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 

@@ -52,7 +52,7 @@ LAB_GPU=1 ./lab doctor
 
 ## 日常命令
 
-上面的验收流程适用于所有关卡，替换关卡 ID 即可。其他常用入口：
+上面的验收流程适用于所有关卡，替换关卡 ID 即可。ID 支持完整名称或短编号，例如 `./lab check s20` 等价于 `./lab check s20_fa2_grid`。其他常用入口：
 
 | 命令 | 用途 |
 |---|---|
@@ -63,6 +63,8 @@ LAB_GPU=1 ./lab doctor
 | `./lab --help` | 查看全部命令；子命令加 `--help` 查看参数 |
 
 每关独立运行 `./lab check ID` 或 `./lab bench ID`。status 根据实现标记和验收记录汇总各关状态；完整状态和退出码见 [状态语义](progress/README.md)。
+
+测试从小规模定位延伸到多头 1K–8K attention、大矩阵 GEMM 与长流水线；`check ID` 默认验收本关的全部尺寸，`task ID -v` 列出 case 编号。各阶段的范围及性能比较方法见 [测试规模](docs/test_scales.md)。
 
 命令默认使用英文：check 逐 case 显示 PASS/FAIL 和失败原因；bench 显示计时，不展开精度明细。`--verbose`（`-v`）展开细节及报告路径，`--json` 输出完整机器报告，例如 `./lab bench s00_softmax --json`。日志与结果保存在已忽略的 `artifacts/` 中。完整输出约定见 [终端输出说明](docs/cli.md)。
 

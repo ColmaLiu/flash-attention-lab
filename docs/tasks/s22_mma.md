@@ -1,8 +1,8 @@
-# s22_mma · CUDA Tensor Core 小练习
+# s22_mma · CUDA Tensor Core：从指令到大矩阵 GEMM
 
 ## 目的与联系
 
-独立学习 warp 级 Tensor Core 输入/输出组织，再把低精度引入 attention。
+先学习 warp 级 Tensor Core 输入/输出组织，再将同一接口扩展到完整大矩阵 GEMM，为低精度 attention 做准备。
 
 学习前置：`s01_reduce`。学习依赖不等于强制导入；默认每关独立实现。若复用自己前关代码，在 `RUNTIME_REQUIRES` 声明具体 ID，未实现时会报告缺哪个模块。
 
@@ -11,6 +11,8 @@
 C=A B，A:[M,K]，B:[K,N]，C:[M,N]。A/B 为 FP16 或 BF16；乘积累加与 C 为 FP32，不做 TF32。
 
 自行选择 WMMA 或 mma.sync 的合法指令形状、fragment layout、加载和存储。不可调用 cuBLAS，也不预填 launch 和 SMEM。
+
+单条 MMA 的 shape、算法 tile、warp/CTA 的工作量和整个 `(M,N,K)` 问题是不同层次。大矩阵需要自行设计输出所有权、全局索引和完整 K 维累加；本关的大尺寸均为 16 的倍数，暂不增加任意 GEMM 尾部处理要求。可以先实现正确的多 CTA 版本，再研究复用和搬运开销，不要求这一步就引入 Blackwell 异步流水线。
 
 ## 精确契约
 
@@ -22,6 +24,20 @@ C=A B，A:[M,K]，B:[K,N]，C:[M,N]。A/B 为 FP16 或 BF16；乘积累加与 C 
 | `(16, 16, 16)` | fp16 | False |
 | `(32, 32, 64)` | bf16 | False |
 | `(32, 32, 64)` | fp16 | False |
+| `(256, 256, 256)` | bf16 | False |
+| `(256, 256, 256)` | fp16 | False |
+| `(512, 2048, 256)` | bf16 | False |
+| `(512, 2048, 256)` | fp16 | False |
+| `(1024, 1024, 1024)` | bf16 | False |
+| `(1024, 1024, 1024)` | fp16 | False |
+| `(2048, 2048, 2048)` | bf16 | False |
+| `(2048, 2048, 2048)` | fp16 | False |
+| `(4096, 128, 4096)` | bf16 | False |
+| `(4096, 128, 4096)` | fp16 | False |
+| `(4096, 4096, 128)` | bf16 | False |
+| `(4096, 4096, 128)` | fp16 | False |
+
+case `0–11` 用于小规模调试；case `12–23` 覆盖完整大矩阵、长 K 累加和 QK/PV 比例的长方阵；问题尺寸不等于单条 MMA 指令或 CTA 的 tile。方阵用于观察扩展性，长方阵用于连接 attention 的两次乘法。 `./lab check s22_mma` 默认验收全部 case。具体编号和输入模式见 `./lab task s22_mma -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：cancellation, random, zero。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 
@@ -62,6 +78,9 @@ C++ 使用 `inputs.at("a")` / `outputs.at("c")` 取得 `TensorView`；维度从 
 ./lab sanitize s22_mma --tool racecheck --case 0
 ./lab sanitize s22_mma --tool synccheck --case 0
 ./lab bench s22_mma --case 0 --warmup 5 --repeats 7 --iterations 10
+./lab bench s22_mma --case 14   # BF16: 2048 x 2048 x 2048
+./lab bench s22_mma --case 15   # BF16: (M,N,K)=(4096,4096,128), QK proportions
+./lab bench s22_mma --case 16   # BF16: (M,N,K)=(4096,128,4096), PV proportions
 ./lab profile s22_mma --case 0
 ```
 
@@ -71,9 +90,13 @@ C++ 使用 `inputs.at("a")` / `outputs.at("c")` 取得 `TensorView`；维度从 
 
 在 B200 生成代码中确认 Tensor Core 指令；说明 collective 参与线程和对齐约束；不要把 CUDA WMMA 当作 Blackwell tcgen05。
 
+大 case 还需说明所有输出元素如何被完整且唯一地写入、长 K 下是否存在漏算/重复累加，以及不同 CTA 是否会写到同一区域。不得把只通过单条指令大小的结果当作大矩阵扩展性证明。
+
 ## 性能实验与记录
 
 对同一已量化输入测误差，分开记录量化与累加误差；记录选择的指令与 SM100 编译目标。
+
+BF16 比较 `case 3` 与 `12–17`，FP16 比较 `case 0` 与 `18–23` 的延迟和 TFLOP/s，使用相同 warmup/repeats/iterations。GEMM 的有效 FLOPs 为 `2*M*N*K`，不统计搬运与索引指令。分别解释小问题的调用开销、大方阵的设备利用率、QK 比例的短 K，以及 PV 比例的长 K；不要从一个方阵结果推断 attention 的整体性能。
 
 复制或填写 [本关实验记录](../../experiments/s22_mma.md)。记录源代码 hash、GPU、软件、shape、dtype、scale、mask、配置、误差、median/min/max/stdev、raw artifact 与未解决问题。bench 先运行本 case 的完整检查；全关 check 是通关依据。未实现代码不存在真实性能。
 

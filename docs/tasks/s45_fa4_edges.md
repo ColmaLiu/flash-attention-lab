@@ -22,6 +22,8 @@ Q/K/V 同 shape `[B,H,N,D]` contiguous；O 同 shape/dtype，LSE `[B,H,N]` FP32�
 | `(1, 1, 1, 128)` | bf16 | True |
 | `(1, 1, 1, 128)` | fp16 | False |
 | `(1, 1, 1, 128)` | fp16 | True |
+| `(1, 1, 256, 128)` | bf16 | False |
+| `(1, 1, 256, 128)` | bf16 | True |
 | `(1, 1, 257, 128)` | bf16 | False |
 | `(1, 1, 257, 128)` | bf16 | True |
 | `(1, 1, 257, 128)` | fp16 | False |
@@ -30,13 +32,24 @@ Q/K/V 同 shape `[B,H,N,D]` contiguous；O 同 shape/dtype，LSE `[B,H,N]` FP32�
 | `(1, 2, 127, 128)` | bf16 | True |
 | `(1, 2, 127, 128)` | fp16 | False |
 | `(1, 2, 127, 128)` | fp16 | True |
+| `(1, 4, 4097, 128)` | bf16 | True |
+| `(1, 4, 4097, 128)` | fp16 | True |
+| `(1, 8, 1024, 64)` | bf16 | False |
+| `(1, 8, 1024, 64)` | fp16 | False |
+| `(1, 16, 4096, 128)` | bf16 | True |
+| `(1, 16, 4096, 128)` | fp16 | True |
+| `(1, 16, 8192, 128)` | bf16 | False |
+| `(1, 16, 8192, 128)` | fp16 | False |
 | `(2, 2, 129, 64)` | bf16 | False |
 | `(2, 2, 129, 64)` | bf16 | True |
 | `(2, 2, 129, 64)` | fp16 | False |
 | `(2, 2, 129, 64)` | fp16 | True |
+| `(2, 4, 2049, 64)` | bf16 | False |
+| `(2, 4, 2049, 64)` | fp16 | False |
+| `(2, 8, 2048, 64)` | bf16 | True |
+| `(2, 8, 2048, 64)` | fp16 | True |
 
-| `(1, 1, 256, 128)` | bf16 | False |
-| `(1, 1, 256, 128)` | bf16 | True |
+case `0–52` 用于小规模调试；case `53–64` 覆盖多 batch/head、长序列与 head dimension 的组合；先用小 case 定位，再用大 case 观察完整工作量下的并行度、重复访存与流水线。mask 仅按本关支持范围测试。 `./lab check s45_fa4_edges` 默认验收全部 case。具体编号和输入模式见 `./lab task s45_fa4_edges -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：large, random, zero。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 

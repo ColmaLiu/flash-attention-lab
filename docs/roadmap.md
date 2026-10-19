@@ -14,7 +14,7 @@
 | 1 | [s11_fa1_edges](tasks/s11_fa1_edges.md) · FA1：尾块与 causal 扩展 | [学生文件](../students/cuda/s11_fa1_edges/kernel.cu) | s10_fa1 | `./lab check s11_fa1_edges` |
 | 2 | [s20_fa2_grid](tasks/s20_fa2_grid.md) · FA2 第一变量：query 维 grid 并行 | [学生文件](../students/cuda/s20_fa2_grid/kernel.cu) | s10_fa1 | `./lab check s20_fa2_grid` |
 | 2 | [s21_fa2_sliced](tasks/s21_fa2_sliced.md) · FA2：sliced-Q 与非矩阵运算 | [学生文件](../students/cuda/s21_fa2_sliced/kernel.cu) | s20_fa2_grid | `./lab check s21_fa2_sliced` |
-| 2 | [s22_mma](tasks/s22_mma.md) · CUDA Tensor Core 小练习 | [学生文件](../students/cuda/s22_mma/kernel.cu) | s01_reduce | `./lab check s22_mma` |
+| 2 | [s22_mma](tasks/s22_mma.md) · CUDA Tensor Core 与大矩阵 GEMM | [学生文件](../students/cuda/s22_mma/kernel.cu) | s01_reduce | `./lab check s22_mma` |
 | 2 | [s23_fa2_tensor](tasks/s23_fa2_tensor.md) · FA2 接入 Tensor Core | [学生文件](../students/cuda/s23_fa2_tensor/kernel.cu) | s21_fa2_sliced, s22_mma | `./lab check s23_fa2_tensor` |
 | 2 | [s24_fa2_edges](tasks/s24_fa2_edges.md) · FA2 低精度边界验证 | [学生文件](../students/cuda/s24_fa2_edges/kernel.cu) | s23_fa2_tensor | `./lab check s24_fa2_edges` |
 | 3 | [s30_layout](tasks/s30_layout.md) · CuTe DSL layout 与线程映射 | [学生文件](../students/cute/s30_layout/entry.py) | 无 | `./lab check s30_layout` |

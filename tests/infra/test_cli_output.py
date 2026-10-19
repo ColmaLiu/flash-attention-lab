@@ -27,6 +27,45 @@ def test_invalid_arguments_are_json_errors_with_nonzero_exit(capsys):
     assert 'positive' in result['message']
 
 
+@pytest.mark.parametrize('command', ['task', 'check', 'bench', 'sanitize', 'profile'])
+def test_short_ids_select_the_same_exercise_for_every_command(command):
+    parser = cli.parser()
+    for full_id in cli.EXERCISES:
+        short_id = full_id.split('_', 1)[0]
+        short = parser.parse_args([command, short_id])
+        full = parser.parse_args([command, full_id])
+        assert short == full
+        assert short.exercise == full_id
+
+
+def test_short_task_preserves_full_report_id_and_paths(capsys):
+    assert cli.main(['task', 's20', '--json']) == 0
+    short = json.loads(capsys.readouterr().out)
+    assert cli.main(['task', 's20_fa2_grid', '--json']) == 0
+    full = json.loads(capsys.readouterr().out)
+    assert short == full
+    assert short['exercise'] == 's20_fa2_grid'
+    assert short['task_file'] == 'docs/tasks/s20_fa2_grid.md'
+
+
+@pytest.mark.parametrize('value', ['s2', 's99', 's20_fa2', '20'])
+def test_unknown_or_partial_ids_are_explicit_errors(value, capsys):
+    assert cli.main(['check', value, '--json']) == 6
+    result = json.loads(capsys.readouterr().out)
+    assert result['state'] == 'EXECUTION_ERROR'
+    assert f"unknown exercise {value!r}" in result['message']
+    assert './lab list' in result['message']
+
+
+def test_ambiguous_short_id_requires_full_name(monkeypatch):
+    monkeypatch.setitem(cli.EXERCISES, 's20_alternative', {})
+    parser = cli.parser()
+    with pytest.raises(ValueError, match='ambiguous exercise') as caught:
+        parser.parse_args(['check', 's20'])
+    assert 's20_fa2_grid' in str(caught.value) and 's20_alternative' in str(caught.value)
+    assert parser.parse_args(['check', 's20_fa2_grid']).exercise == 's20_fa2_grid'
+
+
 def test_default_task_has_keys_and_verbose_lists_cases(capsys):
     assert cli.main(['task', 's00_softmax']) == 0
     summary = capsys.readouterr().out

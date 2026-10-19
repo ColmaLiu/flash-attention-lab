@@ -22,6 +22,20 @@ C=A B，K 被分块；每个累加片段必须包含所有 K 项恰好一次。S
 | `(128, 128, 256)` | fp16 | False |
 | `(128, 128, 512)` | bf16 | False |
 | `(128, 128, 512)` | fp16 | False |
+| `(256, 256, 256)` | bf16 | False |
+| `(256, 256, 256)` | fp16 | False |
+| `(512, 2048, 256)` | bf16 | False |
+| `(512, 2048, 256)` | fp16 | False |
+| `(1024, 1024, 1024)` | bf16 | False |
+| `(1024, 1024, 1024)` | fp16 | False |
+| `(2048, 2048, 2048)` | bf16 | False |
+| `(2048, 2048, 2048)` | fp16 | False |
+| `(4096, 128, 4096)` | bf16 | False |
+| `(4096, 128, 4096)` | fp16 | False |
+| `(4096, 4096, 128)` | bf16 | False |
+| `(4096, 4096, 128)` | fp16 | False |
+
+case `0–11` 用于小规模调试；case `12–23` 覆盖完整大矩阵、长 K 累加和 QK/PV 比例的长方阵；问题尺寸不等于单条 MMA 指令或 CTA 的 tile。方阵用于观察扩展性，长方阵用于连接 attention 的两次乘法。 `./lab check s38_async_gemm` 默认验收全部 case。具体编号和输入模式见 `./lab task s38_async_gemm -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：cancellation, random, zero。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 

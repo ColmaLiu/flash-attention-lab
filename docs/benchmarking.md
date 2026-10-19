@@ -8,6 +8,8 @@
 
 attention FLOPs 只统计 QK 与 PV，FMA=2：非因果 `4 B H N² D`；因果有效工作 `4 B H [N(N+1)/2] D`，另给 dense-equivalent `4 B H N² D`。不包括指数、reduction、重缩放、padding 或 mask tile 中无效 MMA。不要把有效 TFLOP/s 当作实际执行指令 FLOPs。
 
+GEMM FLOPs 为 `2*M*N*K`，FMA=2。`s22_mma` 与 `s38_async_gemm` 包含大方阵及 QK/PV 比例的长方阵；attention 包含多头、长序列及阶段允许的 causal/tail 组合。用 `./lab task ID -v` 查看全部 case 编号，按 [测试规模](test_scales.md) 做控制变量比较。`case 0` 用于快速定位与调用开销观察，不能代表大工作量下的吞吐；默认 `check ID` 验收全部尺寸，不需要额外选择测试组。
+
 保持独立入口做控制变量：s10→s20 比 grid/循环与输出驻留；s20→s21 比 CTA 内分工/非矩阵计算；s21→s23 涉及 dtype 和 Tensor Core，必须另列；s40→s41 比流水线；s41→s43 比指数；s43→s44 比重缩放；s45→s46 比调度。只有支持域的交集可直接对比；不同 shape 的结果不能互相算 speedup。所有教学版本都运行在 B200，不代表历史官方 FA1/FA2 的性能。
 
 可选官方对照不作为基础依赖：[sources](sources.md) 中固定版本的 FA4 需要 DSL >=4.6.2，与本项目固定的 4.4.1 不同。另建环境按 `docs/sources.md` 的固定 commit 安装官方包，在该环境激活后从仓库根目录显式运行（入口同样遵循 LAB_GPU/CUDA_VISIBLE_DEVICES）：

@@ -41,6 +41,8 @@ attention：Q/K/V 均 contiguous `[B,H,N,D]`，三者同 dtype/device/shape，se
 
 每关 `curriculum.json` 中列出的 shape/dtype/mask 组合就是受限支持域，host 会拒绝其他组合。有限输入，无空维度；NaN/Inf 输入不在范围中。所有测试输入生成固定 seed，再转换到目标 dtype；数学参考针对已经转换的输入。支持范围扩展必须同步增加案例和文档，不能仅放宽校验。
 
+小尺寸与实际工作量尺寸属于同一个 cases 列表，`check ID` 默认全部执行；单 case 的成功只覆盖该输入。原有 case 编号稳定，大 case 在列表末尾。规模、阶段边界与控制变量见 [测试规模](test_scales.md)。
+
 CUDA 只有一种构建方式：`torch.utils.cpp_extension.load` JIT，每关独立目录、独立模块，pybind11 传递设备地址与 shape/dtype，避免学生错误使整仓库无法编译。ABI 定义见 `flash_attention_lab/cuda_api.h`。可用 `cuda_fp16.h`/`cuda_bf16.h`，未预选任何学生 launch 或 layout。
 
 CuTe 的 `entry.prepare` 接收 PyTorch tensors 与整数 stream handle。允许在这里使用 `cutlass.cute.runtime.from_dlpack`、`cuda.bindings.driver.CUstream` 与 `cute.compile`；具体 kernel/JIT 签名、layout、compile specialization 和 launch 由学生定义。每关 `entry.CONFIG` 是空的数值配置字典，由学生填写自己的 tile/stage 等参数；check/bench 会合并并记录这些参数，测试 case 的 scale/mask 优先。必须保留编译对象与参数的生命周期，返回闭包。若增加配置，记录 config 并在 entry 中校验；host 不替学生选 tile、stage 数或 TMEM 列数。

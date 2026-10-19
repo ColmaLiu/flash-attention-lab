@@ -24,6 +24,18 @@ def positive_int(value):
     return n
 
 
+def exercise_id(value):
+    """Resolve a complete ID or its exact stage/lesson code before dispatch."""
+    if value in EXERCISES:
+        return value
+    matches = [name for name in EXERCISES if name.split("_", 1)[0] == value]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise argparse.ArgumentTypeError(f"ambiguous exercise {value!r}; use one of: {', '.join(matches)}")
+    raise argparse.ArgumentTypeError(f"unknown exercise {value!r}; see './lab list'")
+
+
 def parser():
     display = argparse.ArgumentParser(add_help=False)
     display.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="full JSON report")
@@ -39,10 +51,10 @@ def parser():
         q = add(command)
         q.add_argument("--stage", type=int, choices=range(5), help="select a stage")
         if command == "smoke": q.add_argument("--timeout", type=float, default=600)
-    q = add("task"); q.add_argument("exercise", choices=EXERCISES, metavar="ID")
+    q = add("task"); q.add_argument("exercise", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
     for command in ("check", "bench", "sanitize", "profile", "_worker", "_profile"):
         q = add(command)
-        q.add_argument("exercise", choices=EXERCISES, metavar="ID")
+        q.add_argument("exercise", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
         q.add_argument("--case", type=int)
         q.add_argument("--timeout", type=float, default=180)
         if command in ("bench", "_worker"):

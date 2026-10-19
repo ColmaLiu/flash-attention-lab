@@ -222,6 +222,33 @@
         "dtype": "fp32",
         "causal": false,
         "pattern": "zero"
+      },
+      {
+        "shape": [
+          128,
+          2048
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          128,
+          8192
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          31,
+          4097
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "negative"
       }
     ],
     "purpose": "Separate row reductions from softmax and validate lengths that do not fill a warp or block.",
@@ -319,6 +346,39 @@
         "causal": false,
         "pattern": "random",
         "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          8,
+          512,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          2048,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Connect softmax to a FP32 attention baseline with explicit intermediate matrices allowed.",
@@ -446,6 +506,33 @@
         "dtype": "fp32",
         "causal": false,
         "pattern": "large"
+      },
+      {
+        "shape": [
+          32,
+          2048
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          32,
+          8192
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "large"
+      },
+      {
+        "shape": [
+          7,
+          4097
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "shifted"
       }
     ],
     "purpose": "Validate statistics across chunks before FA1. Online softmax alone does not complete FA1.",
@@ -611,6 +698,50 @@
         "dtype": "fp32",
         "causal": false,
         "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Implement the FP32 teaching version of the paper, examining output-state updates under KV-outer, Q-inner traversal.",
@@ -839,6 +970,72 @@
         "causal": false,
         "pattern": "random",
         "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          2049,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          4,
+          4097,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": true,
+        "pattern": "random"
       }
     ],
     "purpose": "Extend B/H/D, sequence tails and causal masking while preserving the original FA1 entry point.",
@@ -1003,6 +1200,50 @@
         "dtype": "fp32",
         "causal": false,
         "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Isolate query-tile grid parallelism with the same FP32 shapes. This is one part of FA2.",
@@ -1167,6 +1408,50 @@
         "dtype": "fp32",
         "causal": false,
         "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Add CTA-local sliced-Q and reduce non-matmul work while keeping FP32 to isolate the design change.",
@@ -1305,9 +1590,129 @@
         "dtype": "bf16",
         "causal": false,
         "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          256,
+          256,
+          256
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1024,
+          1024,
+          1024
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2048,
+          2048,
+          2048
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          128,
+          4096
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          512,
+          2048,
+          256
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          256,
+          256,
+          256
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1024,
+          1024,
+          1024
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2048,
+          2048,
+          2048
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          4096,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          128,
+          4096
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          512,
+          2048,
+          256
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
       }
     ],
-    "purpose": "Learn warp-level Tensor Core operand and output organization before introducing low precision into attention.",
+    "purpose": "Learn warp-level Tensor Core operands, then scale to full GEMM problems before low-precision attention.",
     "math": "C=A B，A:[M,K]，B:[K,N]，C:[M,N]。A/B 为 FP16 或 BF16；乘积累加与 C 为 FP32，不做 TF32。",
     "task": "自行选择 WMMA 或 mma.sync 的合法指令形状、fragment layout、加载和存储。不可调用 cuBLAS，也不预填 launch 和 SMEM。",
     "evidence": "在 B200 生成代码中确认 Tensor Core 指令；说明 collective 参与线程和对齐约束；不要把 CUDA WMMA 当作 Blackwell tcgen05。",
@@ -1512,6 +1917,94 @@
         "dtype": "bf16",
         "causal": false,
         "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Integrate the validated Tensor Core computation into FA2, tracking precision and compute-engine changes separately.",
@@ -1938,6 +2431,138 @@
         "causal": false,
         "pattern": "random",
         "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          2049,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          4,
+          4097,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          2049,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          4,
+          4097,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
       }
     ],
     "purpose": "Extend the Tensor Core version to tails and causal masking as a restricted baseline for the DSL port.",
@@ -1990,6 +2615,24 @@
         "dtype": "fp32",
         "causal": false,
         "pattern": "random"
+      },
+      {
+        "shape": [
+          1024,
+          2048
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          1025,
+          2049
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
       }
     ],
     "purpose": "Explore layout domains, shapes and strides; validate JIT, DLPack and your thread mapping.",
@@ -2117,6 +2760,24 @@
         "dtype": "fp32",
         "causal": false,
         "pattern": "random"
+      },
+      {
+        "shape": [
+          1024,
+          1024
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          2048,
+          4096
+        ],
+        "dtype": "fp32",
+        "causal": false,
+        "pattern": "coordinate"
       }
     ],
     "purpose": "Use a small copy exercise to study async submission, completion and shared-data visibility.",
@@ -2171,6 +2832,24 @@
         "dtype": "fp16",
         "causal": false,
         "pattern": "random"
+      },
+      {
+        "shape": [
+          1024,
+          1024
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          2048,
+          4096
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
       }
     ],
     "purpose": "Move to TMA with a single buffer and validate byte-count and phase protocols.",
@@ -2229,6 +2908,26 @@
         "dtype": "fp16",
         "causal": false,
         "pattern": "random"
+      },
+      {
+        "shape": [
+          64,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          257,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
       }
     ],
     "purpose": "Separate producer and consumer warp roles with a single stage before adding buffering.",
@@ -2347,6 +3046,36 @@
         "dtype": "fp16",
         "causal": false,
         "pattern": "random"
+      },
+      {
+        "shape": [
+          64,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          257,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
+      },
+      {
+        "shape": [
+          1024,
+          128,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "coordinate"
       }
     ],
     "purpose": "Add cyclic buffering to the same computation and validate prologue, steady state, epilogue and phase wrap.",
@@ -2698,6 +3427,126 @@
         "dtype": "bf16",
         "causal": false,
         "pattern": "cancellation"
+      },
+      {
+        "shape": [
+          256,
+          256,
+          256
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1024,
+          1024,
+          1024
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2048,
+          2048,
+          2048
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          128,
+          4096
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          512,
+          2048,
+          256
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          256,
+          256,
+          256
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1024,
+          1024,
+          1024
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2048,
+          2048,
+          2048
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          4096,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          4096,
+          128,
+          4096
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          512,
+          2048,
+          256
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Combine buffering and async MMA in GEMM to validate synchronization between engines before attention.",
@@ -2839,6 +3688,50 @@
         "dtype": "bf16",
         "causal": false,
         "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Connect TMA, tcgen05 and TMEM to stable attention as a baseline. This alone does not complete FA4.",
@@ -2947,6 +3840,50 @@
         "causal": false,
         "pattern": "random",
         "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Study the forward pipeline and how correction work can leave the critical path.",
@@ -3090,6 +4027,50 @@
         "causal": false,
         "pattern": "random",
         "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Integrate the exponential mechanism into a correct pipeline and study non-matmul execution resources.",
@@ -3208,6 +4189,50 @@
         "causal": false,
         "pattern": "random",
         "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
       }
     ],
     "purpose": "Study conditional rescaling and the balance between reduced non-matmul work and finite dynamic range.",
@@ -3810,6 +4835,138 @@
         "dtype": "bf16",
         "causal": true,
         "pattern": "large"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          2049,
+          64
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          4,
+          4097,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          4,
+          2049,
+          64
+        ],
+        "dtype": "fp16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          4,
+          4097,
+          128
+        ],
+        "dtype": "fp16",
+        "causal": true,
+        "pattern": "random"
       }
     ],
     "purpose": "Extend the restricted forward implementation while preserving earlier ablation entry points.",
@@ -3928,6 +5085,72 @@
         "causal": false,
         "pattern": "random",
         "scale": 0.25
+      },
+      {
+        "shape": [
+          1,
+          8,
+          1024,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          8192,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": false,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          2,
+          8,
+          2048,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
+      },
+      {
+        "shape": [
+          1,
+          16,
+          4096,
+          128
+        ],
+        "dtype": "bf16",
+        "causal": true,
+        "pattern": "random"
       }
     ],
     "purpose": "Compare CTA scheduling and resource allocation with fixed functionality; official-level performance is not required.",

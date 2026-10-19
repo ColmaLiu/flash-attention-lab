@@ -100,4 +100,10 @@ def benchmark(e, case_index, warmup, repeats, iterations):
         seconds = result["timing"]["gpu_stream_ms_median"] / 1e3
         result["flops"] = {"convention": "QK and PV only, FMA=2; excludes softmax, padding and rescaling", "useful": useful, "dense_equivalent": dense,
                            "useful_tflops": useful / seconds / 1e12, "dense_equivalent_tflops": dense / seconds / 1e12}
+    elif e["kind"] == "gemm":
+        m, n, k = case["shape"]
+        operations = 2 * m * n * k
+        seconds = result["timing"]["gpu_stream_ms_median"] / 1e3
+        result["flops"] = {"convention": "GEMM: 2*M*N*K, FMA=2", "useful": operations,
+                           "useful_tflops": operations / seconds / 1e12}
     return result

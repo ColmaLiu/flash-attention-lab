@@ -1,4 +1,5 @@
 import json
+import math
 import subprocess
 import sys
 import torch
@@ -12,7 +13,7 @@ from flash_attention_lab.errors import CorrectnessFailure, DependencyMissing, St
 
 
 @pytest.mark.parametrize("e", CATALOG, ids=lambda e:e["id"])
-def test_exercise_contract_and_references(e):
+def test_exercise_metadata_and_small_references(e):
     assert (ROOT / "docs/tasks" / (e["id"] + ".md")).is_file()
     assert (ROOT / "experiments" / (e["id"] + ".md")).is_file()
     assert all(dep in EXERCISES for dep in e["prerequisites"])
@@ -20,6 +21,18 @@ def test_exercise_contract_and_references(e):
     assert callable(student.workspace_spec)
     if e["backend"] == "cute": assert callable(student.prepare)
     for case in e["cases"]:
+        shape = case["shape"]
+        assert all(isinstance(n, int) and n > 0 for n in shape)
+        assert case["dtype"] in ("fp32", "fp16", "bf16")
+        assert isinstance(case["causal"], bool)
+        assert not case["causal"] or e["kind"] == "attention"
+        # CPU unit tests cover oracle behavior on small tensors. GPU smoke generates
+        # inputs and FP64 references for EVERY declared case, including large shapes.
+        work = math.prod(shape)
+        if e["kind"] == "attention": work = shape[0] * shape[1] * shape[2] ** 2
+        elif e["kind"] == "gemm": work = math.prod(shape)
+        limit = 16 * 1024**2 if e["kind"] == "gemm" else 4 * 1024**2 if e["kind"] == "attention" else 1024**2
+        if work > limit: continue
         inputs,cfg = make_inputs(e,case)
         ref = mathematical_reference(e["kind"],inputs,cfg)
         spec = output_spec(e,inputs)
@@ -39,6 +52,45 @@ def test_reference_has_analytic_attention_invariants():
     assert torch.equal(full["o"],torch.tensor([[[[3.,4.],[3.,4.],[3.,4.]]]],dtype=torch.float64))
     assert torch.equal(causal["o"],torch.tensor([[[[1.,2.],[2.,3.],[3.,4.]]]],dtype=torch.float64))
     torch.testing.assert_close(causal["lse"],torch.tensor([[[0.,2.,3.]]],dtype=torch.float64).clamp_min(1).log())
+
+
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_bounded_reference_matches_dense_definition_and_respects_budget(monkeypatch, causal, dtype):
+    import flash_attention_lab.reference as reference
+    generator = torch.Generator().manual_seed(123)
+    inputs = {name: torch.randn(2, 3, 17, 8, generator=generator).to(dtype) for name in ("q", "k", "v")}
+    q, k, v = (inputs[name].double() for name in ("q", "k", "v"))
+    scores = (q @ k.transpose(-1, -2)) * 0.37
+    if causal: scores.masked_fill_(torch.ones(17, 17, dtype=torch.bool).triu(1), -torch.inf)
+    expected = {"o": scores.softmax(-1) @ v, "lse": scores.logsumexp(-1)}
+    calls = []
+    original = reference._attention_rows
+    def capture(q, k, *args):
+        calls.append((q.shape[-2], k.shape[-2]))
+        return original(q, k, *args)
+    monkeypatch.setattr(reference, "ATTENTION_SCORE_ELEMENTS", 4 * 17)
+    monkeypatch.setattr(reference, "_attention_rows", capture)
+    actual = reference.mathematical_reference("attention", inputs, {"scale": 0.37, "causal": causal})
+    for key in expected: torch.testing.assert_close(actual[key], expected[key], atol=1e-12, rtol=1e-12)
+    assert sum(rows for rows, _ in calls) == 2 * 3 * 17
+    assert max(rows * keys for rows, keys in calls) <= 4 * 17
+
+
+def test_large_cases_are_in_default_acceptance(monkeypatch):
+    from flash_attention_lab import runner
+    e = EXERCISES["s22_mma"]
+    monkeypatch.setattr(runner, "require_implemented", lambda e: None)
+    monkeypatch.setattr(runner, "require_environment", lambda backend: None)
+    seen = []
+    def validate(e, case, *, nondefault):
+        seen.append((tuple(case["shape"]), nondefault))
+        return {}
+    monkeypatch.setattr(runner, "validate_case", validate)
+    result = runner.check(e)
+    assert result["full_contract"] and result["case_count"] == len(e["cases"])
+    assert len(seen) == 2 * len(e["cases"])
+    assert ((4096, 128, 4096), True) in seen
 
 
 def test_error_budget_rejects_near_zero_corruption_and_nan():

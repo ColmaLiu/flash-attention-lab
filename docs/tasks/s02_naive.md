@@ -19,7 +19,12 @@ Q/K/V 同 shape `[B,H,N,D]` contiguous；O 同 shape/dtype，LSE `[B,H,N]` FP32�
 | shape | dtype | causal |
 |---|---|---|
 | `(1, 1, 32, 32)` | fp32 | False |
+| `(1, 8, 512, 64)` | fp32 | False |
+| `(1, 8, 2048, 128)` | fp32 | False |
 | `(2, 2, 64, 32)` | fp32 | False |
+| `(2, 8, 1024, 64)` | fp32 | False |
+
+case `0–6` 用于小规模调试；case `7–9` 覆盖多 batch/head、长序列与 head dimension 的组合；先用小 case 定位，再用大 case 观察完整工作量下的并行度、重复访存与流水线。mask 仅按本关支持范围测试。 `./lab check s02_naive` 默认验收全部 case。具体编号和输入模式见 `./lab task s02_naive -v`；规模设计见 [测试规模](../test_scales.md)。
 
 案例模式：large, random, zero。FP32 累加；copy/transpose 必须逐元素精确。容差与近零处理见 [数值规则](../numerics.md)，不是自行提高阈值的许可。CLI `--case` 是 `curriculum.json` 中本关 cases 的零基索引。
 
