@@ -54,9 +54,15 @@ def parser():
     q = add("task"); q.add_argument("exercise", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
     for command in ("check", "bench", "sanitize", "profile", "_worker", "_profile"):
         q = add(command)
-        q.add_argument("exercise", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
+        if command == "check":
+            scope = q.add_mutually_exclusive_group(required=True)
+            scope.add_argument("exercise", nargs="?", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
+            scope.add_argument("--stage", type=int, choices=range(5), help="check every exercise in a stage")
+        else:
+            q.add_argument("exercise", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
         q.add_argument("--case", type=int)
-        q.add_argument("--timeout", type=float, default=180)
+        q.add_argument("--timeout", type=float, default=180,
+                       help="timeout in seconds (per exercise for --stage)" if command == "check" else "timeout in seconds")
         if command in ("bench", "_worker"):
             q.add_argument("--warmup", type=positive_int, default=5)
             q.add_argument("--repeats", type=positive_int, default=7)
@@ -151,6 +157,40 @@ def managed(command, args, *, tool=False):
     return result
 
 
+def check_stage(args):
+    if args.case is not None:
+        raise ValueError("--case cannot be combined with --stage; use check ID --case N")
+    if not 0 < args.timeout < float("inf"):
+        raise ValueError("timeout must be positive and finite")
+    exercises = selected(args.stage)
+    reports = [{"exercise": e["id"], "state": "NOT_RUN", "exit_code": None,
+                "case_count": len(e["cases"])} for e in exercises]
+    interrupted = False
+    for i, e in enumerate(exercises):
+        child_args = argparse.Namespace(**{**vars(args), "exercise": e["id"], "stage": None})
+        try:
+            report = managed(worker_command(child_args, "check"), child_args)
+        except KeyboardInterrupt as exc:
+            report = error_report(exc, child_args)
+        except Exception as exc:
+            report = error_report(exc, child_args)
+        report.setdefault("case_count", len(e["cases"]))
+        reports[i] = report
+        if not getattr(args, "json", False):
+            from .presentation import render
+            render(report, verbose=getattr(args, "verbose", False))
+            print(flush=True)
+        if report["exit_code"] == 130:
+            interrupted = True
+            break
+    code = 130 if interrupted else next((r["exit_code"] for r in reports if r["exit_code"]), 0)
+    result = {"command": "check", "stage": args.stage, "exercises": reports, "exit_code": code,
+              "state": "INTERRUPTED" if interrupted else "STAGE_FAILED" if code else "STAGE_PASSED"}
+    from .reporting import save_artifact
+    result["artifact"] = str(save_artifact("check_stage", result))
+    return result
+
+
 def brief(e):
     return {key: e[key] for key in ("id", "title", "stage", "backend", "prerequisites")} | {"case_count": len(e["cases"])}
 
@@ -217,7 +257,7 @@ def error_report(exc, args):
 
 
 def execute(args):
-    if hasattr(args, "exercise"):
+    if getattr(args, "exercise", None):
         e = EXERCISES[args.exercise]
         if getattr(args, "case", None) is not None and not 0 <= args.case < len(e["cases"]):
             raise ValueError(f"case must be in [0,{len(e['cases'])-1}]")
@@ -250,6 +290,8 @@ def execute(args):
     if name == "_smoke":
         from .smoke import infrastructure_smoke
         return {**infrastructure_smoke(args.stage), "command": "smoke"}
+    if name == "check" and getattr(args, "stage", None) is not None:
+        return check_stage(args)
     if name in ("check", "bench"): return managed(worker_command(args, name), args)
     if name == "_worker":
         from .runner import benchmark, check, save_result

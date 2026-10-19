@@ -58,6 +58,7 @@ LAB_GPU=1 ./lab doctor
 |---|---|
 | `./lab list --stage 3` | 查看该阶段的任务；doctor、smoke、status 也支持 `--stage` |
 | `./lab task ID` | 查看 tensor 键名、学生文件和完整任务文档路径；`-v` 增加目的与案例列表 |
+| `./lab check --stage 2` | 按顺序验收阶段 2 的所有关卡和 case，最后汇总；`--timeout` 按每关计算 |
 | `./lab status` | 查看各关状态和记录，默认不运行 kernel |
 | `./lab profile ID --case 0` | 对指定案例运行 Nsight Compute |
 | `./lab --help` | 查看全部命令；子命令加 `--help` 查看参数 |

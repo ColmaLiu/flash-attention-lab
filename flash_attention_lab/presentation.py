@@ -16,6 +16,7 @@ STATES = {
     "CORRECTNESS_PASSED": "PASS", "CORRECTNESS_FAILED": "FAIL",
     "ENV_UNSUPPORTED": "UNSUPPORTED", "EXECUTION_ERROR": "ERROR",
     "TIMEOUT": "TIMEOUT", "INTERRUPTED": "INTERRUPTED", "TOOL_FAILED": "TOOL FAILED",
+    "NOT_RUN": "NOT RUN",
 }
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -207,6 +208,18 @@ def check(ui, data, verbose):
     if verbose: ui.note("Streams: default + nondefault; 2 launches each. Design review: not assessed.")
 
 
+def stage_check(ui, data, verbose):
+    ui.heading(f"Stage {data['stage']}: check summary")
+    rows = []
+    for report in data["exercises"]:
+        passed = sum(c["state"] == "PASS" for c in report.get("cases", []))
+        rows.append([report["exercise"], STATES.get(report["state"], report["state"]),
+                     f"{passed}/{report['case_count']}"])
+    ui.table(["Exercise", "Result", "Cases passed"], rows)
+    passed = sum(r["state"] == "CORRECTNESS_PASSED" for r in data["exercises"])
+    ui.note(f"{passed}/{len(rows)} exercises passed.")
+
+
 def bench(ui, data, verbose):
     ui.heading(f"{data['exercise']}: bench | case {data['case_index']} | validated")
     ui.note(case_label(data["case"]))
@@ -244,7 +257,9 @@ def render(data, *, verbose=False, stream=None):
     ui = Terminal(stream)
     command = data.get("command")
     failed = bool(data.get("exit_code", 0))
-    if failed and data.get("cases"):
+    if command == "check" and "exercises" in data:
+        stage_check(ui, data, verbose)
+    elif failed and data.get("cases"):
         check(ui, data, verbose)
         if data.get("hint"): ui.note(data["hint"])
     elif data.get("message") and failed:
