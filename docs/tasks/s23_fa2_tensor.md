@@ -94,3 +94,7 @@ C++ 使用 `inputs.at("q")` / `outputs.at("o")` 取得 `TensorView`；维度从 
 softmax 统计误用 half；PV 输入 layout 错位；只在 random 小值输入上正确。
 
 先 `--case 0`；失败时从报告的 case/index 固定随机种子复现，再缩到契约中最小 shape，记录第一次错误的坐标。用 `CUDA_LAUNCH_BLOCKING=1 ./lab check ... --case ...` 定位错误 launch；该模式不用于性能结论。超时终止的是本次子进程，不是其他 GPU 用户进程。参见 [调试](../debugging.md) 与 [Blackwell 接口](../blackwell.md)。
+
+## C++ CuTe 依赖
+
+C++ CUTLASS/CuTe 由项目统一安装，所有 CUDA 关卡共用头文件配置。安装及版本锁定见 [环境与安装](../environment.md)。C++ CuTe 头文件与 Python CuTe DSL 是独立依赖。

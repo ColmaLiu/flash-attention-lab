@@ -16,6 +16,8 @@ def build_cuda(exercise_id):
     # when a caller imported it before configuring this project.
     cpp_extension.CUDA_HOME = str(cuda_home())
     cuda_includes, cuda_library = cuda_development_paths(cuda_home())
+    from .cpp_dependencies import cpp_include_paths
+    dependency_includes = cpp_include_paths()
     if exercise_id == "infra_smoke":
         source = ROOT / "flash_attention_lab" / "infra_smoke.cu"
     else:
@@ -26,7 +28,7 @@ def build_cuda(exercise_id):
     os.environ.setdefault("MAX_JOBS", "2")
     return cpp_extension.load(name="falab_" + exercise_id,
                 sources=[str(ROOT / "flash_attention_lab" / "binding.cpp"), str(source)],
-                extra_include_paths=[str(ROOT / "flash_attention_lab"), *map(str, cuda_includes)],
+                extra_include_paths=[str(ROOT / "flash_attention_lab"), *map(str, cuda_includes), *map(str, dependency_includes)],
                 extra_ldflags=["-L" + shlex.quote(str(cuda_library))],
                 extra_cflags=["-O2", "-std=c++17"],
                 extra_cuda_cflags=["-O3", "-lineinfo", "-std=c++17", "-gencode=arch=compute_100a,code=sm_100a"],

@@ -34,9 +34,14 @@ def main():
     # An explicit header entry avoids C-language fallback when opened first.
     sources += sorted((ROOT / "flash_attention_lab").glob("*.h"))
     sources += sorted((ROOT / "flash_attention_lab").glob("*.cpp"))
-    entries = [{"directory": str(ROOT), "file": str(source),
-                "arguments": common + (cuda_flags if source.suffix in (".cu", ".h") else ["-x", "c++"])
-                + ["-c", str(source)]} for source in sources]
+    from flash_attention_lab.cpp_dependencies import cpp_include_paths
+    include_flags = [flag for path in cpp_include_paths() for flag in ("-I", str(path))]
+    entries = []
+    for source in sources:
+        entries.append({"directory": str(ROOT), "file": str(source),
+                        "arguments": common + include_flags
+                        + (cuda_flags if source.suffix in (".cu", ".h") else ["-x", "c++"])
+                        + ["-c", str(source)]})
     output = ROOT / "compile_commands.json"
     output.write_text(json.dumps(entries, indent=2) + "\n")
     print(f"Wrote {len(entries)} editor commands to {output}")

@@ -6,7 +6,7 @@
 
 安装配置面向 **Linux x86_64（glibc ≥ 2.28）、SM100 GPU、Conda**。需要可用的 NVIDIA 驱动；CuTe DSL CUDA 12 系列建议驱动至少 575.51.03。其它 Blackwell compute capability 或 CPU 平台不在此配置的支持范围内。完整要求和来源见 [环境与安装](docs/environment.md)。
 
-克隆或下载仓库，进入仓库根目录后执行：
+使用 `git clone --recurse-submodules <repo-url>` 克隆仓库，进入仓库根目录后执行（已有 Git checkout 也可直接运行 bootstrap）：
 
 ```bash
 # 已有 CUDA Toolkit 12.8 和兼容 C++ 编译器，且 nvcc 在 PATH 中：
@@ -19,7 +19,7 @@ bash scripts/bootstrap.sh
 ./lab smoke --timeout 600      # 实际编译、绑定、GPU 调用和计时设施检查
 ```
 
-安装脚本创建 `flash-attention-lab` Conda 环境，并从公开包源安装项目依赖。`./lab` 自动激活该环境，可在任意目录调用其路径；无需预先存在缓存、结果文件或 Git 元数据。首次编译/JIT 较慢，后续运行复用缓存。
+安装脚本创建 `flash-attention-lab` Conda 环境，安装 Python 依赖，并初始化固定版本的 CUTLASS submodule。所有 CUDA 关卡共用头文件配置，无需逐关安装或声明。`./lab` 自动激活该环境，可在任意目录调用其路径；无需预先存在缓存或结果文件；需保留 Git 元数据以初始化和校验 submodule。首次编译/JIT 较慢，后续运行复用缓存。
 
 默认使用一张 GPU：已有 `CUDA_VISIBLE_DEVICES` 时选其中第一张，否则选 GPU 0。`LAB_GPU` 可指定索引或 UUID；已有可见设备列表时，值必须是列表中的原始标识，不会越过调度器的分配。工具链发现顺序是 `LAB_CUDA_HOME`、`CUDA_HOME`、`PATH` 中的 `nvcc`。多版本 Toolkit 应显式选择 12.8。
 

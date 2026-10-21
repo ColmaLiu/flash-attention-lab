@@ -4,11 +4,12 @@
 
 | 项目 | 项目要求 |
 |---|---|
-| 平台 | Linux x86_64、glibc ≥ 2.28；Bash、Conda、联网安装能力 |
+| 平台 | Linux x86_64、glibc ≥ 2.28；Bash、Git、Conda、联网安装能力 |
 | GPU | compute capability 10.0 / SM100，例如 B200；一次选择一张 GPU |
 | NVIDIA 驱动 | 能运行所选 GPU 和 CUDA 12 系列；CuTe DSL 建议至少 575.51.03 |
 | Python | 专用 Conda 环境中的 Python 3.12 |
 | PyTorch | `2.10.0+cu128`，来自 PyTorch 官方 cu128 wheel 源 |
+| C++ CUTLASS / CuTe | 项目统一 `third_party/cutlass` submodule，版本由 Git gitlink 固定；bootstrap 初始化 |
 | CuTe DSL | `nvidia-cutlass-dsl==4.4.1`，CUDA 12 系列组件 |
 | CUDA Python | `cuda-python==12.9.4`、`cuda-bindings==12.9.4` |
 | CUDA C++ Toolkit | 12.8；运行时检查 GPU 后构建 `compute_100a/sm_100a` |
@@ -48,7 +49,14 @@ conda env create -f environment.yml
 conda activate flash-attention-lab
 python -m pip install -r requirements.txt
 python -m pip check
+git submodule update --init --recursive
 ```
+
+`bootstrap.sh` 初始化项目的 CUTLASS submodule 并安装 Python 包。所有 CUDA 关卡、基础设施 smoke 和 clangd 共用 `third_party/cutlass/include`，无需逐关声明依赖。版本由父仓库的 gitlink 固定；`docs/sources.lock.json` 记录来源和路径，不再重复锁定 commit 或源码包校验和。doctor 会检查头文件及 checkout 是否与 gitlink 一致。
+
+请使用 Git 克隆；首次可用 `git clone --recurse-submodules <repo-url>`，已有 checkout 则运行 bootstrap 或 `git submodule update --init --recursive`。项目 ZIP 不包含 submodule 内容，不能替代完整 Git checkout。不要用 `git submodule update --remote` 安装依赖，它会追踪上游分支而非项目固定版本。离线环境需预先准备好 submodule 对应对象和 checkout。
+
+pip 管理 Python CuTe DSL，Git 管理 C++ CUTLASS/CuTe。构建和运行不会自动联网，也不编译或安装 CUTLASS 示例/官方 attention kernel。C++ CuTe 由 NVCC 编译，与 Python CuTe DSL 的编译器分别管理。
 
 `./lab` 自动激活环境。直接使用 Python 时可 `source scripts/activate.sh`；更方便的统一入口是 `./lab python -m pytest -q`，它使用与学生检查相同的 GPU 和工具链配置。项目以 editable checkout 运行，移动仓库后重新运行安装脚本；不把仅含 Python 包的 wheel 当作完整课程发行物。
 

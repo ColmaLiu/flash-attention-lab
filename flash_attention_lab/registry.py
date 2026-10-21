@@ -27,10 +27,17 @@ def load_student(e):
 def fingerprint(e):
     # Include all student sources (including helpers/dependencies) and infrastructure.
     h = hashlib.sha256()
-    paths = [ROOT / "curriculum.json"]
+    paths = [ROOT / "curriculum.json", ROOT / "docs/sources.lock.json"]
+    if (ROOT / ".gitmodules").is_file():
+        paths.append(ROOT / ".gitmodules")
     for folder in ("students", "flash_attention_lab"):
         paths += sorted(p for p in (ROOT / folder).rglob("*")
                         if p.suffix in (".py", ".cu", ".cuh", ".h", ".cpp"))
+    # Header edits invalidate results as well as Ninja compilation dependencies.
+    if e["backend"] == "cuda":
+        from .cpp_dependencies import cutlass_root
+        headers = cutlass_root() / "include"
+        paths += sorted(p for p in headers.rglob("*") if p.is_file())
     for p in paths:
         h.update(str(p.relative_to(ROOT)).encode())
         h.update(p.read_bytes())

@@ -29,8 +29,10 @@ def snapshot():
     for name in ("torch", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base", "cuda-python", "cuda-bindings", "pytest", "ninja"):
         try: packages[name] = metadata.version(name)
         except metadata.PackageNotFoundError: packages[name] = None
+    from .cpp_dependencies import cutlass_revision, cutlass_root
     toolkit = cuda_home()
     info = {"os": platform.platform(), "python": sys.version, "executable": sys.executable,
+            "cpp_cutlass": {"commit": cutlass_revision(), "root": str(cutlass_root())},
             "packages": packages, "python_prefix": sys.prefix,
             "conda_prefix": os.getenv("CONDA_PREFIX"), "conda_environment": os.getenv("CONDA_DEFAULT_ENV"),
             "cuda_home": str(toolkit) if toolkit else None,
@@ -75,6 +77,8 @@ def require_environment(backend):
         if torch.version.cuda != "12.8":
             raise EnvironmentUnsupported("install the pinned PyTorch cu128 wheel via bash scripts/bootstrap.sh")
         cuda_development_paths(toolkit)
+        from .cpp_dependencies import cpp_include_paths
+        cpp_include_paths()
         if not tool_path("ninja"):
             raise EnvironmentUnsupported("ninja is missing from PATH; run bash scripts/bootstrap.sh")
         if not tool_path(os.getenv("CXX", "c++")):

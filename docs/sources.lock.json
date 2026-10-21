@@ -1,35 +1,54 @@
 [
   {
-    "name": "FA1",
-    "url": "https://arxiv.org/abs/2205.14135",
-    "commit": null
+    "name": "FA1 paper",
+    "url": "https://arxiv.org/abs/2205.14135v2",
+    "commit": null,
+    "version": "arXiv:2205.14135v2"
   },
   {
-    "name": "FA2",
-    "url": "https://arxiv.org/abs/2307.08691",
-    "commit": null
+    "name": "FA2 paper",
+    "url": "https://arxiv.org/abs/2307.08691v1",
+    "commit": null,
+    "version": "arXiv:2307.08691v1"
   },
   {
-    "name": "FA4",
-    "url": "https://arxiv.org/html/2603.05451v1",
-    "commit": null
+    "name": "FA4 paper",
+    "url": "https://arxiv.org/abs/2603.05451v1",
+    "commit": null,
+    "version": "arXiv:2603.05451v1"
+  },
+  {
+    "name": "FA1 historical implementation",
+    "version": "v1.0.9",
+    "url": "https://github.com/Dao-AILab/flash-attention/tree/6d48e14a6c2f551db96f0badc658a6279a929df3",
+    "commit": "6d48e14a6c2f551db96f0badc658a6279a929df3"
   },
   {
     "name": "FA2 official forward",
-    "url": "https://github.com/Dao-AILab/flash-attention/blob/1fc0221183e799363001394a12dd9e78e15f5dda/csrc/flash_attn/src/flash_fwd_kernel.h",
-    "commit": "1fc0221183e799363001394a12dd9e78e15f5dda",
-    "sha256": "9b31cdff4009fcd0e1bc52f9b97907d226442db24e0a150d8dfed0711ee64dda"
+    "url": "https://github.com/Dao-AILab/flash-attention/blob/5231d95fe13733fb534c01895f7ea88c6a6c7793/csrc/flash_attn/src/flash_fwd_kernel.h",
+    "commit": "5231d95fe13733fb534c01895f7ea88c6a6c7793",
+    "sha256": "f62f9f9125bc24330b48e2cbf2fbdb369c4f9f3e326c8e66a797f8e09f934ec1",
+    "version": "v2.7.4.post1"
   },
   {
     "name": "FA4 SM100 forward",
     "url": "https://github.com/Dao-AILab/flash-attention/blob/1fc0221183e799363001394a12dd9e78e15f5dda/flash_attn/cute/flash_fwd_sm100.py",
     "commit": "1fc0221183e799363001394a12dd9e78e15f5dda",
-    "sha256": "c8cbc40b97c9f2a8fa5ce3da5dbe4f0eb80787158f1e4398889ca02572ec1cdb"
+    "sha256": "c8cbc40b97c9f2a8fa5ce3da5dbe4f0eb80787158f1e4398889ca02572ec1cdb",
+    "version": "fa4-v4.0.0.beta35"
   },
   {
     "name": "CUTLASS v4.4.1 setup",
     "url": "https://github.com/NVIDIA/cutlass/blob/4370102f9dacab813282e1d67722fceb0b90a019/python/CuTeDSL/setup.sh",
     "commit": "4370102f9dacab813282e1d67722fceb0b90a019",
-    "sha256": "dd07c90fbc211cdc8416bcc425eef239351b9ce3578aba27c296344279e92ae6"
+    "sha256": "dd07c90fbc211cdc8416bcc425eef239351b9ce3578aba27c296344279e92ae6",
+    "version": "v4.4.1"
+  },
+  {
+    "name": "Project C++ CUTLASS headers",
+    "url": "https://github.com/NVIDIA/cutlass.git",
+    "id": "cutlass_cpp",
+    "path": "third_party/cutlass",
+    "version_source": "gitlink:third_party/cutlass"
   }
 ]
