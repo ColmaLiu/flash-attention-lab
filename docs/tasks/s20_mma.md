@@ -6,7 +6,7 @@
 
 Tensor Core 不是把普通点积换一个函数名。一次矩阵指令由线程集体提供分布式 operands，并将 accumulator 分布在线程寄存器中。数学矩阵坐标、shared-memory 布局和寄存器 fragment 是三种不同视图，必须画出它们之间的对应。先用坐标模式识别交换、重复与漏写，再用随机输入比较数值。
 
-FP16/BF16 输入与 FP32 accumulation 是两个独立精度选择。参考必须从已经量化的相同输入计算，不能拿未量化的 FP32 输入作对照。小矩阵验证指令语义，多 CTA、长 K 验证完整 GEMM。WMMA 可作为起点；PTX mma.sync/ldmatrix 适合进一步理解显式 fragment，但不要求使用 CuTe。
+FP16/BF16 输入与 FP32 accumulation 是两个独立精度选择。参考必须从已经量化的相同输入计算，不能拿未量化的 FP32 输入作对照。小矩阵验证指令语义，多 CTA、长 K 验证完整 GEMM。本关答案使用 WMMA；PTX mma.sync/ldmatrix 适合进一步理解显式 fragment，并为下一阶段阅读 C++ CuTe 的指令与布局表达做准备。
 
 ## 定义、代码与参考
 
@@ -19,7 +19,7 @@ C=AB；输入 FP16/BF16、输出 FP32。输出舍入预算不包含输入量化�
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：cuBLAS GEMM；保持输入 dtype 与 FP32 输出一致。
 
-源码阅读：PTX ISA 的 mma.sync 与 ldmatrix；本地 solutions/s20_mma/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [references](../../references/README.md)。
+源码阅读：PTX ISA 的 mma.sync 与 ldmatrix；本地 solutions/s20_mma/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -43,7 +43,7 @@ C=AB；输入 FP16/BF16、输出 FP32。输出舍入预算不包含输入量化�
 
 解释 fragment/ldmatrix/SMEM 的对应；用生成指令确认 Tensor Core 执行。
 
-完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。机械正确性不自动证明使用了目标机制，也不要求初学版本在所有 shape 打败厂商库。
+完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。用源码确认目标机制，再用各个 perf case 的实测差距确定下一步优化。
 
 ```bash
 ./lab task s20_mma -v

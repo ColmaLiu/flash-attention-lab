@@ -1,6 +1,6 @@
 # 路线与源码验收
 
-课程围绕完整算子推进。一个 lesson 可以先完成简单正确版本，再在同一入口的实验分支上优化；指令级试验属于该课的调试步骤，不单独包装成通关。保留控制变量的旧实现时放在自己的忽略实验目录，或显式命名的学生 helper。
+课程围绕完整算子推进。一个 lesson 可以先完成简单正确版本，再在同一入口的实验分支上优化；指令级试验属于该课的调试步骤，不单独包装成通关。对照实验的实现分别命名，放在个人实验目录或学生 helper 中。
 
 | 阶段 | 课程 | 前置 | 主要设计证据 |
 |---|---|---|
@@ -20,12 +20,12 @@
 | 4 | [s42_numerics · Softmax 吞吐与数值预算](tasks/s42_numerics.md) | s41_overlap | 区分指数近似误差、概率舍入与状态 rescale；保持 LSE 自然对数约定。 |
 | 4 | [s43_schedule · 边界、调度与性能结业实验](tasks/s43_schedule.md) | s42_numerics | 提供完整正确性、内存安全、设计证据与同机参考性能，分别说明吞吐和尾延迟。 |
 
-每课运行 `./lab task ID -v` 查看测试的序号与意图。`check` 的数值通过不能替代上表的设计证据，尤其不能据此把一般流式 attention 命名为 FA1、把更多 CTA 命名为 FA2、或把在 B200 上执行命名为 FA4。
+每课运行 `./lab task ID -v` 查看测试的序号与意图。数值验收之后按上表检查设计证据：FA1 的 IO 与遍历组织，FA2 的 query 并行、CTA 分工及非矩阵操作，FA4 的异步 pipeline、softmax 与调度。
 
 阶段 0 从矩形转置开始解释线程和地址，再在可变宽度 softmax 中引入归约。阶段 1 先学 GEMM 再组合 attention，避免在不会数据复用时直接要求实现完整 fused kernel。阶段 2 先单独验证 Tensor Core 和搬运，随后融合。阶段 3 使用相同数学工作负载理解 Blackwell 新资源；阶段 4 在已有完整源码上研究依赖、误差与调度。
 
 ## 阶段 4 的源码阅读与消融
 
-完整答案集中在固定官方 SM100 forward 及其 helper，四关不是四份互相复制的 kernel。s40 阅读数据通路；s41 阅读 pipeline/correction；s42 阅读指数与 rescale；s43 阅读调度及边界。若某机制不能通过当前固定版本独立关闭，要先修改独立参考分支并验证，再做消融；不能把同一默认配置改名四次解释为性能进阶。CUDA/PTX 学生入口仍相互独立。
+阶段 4 共享固定官方 SM100 forward 及其 helper。s40 研究单 query stage 数据通路；s41 增加双 stage overlap；s42 启用指数与 conditional rescale；s43 改变调度并扩展边界。各入口的 CONFIG 记录实际变量，源码与可控项见 [参考实现](reference-implementations.md)。学生分别实现自己的 CUDA C++/PTX 入口。
 
 课程不扩展 backward、varlen、paged attention、GQA、FP8/FP4。官方完整依赖可能包含这些通用模块，但它们不成为本课程的必修范围。

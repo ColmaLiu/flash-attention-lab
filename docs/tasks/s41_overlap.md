@@ -19,7 +19,7 @@ Blackwell 上矩阵算力提升后，softmax、数据交换和 correction 的成
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
 
-源码阅读：官方 FA4 论文 §3.1.2；本地 flash_fwd_sm100.py 中的 warp 角色、pipeline 及 correction 路径。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [references](../../references/README.md)。
+源码阅读：官方 FA4 论文 §3.1.2；本地 flash_fwd_sm100.py 中的 warp 角色、pipeline 及 correction 路径。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -43,7 +43,7 @@ Blackwell 上矩阵算力提升后，softmax、数据交换和 correction 的成
 
 给出跨 tile 的就绪条件与不会覆盖活跃数据的证据；用时间线验证 overlap。
 
-完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。机械正确性不自动证明使用了目标机制，也不要求初学版本在所有 shape 打败厂商库。
+完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。用源码确认目标机制，再用各个 perf case 的实测差距确定下一步优化。
 
 ```bash
 ./lab task s41_overlap -v

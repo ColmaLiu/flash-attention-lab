@@ -1,7 +1,7 @@
 import torch
 from .build import build_cuda, descriptors
 from .cases import make_inputs, output_spec, validate_inputs
-from .environment import probe_blackwell_interfaces, require_environment
+from .environment import require_environment
 from .reference import mathematical_reference
 from .registry import CATALOG, load_student
 from .timing import measure
@@ -17,7 +17,6 @@ def infrastructure_smoke(stage=None):
         module = load_student(e)
         assert isinstance(module.IMPLEMENTED, bool)
         assert callable(module.workspace_spec)
-        if e["backend"] == "cute": assert callable(module.prepare)
         # Bounded infrastructure probe; full curriculum correctness is a separate command.
         for case in e["cases"][:1]:
             inputs, config = make_inputs(e, case, "cuda")
@@ -51,11 +50,4 @@ def infrastructure_smoke(stage=None):
             else: raise AssertionError(f"{e['id']} stub returned without error")
             bindings.append(e["id"])
         result["cuda_stub_bindings_compiled"] = bindings
-    if "cute" in backends:
-        from .cute_smoke import prepare_sentinel
-        launch = prepare_sentinel(out, stream)
-        out.zero_(); launch(); torch.cuda.synchronize()
-        assert out.item() == 7
-        result["cute_sentinel"] = measure(launch, 2, 3, 5)
-        result["blackwell_api_symbols"] = probe_blackwell_interfaces()
     return result

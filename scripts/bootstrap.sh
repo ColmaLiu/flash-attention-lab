@@ -50,6 +50,12 @@ if $lab_with_cuda; then
     conda deactivate
     conda activate "$lab_env"
 fi
+# Both source versions are owned by the parent gitlinks. Do not recursively
+# initialize upstream reference repositories' unrelated nested dependencies.
+if ! command -v git >/dev/null || ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+    echo 'ENV_UNSUPPORTED: use a Git clone with its pinned source submodules' >&2; exit 4
+fi
+git submodule update --init -- third_party/cutlass third_party/flash-attention
 "$CONDA_PREFIX/bin/python" -m pip install -r requirements.txt
 "$CONDA_PREFIX/bin/python" -m pip check
 echo 'Installed. Run ./lab doctor, ./lab smoke, then ./lab task s00_layout.'

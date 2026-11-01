@@ -1,4 +1,4 @@
-"""Vendored FA4 answer; explicit configuration, no student fallback."""
+"""Pinned FA4 answer; explicit configuration, no student fallback."""
 import importlib.util
 from flash_attention_lab.registry import ROOT
 IMPLEMENTED = True

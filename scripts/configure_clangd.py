@@ -30,6 +30,7 @@ def main():
                   "-D__CUDA_NO_HALF_OPERATORS__", "-D__CUDA_NO_HALF_CONVERSIONS__",
                   "-D__CUDA_NO_BFLOAT16_CONVERSIONS__", "-D__CUDA_NO_HALF2_OPERATORS__"]
     sources = sorted((ROOT / "students" / "cuda").rglob("*.cu"))
+    sources += sorted(p for p in (ROOT / "solutions").rglob("*") if p.suffix in (".cu", ".cuh", ".cpp"))
     sources += sorted((ROOT / "flash_attention_lab").glob("*.cu"))
     # An explicit header entry avoids C-language fallback when opened first.
     sources += sorted((ROOT / "flash_attention_lab").glob("*.h"))
@@ -40,7 +41,7 @@ def main():
     for source in sources:
         entries.append({"directory": str(ROOT), "file": str(source),
                         "arguments": common + include_flags
-                        + (cuda_flags if source.suffix in (".cu", ".h") else ["-x", "c++"])
+                        + (cuda_flags if source.suffix in (".cu", ".h", ".cuh") else ["-x", "c++"])
                         + ["-c", str(source)]})
     output = ROOT / "compile_commands.json"
     output.write_text(json.dumps(entries, indent=2) + "\n")

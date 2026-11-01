@@ -275,13 +275,12 @@ def execute(args):
                 "dtypes": sorted({c["dtype"] for c in e["cases"]}), "student_files": files,
                 "task_file": f"docs/tasks/{e['id']}.md", "tensors": [[v.strip() for v in row] for row in tensors], "cases": e["cases"]}
     if name == "doctor":
-        from .environment import snapshot, require_environment, probe_blackwell_interfaces
+        from .environment import snapshot, require_environment
         result = snapshot()
         result.update(command=name, checks={})
         for backend in sorted({e["backend"] for e in selected(args.stage)}):
             try: require_environment(backend); result["checks"][backend] = "ENVIRONMENT_OK"
             except EnvironmentUnsupported as exc: result["checks"][backend] = f"ENV_UNSUPPORTED: {exc}"
-        if result["checks"].get("cute") == "ENVIRONMENT_OK": result["blackwell_api_symbols"] = probe_blackwell_interfaces()
         result["exit_code"] = 4 if any(v.startswith("ENV_UNSUPPORTED") for v in result["checks"].values()) else 0
         result["state"] = "ENV_UNSUPPORTED" if result["exit_code"] else "ENVIRONMENT_OK"
         return result

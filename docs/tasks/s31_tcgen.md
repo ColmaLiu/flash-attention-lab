@@ -19,7 +19,7 @@ BF16 A[M,K]、B[K,N]，FP32 C[M,N]。M 是 64 的倍数、N 是 8 的倍数、K 
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：cuBLAS GEMM；保持输入 dtype 与 FP32 输出一致。
 
-源码阅读：references/cutlass-sm100/examples/cute/tutorial/blackwell/ 与 include/cute/arch/ 的 SM100 源码；solutions/s31_tcgen/。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [references](../../references/README.md)。
+源码阅读：third_party/cutlass/examples/cute/tutorial/blackwell/ 与 include/cute/arch/ 的 SM100 源码；solutions/s31_tcgen/。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -42,7 +42,7 @@ BF16 A[M,K]、B[K,N]，FP32 C[M,N]。M 是 64 的倍数、N 是 8 的倍数、K 
 
 说明 SMEM descriptor、TMEM lifetime、发布/等待和输出交接；检查实际 tcgen05 指令。
 
-完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。机械正确性不自动证明使用了目标机制，也不要求初学版本在所有 shape 打败厂商库。
+完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。用源码确认目标机制，再用各个 perf case 的实测差距确定下一步优化。
 
 ```bash
 ./lab task s31_tcgen -v

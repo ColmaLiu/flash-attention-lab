@@ -1,4 +1,4 @@
-"""Student execution path. No import of reference or optional official backends."""
+"""Independent student and solution paths; libraries never replace student kernels."""
 from dataclasses import dataclass
 import torch
 from .cases import allocate_outputs, validate_inputs

@@ -180,3 +180,25 @@ def test_activation_reports_missing_environment_without_losing_shell_options(tmp
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0
     assert 'ENV_UNSUPPORTED' in result.stderr
+
+
+def test_complete_course_packages_use_the_single_declared_recipe(monkeypatch):
+    import tomllib
+    from flash_attention_lab import environment
+    requirements = tomllib.loads((runtime.ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    versions = dict(requirement.split("==", 1) for requirement in requirements)
+    versions["torch"] += "+cu128"
+    monkeypatch.setattr(environment.metadata, "version", lambda name: versions[name])
+    environment.require_course_packages()
+    versions["ninja"] = "0.0.0"
+    with pytest.raises(EnvironmentUnsupported, match="course dependency ninja.*found 0.0.0"):
+        environment.require_course_packages()
+
+
+def test_missing_course_package_reports_bootstrap(monkeypatch):
+    from flash_attention_lab import environment
+    def missing(name):
+        raise environment.metadata.PackageNotFoundError(name)
+    monkeypatch.setattr(environment.metadata, "version", missing)
+    with pytest.raises(EnvironmentUnsupported, match="course dependency.*missing.*bootstrap.sh"):
+        environment.require_course_packages()

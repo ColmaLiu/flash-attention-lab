@@ -1,5 +1,5 @@
 // Host integration of the pinned NVIDIA CUTLASS SM100 implementation.
-// Full device source and BSD-3-Clause license: references/cutlass-sm100/.
+// Full device source and BSD-3-Clause license: third_party/cutlass/.
 #include "cuda_api.h"
 #include <cute/tensor.hpp>
 #include <cutlass/cutlass.h>

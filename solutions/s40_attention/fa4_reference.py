@@ -1,7 +1,7 @@
-"""Directly compile the vendored FA4 SM100 device implementation.
+"""Directly compile the submodule FA4 SM100 device implementation.
 
 This module is host integration. The complete kernel, pipeline, MMA and softmax
-sources live in references/flash-attention/flash_attn/cute, with their license.
+sources live in third_party/flash-attention/flash_attn/cute, with their license.
 The source patch exposes its rescale threshold for controlled experiments.
 """
 from pathlib import Path
@@ -10,6 +10,8 @@ import sys
 import types
 from flash_attention_lab.registry import ROOT
 from flash_attention_lab.errors import EnvironmentUnsupported
+from flash_attention_lab.cpp_dependencies import require_source
+from flash_attention_lab.source_cache import prepare_flash_attention_source
 
 _COMPILED = {}
 _SOURCE_DIGEST = None
@@ -18,8 +20,8 @@ _SOURCE_DIGEST = None
 def _check_source_digest():
     global _SOURCE_DIGEST
     digest = hashlib.sha256()
-    paths = sorted((ROOT / "references/flash-attention").rglob("*.py"))
-    paths.append(Path(__file__))
+    paths = sorted((require_source("flash-attention") / "flash_attn/cute").rglob("*.py"))
+    paths.extend([Path(__file__), ROOT / "patches/flash-attention/rescale-threshold.patch", ROOT / "flash_attention_lab/source_cache.py"])
     for path in paths:
         digest.update(str(path.relative_to(ROOT)).encode())
         digest.update(path.read_bytes())
@@ -29,9 +31,9 @@ def _check_source_digest():
     _SOURCE_DIGEST = current
 
 
-def _source_namespace():
+def _source_namespace(source_root):
     """Load the pinned source, never an unrelated installed flash_attn package."""
-    base = ROOT / "references/flash-attention/flash_attn"
+    base = source_root / "flash_attn"
     for name, path in (("flash_attn", base), ("flash_attn.cute", base / "cute")):
         if name in sys.modules:
             paths = [Path(p).resolve() for p in getattr(sys.modules[name], "__path__", ())]
@@ -46,7 +48,7 @@ def _source_namespace():
 
 def prepare_fa4(inputs, outputs, config, stream, *, q_stage, emulated_exp, rescale_threshold, persistent):
     _check_source_digest()
-    _source_namespace()
+    _source_namespace(prepare_flash_attention_source())
     try:
         import cutlass
         import cutlass.cute as cute
@@ -54,7 +56,7 @@ def prepare_fa4(inputs, outputs, config, stream, *, q_stage, emulated_exp, resca
         from flash_attn.cute.cute_dsl_utils import to_cute_tensor
         from flash_attn.cute.flash_fwd_sm100 import FlashAttentionForwardSm100
     except ImportError as exc:
-        raise EnvironmentUnsupported("FA4 reference dependencies missing: run ./lab python -m pip install -e '.[fa4]'") from exc
+        raise EnvironmentUnsupported("FA4 reference dependencies missing: run bash scripts/bootstrap.sh") from exc
     q, k, v = (inputs[name] for name in ("q", "k", "v"))
     tensors = tuple(to_cute_tensor(t, enable_tvm_ffi=False) for t in (q, k, v, outputs["o"], outputs["lse"]))
     key = (tuple(q.shape), q.dtype, config["causal"], q_stage, emulated_exp, rescale_threshold, persistent)

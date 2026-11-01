@@ -19,7 +19,7 @@ TMA、矩阵引擎和普通线程执行单元可以并行工作，但它们对�
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：cuBLAS GEMM；保持输入 dtype 与 FP32 输出一致。
 
-源码阅读：本地 CUTLASS SM100 collective 与 pipeline 源码，solutions/s32_specialize/；PTX tcgen05 commit/completion。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [references](../../references/README.md)。
+源码阅读：本地 CUTLASS SM100 collective 与 pipeline 源码，solutions/s32_specialize/；PTX tcgen05 commit/completion。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -42,7 +42,7 @@ TMA、矩阵引擎和普通线程执行单元可以并行工作，但它们对�
 
 用状态图证明所有缓冲读写与复用有顺序，短 K/长 K 均能 drain。
 
-完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。机械正确性不自动证明使用了目标机制，也不要求初学版本在所有 shape 打败厂商库。
+完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。用源码确认目标机制，再用各个 perf case 的实测差距确定下一步优化。
 
 ```bash
 ./lab task s32_specialize -v

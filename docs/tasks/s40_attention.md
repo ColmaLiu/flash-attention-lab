@@ -6,7 +6,7 @@
 
 GEMM 的结果可以直接写输出，attention 的 QK 结果还要经过 softmax 后成为 PV 的输入。因此 SM100 GEMM 并不能机械拼接成高效 attention。需要追踪 S、P、O 在 TMEM、SMEM、寄存器间的流转，明确每次精度转换和 buffer 重用。
 
-本阶段完整可读答案采用固定官方 FA4 forward 源码，源码保存在 references 中；这不是声称额外实现了一个独立教学 FA4。先按单个 query 块阅读数据生命周期，再阅读跨块 overlap。学生入口保持独立，允许从自己的 CUDA/PTX 版本逐步优化；答案使用的语言不约束学生实现语言。
+本阶段答案采用 `third_party/flash-attention` 中固定的官方 CuTe DSL forward 源码。先按单个 query 块阅读数据生命周期，再阅读跨块 overlap。学生使用自己的 CUDA C++/PTX 入口逐步实现和优化。
 
 ## 定义、代码与参考
 
@@ -19,7 +19,7 @@ BF16 BNHD，D=64/128，N 是 128 的倍数，先只支持 noncausal。返回 O �
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
 
-源码阅读：references/flash-attention/flash_attn/cute/flash_fwd_sm100.py；对应 solutions/s40_attention/。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [references](../../references/README.md)。
+源码阅读：third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py；对应 solutions/s40_attention/。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -43,7 +43,7 @@ BF16 BNHD，D=64/128，N 是 128 的倍数，先只支持 noncausal。返回 O �
 
 标明 S、P、O 及 LSE 的存储位置、精度与生命周期；不得包装官方 attention。
 
-完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。机械正确性不自动证明使用了目标机制，也不要求初学版本在所有 shape 打败厂商库。
+完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。用源码确认目标机制，再用各个 perf case 的实测差距确定下一步优化。
 
 ```bash
 ./lab task s40_attention -v

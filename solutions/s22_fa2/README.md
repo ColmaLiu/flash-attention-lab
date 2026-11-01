@@ -7,12 +7,12 @@ to the PV multiply. It supports the public contiguous **BNHD** input/output
 layout, BHN natural-log LSE, FP16/BF16, D=64/128, arbitrary positive sequence
 lengths, and causal/noncausal masks.
 
-`wmma_readable.cuh` is the preserved, complete CUDA/WMMA teaching alternative.
+`wmma_readable.cuh` is a complete CUDA/WMMA teaching alternative.
 It stages score and PV tiles through shared memory to expose each mathematical
 phase. Set `CONFIG = {"readable_wmma": 1}` in this solution's `entry.py` to select
-it, and rerun validation before measuring. This version has extra shared-memory
-traffic and synchronization; it is not described as production FA2 performance.
-The student entry never selects either answer automatically.
+it, and rerun validation before measuring. This version exposes intermediate
+tiles through shared memory, which adds traffic and synchronization. Both
+answers have independent validation paths.
 
 The optimized version masks **fragment coordinates**, zero-fills invalid rows
 on asynchronous loads, and predicates final stores. During reverse causal
@@ -23,10 +23,9 @@ softmax, and PV, so no cross-warp output reduction is needed.
 
 ## Build and compare
 
-The solution declares a private include path to the bundled, versioned
-`references/cutlass-sm100/include` tree. The student build remains plain CUDA/PTX
-unless the learner explicitly selects optional headers. No Python CuTe DSL or
-installed FlashAttention package is involved in this solution.
+The solution uses C++ CuTe headers from the gitlink-pinned
+`third_party/cutlass` submodule and compiles with nvcc. `bootstrap` installs the
+complete course environment and initializes its upstream sources.
 
 ```bash
 ./lab check s22 --solution
@@ -38,9 +37,8 @@ installed FlashAttention package is involved in this solution.
 
 The optimized independent library anchor is explicit cuDNN attention including
 O and LSE. Both implementations are validated against the independent FP64
-oracle before graph timing; the measured ratio, rather than the implementation's
-name, determines how close a case is to the library. Inspect common perf cases
-as well as causal and tail cases. No hardware-independent speed claim is made.
+oracle before graph timing. Inspect the measured ratios on common perf cases
+as well as causal and tail cases, with the full shape, dtype and GPU recorded.
 
 ## Source provenance
 
@@ -50,6 +48,6 @@ commit `5231d95fe13733fb534c01895f7ea88c6a6c7793` (BSD-3-Clause). Relevant upstr
 files are `csrc/flash_attn/src/kernel_traits.h`, `utils.h`, `softmax.h`, and
 `flash_fwd_kernel.h`. `LICENSE.flash-attention` and `AUTHORS.flash-attention`
 retain upstream license and attribution. This local implementation adds BNHD
-addressing, predicated transfers/stores, and causal/tail masks. It is not an
-unmodified official kernel. The bundled CUTLASS revision and license are recorded
-under `references/cutlass-sm100/`.
+addressing, predicated transfers/stores, and causal/tail masks. The CUTLASS
+revision is locked by the gitlink; its license is available in
+`third_party/cutlass/LICENSE.txt`.

@@ -12,21 +12,12 @@ from .registry import ROOT, student_dir
 def build_cuda(exercise_id, *, solution=False):
     from .environment import require_environment
     from .runtime import cuda_home, cuda_development_paths
-    from .registry import EXERCISES, load_student
+    from .registry import EXERCISES
     from .cpp_dependencies import cpp_include_paths
     require_environment("cuda")
     toolkit = cuda_home()
     cuda_includes, cuda_library = cuda_development_paths(toolkit)
     dependency_includes = cpp_include_paths()
-    if solution:
-        declared = getattr(load_student(EXERCISES[exercise_id], solution=True), "CPP_INCLUDE_DIRS", [])
-        if not declared and exercise_id in ("s31_tcgen", "s32_specialize"):
-            declared = ["references/cutlass-sm100/include", "references/cutlass-sm100/tools/util/include"]
-        solution_includes = [(ROOT / name).resolve() for name in declared]
-        for path in solution_includes:
-            if not path.is_dir():
-                raise RuntimeError(f"missing solution C++ dependency: {path}")
-        dependency_includes = [*solution_includes, *dependency_includes]
     source = (ROOT / "flash_attention_lab/infra_smoke.cu" if exercise_id == "infra_smoke"
               else (ROOT / "solutions" / exercise_id if solution else student_dir(EXERCISES[exercise_id])) / "kernel.cu")
     includes = tuple(map(str, [ROOT / "flash_attention_lab", *cuda_includes, *dependency_includes]))
@@ -35,7 +26,7 @@ def build_cuda(exercise_id, *, solution=False):
     binding = source.parent / "binding.cpp"
     if not binding.is_file():
         binding = ROOT / "flash_attention_lab/binding.cpp"
-    # Changes to local helpers and selected optional headers invalidate the in-process
+    # Changes to local helpers and fixed dependency headers invalidate the in-process
     # module too. Ninja alone is insufficient: cpp_extension also caches loaded modules.
     digest = hashlib.sha256()
     sources = [binding, ROOT / "flash_attention_lab/cuda_api.h", source]

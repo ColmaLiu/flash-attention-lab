@@ -29,12 +29,10 @@ def snapshot():
     for name in ("torch", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base", "cuda-python", "cuda-bindings", "pytest", "ninja", "quack-kernels", "apache-tvm-ffi", "torch-c-dlpack-ext", "einops"):
         try: packages[name] = metadata.version(name)
         except metadata.PackageNotFoundError: packages[name] = None
-    from .cpp_dependencies import cutlass_revision, cutlass_root
+    from .cpp_dependencies import source_snapshot
     toolkit = cuda_home()
     info = {"os": platform.platform(), "python": sys.version, "executable": sys.executable,
-            "cpp_cutlass": {"enabled": bool(os.getenv("LAB_CUTLASS_ROOT")),
-                            "commit": cutlass_revision(),
-                            "root": str(cutlass_root()) if os.getenv("LAB_CUTLASS_ROOT") else None},
+            "sources": source_snapshot(),
             "packages": packages, "python_prefix": sys.prefix,
             "conda_prefix": os.getenv("CONDA_PREFIX"), "conda_environment": os.getenv("CONDA_DEFAULT_ENV"),
             "cuda_home": str(toolkit) if toolkit else None,
@@ -89,14 +87,34 @@ def require_environment(backend):
             raise EnvironmentUnsupported("CC does not name an executable host compiler")
     elif backend == "cute":
         try:
-            # Optional language tooling only. Official reference adapters validate
-            # their own pinned compiler version; CUDA students do not use DSL.
             import cutlass.cute  # noqa: F401
             from cuda.bindings import driver  # noqa: F401
         except (ImportError, OSError, metadata.PackageNotFoundError) as exc:
             raise EnvironmentUnsupported(f"CuTe DSL dependencies missing: {exc}") from exc
     else:
         raise ValueError(f"unknown backend: {backend}")
+    from .cpp_dependencies import SOURCES, require_source
+    for name in SOURCES:
+        require_source(name)
+    require_course_packages()
+
+
+
+def require_course_packages():
+    """Check the single package recipe used by bootstrap, without duplicate pins."""
+    import tomllib
+    from pathlib import Path
+    recipe = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    requirements = tomllib.loads(recipe.read_text())["project"]["dependencies"]
+    for requirement in requirements:
+        name, expected = requirement.split("==", 1)
+        try:
+            actual = metadata.version(name)
+        except metadata.PackageNotFoundError as exc:
+            raise EnvironmentUnsupported(f"course dependency {name} is missing; run bash scripts/bootstrap.sh") from exc
+        # The recipe selects PyTorch's CUDA local version separately in requirements.txt.
+        if actual.split("+", 1)[0] != expected:
+            raise EnvironmentUnsupported(f"course dependency {name}=={expected} required, found {actual}; run bash scripts/bootstrap.sh")
 
 
 def require_ncu_sections(binary):

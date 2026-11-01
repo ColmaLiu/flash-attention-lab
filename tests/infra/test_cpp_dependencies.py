@@ -1,4 +1,4 @@
-"""Optional headers do not burden plain CUDA; selected bundled headers stay pinned."""
+"""Pinned Git sources are mandatory, shared by student and solution builds."""
 import subprocess
 import pytest
 from flash_attention_lab import cpp_dependencies as deps
@@ -11,97 +11,117 @@ def git(root, *args):
         text=True, stderr=subprocess.DEVNULL).strip()
 
 
+def make_source(root, name):
+    root.mkdir(parents=True, exist_ok=True)
+    git(root, "init")
+    for filename in deps.SOURCES[name]["required"]:
+        path = root / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// fixture source\n")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "Fixture source")
+    return git(root, "rev-parse", "HEAD")
+
+
 @pytest.fixture
 def checkout(tmp_path, monkeypatch):
     # Commits belong exclusively to disposable test repositories.
     monkeypatch.setattr(deps, "ROOT", tmp_path)
-    monkeypatch.setenv("LAB_CUTLASS_ROOT", str(tmp_path / deps.CUTLASS_PATH))
     git(tmp_path, "init")
-    root = deps.cutlass_root()
-    root.mkdir(parents=True)
-    git(root, "init")
-    for name in ("cute/tensor.hpp", "cutlass/cutlass.h"):
-        p = root / "include" / name
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("// fixture header\n")
-    git(root, "add", "include")
-    git(root, "commit", "-m", "Fixture headers")
-    revision = git(root, "rev-parse", "HEAD")
-    git(tmp_path, "update-index", "--add", "--cacheinfo", f"160000,{revision},{deps.CUTLASS_PATH}")
-    return tmp_path, root, revision
+    sources = {}
+    for name, spec in deps.SOURCES.items():
+        root = tmp_path / spec["path"]
+        revision = make_source(root, name)
+        git(tmp_path, "update-index", "--add", "--cacheinfo", f"160000,{revision},{spec['path']}")
+        sources[name] = (root, revision)
+    return tmp_path, sources
 
 
-def test_plain_cuda_needs_no_submodule(tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", deps.SOURCES)
+def test_missing_source_is_not_ready(tmp_path, monkeypatch, name):
     monkeypatch.setattr(deps, "ROOT", tmp_path)
-    monkeypatch.delenv("LAB_CUTLASS_ROOT", raising=False)
-    assert deps.cpp_include_paths() == []
-    assert deps.cutlass_revision() is None
+    with pytest.raises(EnvironmentUnsupported, match="gitlink missing.*bootstrap.sh"):
+        deps.require_source(name)
+    assert deps.source_info(name)["commit"] is None
 
 
-def test_missing_selected_headers_report_setup(tmp_path, monkeypatch):
-    monkeypatch.setattr(deps, "ROOT", tmp_path)
-    monkeypatch.setenv("LAB_CUTLASS_ROOT", str(tmp_path / "missing"))
-    with pytest.raises(EnvironmentUnsupported, match="LAB_CUTLASS_ROOT"):
-        deps.cpp_include_paths()
-    assert deps.cutlass_revision() is None
+def test_initialized_sources_use_index_versions_and_shared_headers(checkout):
+    _, sources = checkout
+    for name, (root, revision) in sources.items():
+        assert deps.require_source(name) == root
+        assert deps.source_info(name) == {
+            "path": str(root), "expected_commit": revision, "commit": revision, "state": "READY"}
+    cutlass = sources["cutlass"][0]
+    assert deps.cpp_include_paths() == [cutlass / "include", cutlass / "tools/util/include"]
+    assert set(deps.source_snapshot()) == set(deps.SOURCES)
 
 
-def test_initialized_submodule_uses_shared_include(checkout):
-    _, root, revision = checkout
-    assert deps.cpp_include_paths() == [root / "include"]
-    assert deps.cutlass_revision() == revision
+@pytest.mark.parametrize("name", deps.SOURCES)
+def test_checkout_must_match_parent_gitlink(checkout, name):
+    parent, _ = checkout
+    path = deps.SOURCES[name]["path"]
+    git(parent, "update-index", "--cacheinfo", f"160000,{'1' * 40},{path}")
+    with pytest.raises(EnvironmentUnsupported, match="differs from the parent gitlink"):
+        deps.require_source(name)
 
 
-def test_checkout_must_match_gitlink(checkout):
-    parent, _, _ = checkout
-    git(parent, "update-index", "--cacheinfo", f"160000,{'1' * 40},{deps.CUTLASS_PATH}")
-    with pytest.raises(EnvironmentUnsupported, match="differs from the project gitlink"):
-        deps.cpp_include_paths()
-
-
-def test_headers_without_gitlink_are_not_accepted(checkout):
-    parent, _, _ = checkout
-    git(parent, "update-index", "--force-remove", deps.CUTLASS_PATH)
+@pytest.mark.parametrize("name", deps.SOURCES)
+def test_source_without_gitlink_is_not_accepted(checkout, name):
+    parent, _ = checkout
+    git(parent, "update-index", "--force-remove", deps.SOURCES[name]["path"])
     with pytest.raises(EnvironmentUnsupported, match="gitlink missing"):
-        deps.cpp_include_paths()
+        deps.require_source(name)
 
 
-def test_external_checkout_is_explicit_and_need_not_be_gitlink(tmp_path, monkeypatch):
-    root = tmp_path / "external"
-    monkeypatch.setenv("LAB_CUTLASS_ROOT", str(root))
-    for name in ("cute/tensor.hpp", "cutlass/cutlass.h"):
-        path = root / "include" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("// fixture header\n")
-    assert deps.cpp_include_paths() == [root / "include"]
-    assert deps.cutlass_revision() is None
+def test_missing_required_header_is_not_accepted(checkout):
+    _, sources = checkout
+    (sources["cutlass"][0] / "include/cute/tensor.hpp").unlink()
+    with pytest.raises(EnvironmentUnsupported, match="required source files missing"):
+        deps.require_source("cutlass")
 
 
-def test_build_cache_separates_sources_helpers_flags_and_solution(tmp_path, monkeypatch):
+def test_uninitialized_submodule_cannot_inherit_parent_revision(checkout):
+    parent, sources = checkout
+    # A subdirectory with source files is not an initialized submodule.
+    import shutil
+    shutil.rmtree(sources["cutlass"][0] / ".git")
+    info = deps.source_info("cutlass")
+    assert info["commit"] is None and info["state"] == "ENV_UNSUPPORTED"
+    with pytest.raises(EnvironmentUnsupported, match="not initialized"):
+        deps.require_source("cutlass")
+
+
+@pytest.fixture
+def build_fixture(tmp_path, monkeypatch):
     from flash_attention_lab import build, environment, registry, runtime
     monkeypatch.setattr(build, "ROOT", tmp_path)
     monkeypatch.setattr(build, "student_dir", lambda e: tmp_path / "students" / e["id"])
     monkeypatch.setattr(registry, "EXERCISES", {"lesson": {"id": "lesson"}})
-    from types import SimpleNamespace
-    monkeypatch.setattr(registry, "load_student", lambda e, **kwargs: SimpleNamespace(CPP_INCLUDE_DIRS=[]))
     monkeypatch.setattr(environment, "require_environment", lambda backend: None)
     monkeypatch.setattr(runtime, "cuda_home", lambda: tmp_path / "toolkit")
     monkeypatch.setattr(runtime, "cuda_development_paths", lambda toolkit: ([], tmp_path / "lib"))
-    monkeypatch.delenv("LAB_CUTLASS_ROOT", raising=False)
+    include = tmp_path / "third_party/cutlass/include"
+    include.mkdir(parents=True)
+    monkeypatch.setattr(deps, "cpp_include_paths", lambda: [include])
     monkeypatch.delenv("LAB_NVCC_FLAGS", raising=False)
-    files = ["flash_attention_lab/binding.cpp", "flash_attention_lab/cuda_api.h",
-             "students/lesson/kernel.cu", "solutions/lesson/kernel.cu", "solutions/lesson/binding.cpp"]
-    for name in files:
+    for name in ("flash_attention_lab/binding.cpp", "flash_attention_lab/cuda_api.h",
+                 "students/lesson/kernel.cu", "solutions/lesson/kernel.cu", "solutions/lesson/binding.cpp"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("// " + name)
     monkeypatch.setattr(build, "_build", lambda *args: args)
+    return tmp_path, build
+
+
+def test_build_cache_separates_sources_helpers_flags_and_solution(build_fixture, monkeypatch):
+    root, build = build_fixture
     student = build.build_cuda("lesson")
     solution = build.build_cuda("lesson", solution=True)
     assert student[0] == "lesson" and solution[0] == "solution_lesson"
     assert student[-1] != solution[-1]
-    assert solution[2] == str(tmp_path / "solutions/lesson/binding.cpp")
-    helper = tmp_path / "students/lesson/helper.cuh"
+    assert student[5] == solution[5]  # Both use the same fixed include directories.
+    assert solution[2] == str(root / "solutions/lesson/binding.cpp")
+    helper = root / "students/lesson/helper.cuh"
     helper.write_text("// added helper")
     updated = build.build_cuda("lesson")
     assert updated[-1] != student[-1]
@@ -109,36 +129,19 @@ def test_build_cache_separates_sources_helpers_flags_and_solution(tmp_path, monk
     assert build.build_cuda("lesson")[-1] != updated[-1]
 
 
-def test_shared_helper_edit_invalidates_solution_build(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from flash_attention_lab import build, environment, registry, runtime
-    monkeypatch.setattr(build, "ROOT", tmp_path)
-    monkeypatch.setattr(registry, "EXERCISES", {"lesson": {"id": "lesson"}})
-    monkeypatch.setattr(registry, "load_student", lambda e, **kwargs: SimpleNamespace(CPP_INCLUDE_DIRS=[]))
-    monkeypatch.setattr(environment, "require_environment", lambda backend: None)
-    monkeypatch.setattr(runtime, "cuda_home", lambda: tmp_path / "toolkit")
-    monkeypatch.setattr(runtime, "cuda_development_paths", lambda toolkit: ([], tmp_path / "lib"))
-    monkeypatch.delenv("LAB_CUTLASS_ROOT", raising=False)
-    for name in ("flash_attention_lab/binding.cpp", "flash_attention_lab/cuda_api.h"):
-        path = tmp_path / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("// fixture")
-    source = tmp_path / "solutions/lesson/kernel.cu"
-    source.parent.mkdir(parents=True)
-    source.write_text('#include "../shared/device.cuh"\n')
-    helper = tmp_path / "solutions/shared/device.cuh"
+def test_shared_helper_edit_invalidates_solution_build(build_fixture):
+    root, build = build_fixture
+    (root / "solutions/lesson/kernel.cu").write_text('#include "../shared/device.cuh"\n')
+    helper = root / "solutions/shared/device.cuh"
     helper.parent.mkdir(parents=True)
     helper.write_text("// old helper")
-    monkeypatch.setattr(build, "_build", lambda *args: args)
     before = build.build_cuda("lesson", solution=True)
     helper.write_text("// new helper")
-    after = build.build_cuda("lesson", solution=True)
-    assert before[-1] != after[-1]
+    assert build.build_cuda("lesson", solution=True)[-1] != before[-1]
 
 
 def test_build_flags_change_result_fingerprint(monkeypatch):
     from flash_attention_lab.registry import fingerprint, CATALOG
-    monkeypatch.delenv("LAB_CUTLASS_ROOT", raising=False)
     monkeypatch.delenv("LAB_NVCC_FLAGS", raising=False)
     before = fingerprint(CATALOG[0])
     monkeypatch.setenv("LAB_NVCC_FLAGS", "--use_fast_math")

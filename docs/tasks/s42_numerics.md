@@ -6,7 +6,7 @@
 
 指数单元、普通 FP32 算术和矩阵引擎的吞吐比例不同，软件近似可以改变资源使用，而非只是减少指令条数。近似误差应先在指数区间独立测量，再观察概率归一化和低精度舍入如何传播到 O。输入分布不同，优化收益与误差也会不同。
 
-条件 rescale 试图避免不必要的历史状态修正，但必须解释当前状态的尺度以及允许的动态范围。max_ramp 让后续 key 的分数持续变大，用于暴露只在平稳随机输入下看似正确的实现。分别启用指数策略和 rescale 策略做消融；无法独立控制的官方配置只作为源码阅读，不伪造消融结果。
+条件 rescale 试图避免不必要的历史状态修正，但必须解释当前状态的尺度以及允许的动态范围。max_ramp 让后续 key 的分数持续变大，用于暴露只在平稳随机输入下看似正确的实现。分别通过配置控制指数策略和 rescale threshold，并以固定输入做消融，记录误差和吞吐各自的变化。
 
 ## 定义、代码与参考
 
@@ -19,7 +19,7 @@ LSE 始终是自然对数。保持已有 O/LSE 容差；若某近似达不到预
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
 
-源码阅读：FA4 论文 §3.1.3–3.1.4；本地 softmax/exp 相关 helper 及 flash_fwd_sm100.py 的 rescale 分支。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [references](../../references/README.md)。
+源码阅读：FA4 论文 §3.1.3–3.1.4；本地 softmax/exp 相关 helper 及 flash_fwd_sm100.py 的 rescale 分支。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -43,7 +43,7 @@ LSE 始终是自然对数。保持已有 O/LSE 容差；若某近似达不到预
 
 区分指数近似误差、概率舍入与状态 rescale；保持 LSE 自然对数约定。
 
-完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。机械正确性不自动证明使用了目标机制，也不要求初学版本在所有 shape 打败厂商库。
+完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。用源码确认目标机制，再用各个 perf case 的实测差距确定下一步优化。
 
 ```bash
 ./lab task s42_numerics -v

@@ -14,7 +14,7 @@ copies to the CTA.
 
 WMMA is used here to keep the experiment about buffering and reuse. s20 exposes
 the underlying instruction/register mapping directly. This is a complete local
-kernel, not a wrapper around cuBLAS; cuBLAS is timed separately.
+kernel; cuBLAS supplies the independent speed comparison.
 
 ```bash
 ./lab check s21 --solution

@@ -6,5 +6,3 @@ CONFIG = {}
 
 def workspace_spec(inputs, config):
     return {}
-
-CPP_INCLUDE_DIRS = ['references/cutlass-sm100/include']
