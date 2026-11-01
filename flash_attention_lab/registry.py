@@ -1,6 +1,8 @@
 import hashlib
 import importlib.util
 import json
+import os
+import importlib.metadata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,9 +18,9 @@ def student_dir(e):
     return ROOT / "students" / e["backend"] / e["id"]
 
 
-def load_student(e):
-    path = student_dir(e) / "entry.py"
-    spec = importlib.util.spec_from_file_location("student_" + e["id"], path)
+def load_student(e, *, solution=False):
+    path = (ROOT / "solutions" / e["id"] if solution else student_dir(e)) / "entry.py"
+    spec = importlib.util.spec_from_file_location(("solution_" if solution else "student_") + e["id"], path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -27,18 +29,23 @@ def load_student(e):
 def fingerprint(e):
     # Include all student sources (including helpers/dependencies) and infrastructure.
     h = hashlib.sha256()
-    paths = [ROOT / "curriculum.json", ROOT / "docs/sources.lock.json"]
+    paths = [ROOT / name for name in ("curriculum.json", "docs/sources.lock.json", "pyproject.toml", "requirements.txt", "environment.yml")]
+    settings = {key: os.environ.get(key) for key in ("LAB_NVCC_FLAGS", "CXX", "CC", "LAB_CUDA_HOME", "CUDA_HOME", "LAB_CUTLASS_ROOT", "CUDA_VISIBLE_DEVICES", "LAB_GPU")}
+    packages = {}
+    for name in ("torch", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base", "cuda-python", "cuda-bindings", "ninja", "quack-kernels", "apache-tvm-ffi", "torch-c-dlpack-ext", "einops"):
+        try: packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError: packages[name] = None
+    h.update(json.dumps({"settings": settings, "packages": packages}, sort_keys=True).encode())
     if (ROOT / ".gitmodules").is_file():
         paths.append(ROOT / ".gitmodules")
-    for folder in ("students", "flash_attention_lab"):
+    for folder in ("students", "solutions", "benchmarks", "flash_attention_lab", "references"):
         paths += sorted(p for p in (ROOT / folder).rglob("*")
-                        if p.suffix in (".py", ".cu", ".cuh", ".h", ".cpp"))
-    # Header edits invalidate results as well as Ninja compilation dependencies.
+                        if p.suffix in (".py", ".cu", ".cuh", ".h", ".hpp", ".cpp", ".json"))
     if e["backend"] == "cuda":
-        from .cpp_dependencies import cutlass_root
-        headers = cutlass_root() / "include"
-        paths += sorted(p for p in headers.rglob("*") if p.is_file())
+        from .cpp_dependencies import cpp_include_paths
+        for headers in cpp_include_paths():
+            paths += sorted(p for p in headers.rglob("*") if p.is_file())
     for p in paths:
-        h.update(str(p.relative_to(ROOT)).encode())
+        h.update(str(p.relative_to(ROOT) if p.is_relative_to(ROOT) else p).encode())
         h.update(p.read_bytes())
     return h.hexdigest()

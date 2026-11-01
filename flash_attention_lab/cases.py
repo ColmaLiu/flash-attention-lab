@@ -1,4 +1,6 @@
 import math
+import numbers
+import struct
 import torch
 
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
@@ -30,8 +32,11 @@ def make_inputs(e, case, device="cpu"):
         if pattern == "max_ramp":
             # Analytic adversarial inputs: maxima increase late in the key sequence.
             inputs["q"].fill_(1)
-            ramp = torch.linspace(-6, 6, shape[-2], device=device, dtype=torch.float32)
-            inputs["k"].copy_(ramp[None, None, :, None].expand(shape))
+            ramp = torch.linspace(-6, 6, shape[1], device=device, dtype=torch.float32)
+            inputs["k"].copy_(ramp[None, :, None, None].expand(shape))
+        if pattern == "uniform_attention":
+            inputs["q"].zero_()
+            inputs["k"].zero_()
         return inputs, cfg
     if e["kind"] == "gemm":
         m, n, k = shape
@@ -53,7 +58,8 @@ def output_spec(e, inputs):
     first = next(iter(inputs.values()))
     dtype = first.dtype
     if e["kind"] == "attention":
-        return {"o": (first.shape, dtype), "lse": (first.shape[:-1], torch.float32)}
+        b, n, h, _ = inputs["q"].shape
+        return {"o": (inputs["q"].shape, dtype), "lse": ((b, h, n), torch.float32)}
     if e["kind"] == "gemm":
         return {"c": ((inputs["a"].shape[0], inputs["b"].shape[1]), torch.float32)}
     if e["kind"] == "reduce":
@@ -81,7 +87,7 @@ def validate_inputs(e, inputs, config):
         if a.dtype != t.dtype or a.device != t.device: raise ValueError("dtype/device mismatch")
         if a.requires_grad: raise ValueError("forward-only: requires_grad must be False")
     if kind == "attention":
-        if any(a.shape != t.shape for a in ts) or t.ndim != 4: raise ValueError("expected equal [B,H,N,D]")
+        if any(a.shape != t.shape for a in ts) or t.ndim != 4: raise ValueError("expected equal [B,N,H,D]")
         shape = tuple(t.shape)
     elif kind == "gemm":
         a, b = inputs["a"], inputs["b"]
@@ -89,6 +95,37 @@ def validate_inputs(e, inputs, config):
         shape = (a.shape[0], b.shape[1], a.shape[1])
     else: shape = tuple(t.shape)
     dtype = next((s for s, d in DTYPES.items() if d == t.dtype), None)
-    if not any(tuple(c["shape"]) == shape and c["dtype"] == dtype and bool(c.get("causal", False)) == config["causal"] for c in e["cases"]):
-        raise ValueError(f"shape/dtype/mask outside {e['id']} contract: {shape}, {dtype}, causal={config['causal']}")
-    if not math.isfinite(config["scale"]) or config["scale"] <= 0: raise ValueError("scale must be positive finite")
+    domain = e["domain"]
+    alignment = domain.get("pointer_alignment", 1)
+    if any(a.data_ptr() % alignment for a in ts):
+        raise ValueError(f"input pointer outside {e['id']} domain: requires {alignment}-byte alignment")
+    multiples = domain["shape_multiple"]
+    if len(shape) != len(multiples) or any(n <= 0 or n % m for n, m in zip(shape, multiples)):
+        raise ValueError(f"shape outside {e['id']} domain: {shape}; multiples={multiples}")
+    if dtype not in domain["dtypes"] or config["causal"] not in domain["causal"]:
+        raise ValueError(f"dtype/mask outside {e['id']} domain")
+    if kind == "attention" and shape[-1] not in domain["head_dims"]:
+        raise ValueError(f"head dimension outside {e['id']} domain")
+    scale = config["scale"]
+    if isinstance(scale, bool) or not isinstance(scale, numbers.Real):
+        raise ValueError("scale must be a real scalar representable as positive finite FP32")
+    try:
+        rounded_scale = struct.unpack("f", struct.pack("f", scale))[0]
+    except (OverflowError, struct.error) as exc:
+        raise ValueError("scale must be representable as positive finite FP32") from exc
+    if not math.isfinite(rounded_scale) or rounded_scale <= 0:
+        raise ValueError("scale must be representable as positive finite FP32")
+
+
+def tensor_contract(e):
+    """Logical public shapes; displayed independently of prose formatting."""
+    dtype = "/".join(e["domain"]["dtypes"])
+    kind = e["kind"]
+    if kind == "attention":
+        return [["inputs", n, "[B,N,H,D]", dtype] for n in ("q", "k", "v")] + [
+            ["outputs", "o", "[B,N,H,D]", dtype], ["outputs", "lse", "[B,H,N]", "fp32"]]
+    if kind == "gemm":
+        return [["inputs", "a", "[M,K]", dtype], ["inputs", "b", "[K,N]", dtype],
+                ["outputs", "c", "[M,N]", "fp32"]]
+    return [["inputs", "x", "[R,C]", dtype],
+            ["outputs", "y", "[C,R]" if kind == "transpose" else "[R,C]", dtype]]

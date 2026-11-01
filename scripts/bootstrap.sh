@@ -50,12 +50,6 @@ if $lab_with_cuda; then
     conda deactivate
     conda activate "$lab_env"
 fi
-# Git owns the C++ dependency version; never follow the upstream branch tip.
-if ! command -v git >/dev/null || ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-    echo 'ENV_UNSUPPORTED: use a Git clone; CUTLASS is provided as a submodule' >&2; exit 4
-fi
-git submodule update --init --recursive -- third_party/cutlass
 "$CONDA_PREFIX/bin/python" -m pip install -r requirements.txt
 "$CONDA_PREFIX/bin/python" -m pip check
-"$CONDA_PREFIX/bin/python" -c 'from flash_attention_lab.cpp_dependencies import cpp_include_paths; print("C++ headers ready:", cpp_include_paths()[0])'
-echo 'Installed. Run ./lab doctor, ./lab smoke, then ./lab task s00_softmax.'
+echo 'Installed. Run ./lab doctor, ./lab smoke, then ./lab task s00_layout.'

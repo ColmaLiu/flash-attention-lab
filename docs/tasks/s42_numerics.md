@@ -1,0 +1,58 @@
+# s42_numerics · Softmax 吞吐与数值预算
+
+阶段 4。前置：[s41_overlap](s41_overlap.md)
+
+## 优化 softmax 的成本必须有数值预算
+
+指数单元、普通 FP32 算术和矩阵引擎的吞吐比例不同，软件近似可以改变资源使用，而非只是减少指令条数。近似误差应先在指数区间独立测量，再观察概率归一化和低精度舍入如何传播到 O。输入分布不同，优化收益与误差也会不同。
+
+条件 rescale 试图避免不必要的历史状态修正，但必须解释当前状态的尺度以及允许的动态范围。max_ramp 让后续 key 的分数持续变大，用于暴露只在平稳随机输入下看似正确的实现。分别启用指数策略和 rescale 策略做消融；无法独立控制的官方配置只作为源码阅读，不伪造消融结果。
+
+## 定义、代码与参考
+
+LSE 始终是自然对数。保持已有 O/LSE 容差；若某近似达不到预算，它就是失败实验，不能通过放宽阈值登记通关。
+
+接口：`[B,N,H,D] → O 同 shape/dtype，LSE [B,H,N] FP32`。输入必须在同一 GPU 上连续存储。精确支持域是 [curriculum.json](../../curriculum.json) 中本关的 `domain`，测试例是采样而非 shape 白名单。所有维度为正；输入有限。
+
+- 学生入口：[students/cuda/s42_numerics/kernel.cu](../../students/cuda/s42_numerics/kernel.cu)，host workspace 声明在同目录 `entry.py`。
+- 完整可读答案：[solutions/s42_numerics/](../../solutions/s42_numerics/)。可以先独立实现，也可以阅读答案后做控制变量实验；学生入口不会调用答案。
+- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
+- 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
+
+源码阅读：FA4 论文 §3.1.3–3.1.4；本地 softmax/exp 相关 helper 及 flash_fwd_sm100.py 的 rescale 分支。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [references](../../references/README.md)。
+
+## 为什么选择这些测试
+
+| case ID | 组 | shape | dtype/mask | 要排查的问题 |
+|---|---|---|---|---|
+| `small` | debug | `(1, 128, 1, 64)` | bf16/full | 单头基线，先核对 O 与自然对数 LSE。 |
+| `heads` | debug | `(2, 256, 3, 64)` | bf16/full | B、H 均非一，识别 BNHD 与 BHND 混淆。 |
+| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Zero Q/K and nonzero V: verify mean of V, not vacuous zero output. |
+| `large_logits` | stress | `(1, 256, 2, 128)` | bf16/full | 较大 QK，检查数值稳定性和输出舍入。 |
+| `scale` | debug | `(1, 128, 2, 64)` | bf16/full | 显式 scale，防止硬编码 1/sqrt(D)。 |
+| `rising_max` | stress | `(1, 512, 2, 128)` | bf16/full | 后续 key 的最大值上升，检验历史状态 rescale。 |
+| `few_heads` | perf | `(1, 1024, 2, 64)` | bf16/full | 少量 heads，观察 query 维并行度。 |
+| `many_heads` | perf | `(2, 1024, 16, 128)` | bf16/full | 较多独立 heads，比较吞吐与资源占用。 |
+| `long_sequence` | perf | `(1, 4096, 8, 128)` | bf16/full | 长 key 循环，观察融合和流水线的稳态作用。 |
+
+`debug` 用于缩小问题，`edge` 检验边界，`stress` 检验数值或生命周期，`perf` 选择代表性工作负载；所有声明案例都必须通过正确性验收。case 0 是第一行；用 `task -v` 查看序号。
+
+## 实验与完成标准
+
+分别消融指数实现和 rescale 策略；max_ramp 必须通过，未获益的实验也要解释。
+
+区分指数近似误差、概率舍入与状态 rescale；保持 LSE 自然对数约定。
+
+完成标准包含三项：全关数值/stream/重复调用检查通过；相关 memcheck/racecheck/synccheck 无问题；提交源码与设计证据，以及相同输入下答案、学生、快速库的计时。机械正确性不自动证明使用了目标机制，也不要求初学版本在所有 shape 打败厂商库。
+
+```bash
+./lab task s42_numerics -v
+./lab reference s42_numerics --case 0
+./lab solution s42_numerics --case 0
+./lab check s42_numerics --case 0
+./lab check s42_numerics
+./lab bench s42_numerics --case 0
+./lab sanitize s42_numerics --tool memcheck --case 0
+```
+
+先运行小例，再选择表中 perf 案例比较速度；不要把 debug 微小输入的 launch 时间当成吞吐。计时范围、graph/eager 与不等价比较见 [benchmarking](../benchmarking.md)。把观察记入忽略目录，使用 [实验模板](../../experiments/README.md)。

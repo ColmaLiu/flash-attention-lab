@@ -9,8 +9,8 @@ import unicodedata
 
 from .registry import ROOT
 
-STAGES = {0: "Foundations", 1: "FlashAttention-1", 2: "FlashAttention-2",
-          3: "CuTe DSL / Blackwell", 4: "FlashAttention-4"}
+STAGES = {0: "Foundations", 1: "GEMM and streaming attention", 2: "Tensor Core and FlashAttention-2",
+          3: "Blackwell asynchronous execution", 4: "Blackwell attention optimization"}
 STATES = {
     "STUDENT_UNIMPLEMENTED": "NOT IMPLEMENTED", "IMPLEMENTED_UNVERIFIED": "UNVERIFIED",
     "CORRECTNESS_PASSED": "PASS", "CORRECTNESS_FAILED": "FAIL",
@@ -179,9 +179,11 @@ def task(ui, data, verbose):
     for path in data["student_files"]: ui.line("Edit", path)
     ui.line("Task", data["task_file"])
     ui.line("Check", f"./lab check {data['exercise']} --case 0")
+    ui.line("Answer", f"./lab solution {data['exercise']} --case 0")
+    ui.line("Library", f"./lab reference {data['exercise']}")
     if verbose:
-        ui.line("Notes", f"experiments/{data['exercise']}.md")
-        ui.print(); ui.table(["Case", "Input"], [[i, case_label(c)] for i, c in enumerate(data["cases"])])
+        ui.line("Notes template", "experiments/README.md")
+        ui.print(); ui.table(["Case", "ID / suite", "Input", "Purpose"], [[i, c["id"] + " / " + c["suite"], case_label(c), c["purpose"]] for i, c in enumerate(data["cases"])])
 
 
 def check(ui, data, verbose):
@@ -221,26 +223,32 @@ def stage_check(ui, data, verbose):
 
 
 def bench(ui, data, verbose):
-    ui.heading(f"{data['exercise']}: bench | case {data['case_index']} | validated")
+    implementation = data.get("implementation", "library reference")
+    ui.heading(f"{data['exercise']}: {implementation} | case {data['case_index']} | validated")
     ui.note(case_label(data["case"]))
     ui.line("GPU", data["environment"].get("selected_gpu", {}).get("name", "unknown"))
-    timing = data["timing"]
-    ui.table(["GPU stream / launch", "Median", "Min", "Max", "Stddev"], [["Time", *[milliseconds(timing['gpu_stream_ms_' + key]) for key in ("median", "min", "max", "stdev")]]])
-    ui.note(f"Warmup {timing['warmup']} | {timing['repeats']} samples x {timing['iterations']} launches | host batch/launch {milliseconds(timing['host_batch_ms_median'])}")
+    rows = []
+    for label, record in [(implementation, data), *([("optimized library", data["reference"])] if "reference" in data else [])]:
+        timing = record["timing"]
+        rows.append([label, *[milliseconds(timing["gpu_stream_ms_" + key]) for key in ("median", "min", "max")]])
+    ui.table(["CUDA graph / operation", "Median", "Min", "Max"], rows)
+    if "reference" in data:
+        ui.line("Backend", data["reference"]["provider"])
+        ui.line("Time / library", f"{data['comparison']['student_over_reference']:.3f}x (lower is faster)")
+    else:
+        ui.line("Backend", data.get("provider", "unknown"))
+        ui.note("Student implementation: NOT TESTED")
+    if "eager_timing" in data:
+        ui.line("Eager API GPU span", milliseconds(data["eager_timing"]["gpu_stream_ms_median"]))
     if "flops" in data:
-        flops = data["flops"]
-        ui.line("TFLOP/s", number(flops["useful_tflops"]) + " useful" +
-                (" | " + number(flops["dense_equivalent_tflops"]) + " dense-equivalent" if data["config"]["causal"] else ""))
-        if "dense_equivalent" in flops:
-            ui.note("QK + PV, FMA=2; " + ("N(N+1)/2 valid pairs." if data["config"]["causal"] else "N^2 valid pairs."))
-        else:
-            ui.note(flops["convention"])
-    ui.note("Preallocated; no JIT, setup or layout conversion. Includes stream gaps from host dispatch.")
+        ui.line("Useful TFLOP/s", number(data["flops"]["useful_tflops"]))
+    ui.note("Graph replay excludes compilation, capture and allocation; includes output layout copies.")
+    ui.note("Eager spans include host dispatch gaps and any allocation inside the API.")
     if verbose:
-        ui.line("Samples", ", ".join(milliseconds(v) for v in timing["gpu_stream_ms_samples"]))
+        ui.line("Timing scope", data["timing"]["scope"])
+        if "scope" in data: ui.line("Reference scope", data["scope"])
+        if "reference" in data: ui.line("Reference scope", data["reference"]["scope"])
         ui.line("Config", ", ".join(f"{k}={v}" for k, v in data["config"].items()))
-        ui.line("Output + scratch", f"{data['output_and_workspace_bytes']:,} bytes")
-        ui.note("Host batch includes event recording and final wait; neither measurement is end-to-end.")
 
 
 def smoke(ui, data, verbose):
@@ -270,7 +278,7 @@ def render(data, *, verbose=False, stream=None):
     elif command in ("list", "status"): inventory(ui, data, verbose)
     elif command == "task": task(ui, data, verbose)
     elif command == "check": check(ui, data, verbose)
-    elif command == "bench": bench(ui, data, verbose)
+    elif command in ("bench", "solution", "reference"): bench(ui, data, verbose)
     elif command == "smoke": smoke(ui, data, verbose)
     elif command in ("sanitize", "profile"):
         ui.heading(f"{data['exercise']}: {data.get('tool', 'ncu')} {'PASS' if command == 'sanitize' else 'collected'} | case {data.get('case_index', 0)}")

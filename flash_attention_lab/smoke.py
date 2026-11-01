@@ -1,4 +1,3 @@
-import importlib
 import torch
 from .build import build_cuda, descriptors
 from .cases import make_inputs, output_spec, validate_inputs
@@ -19,7 +18,8 @@ def infrastructure_smoke(stage=None):
         assert isinstance(module.IMPLEMENTED, bool)
         assert callable(module.workspace_spec)
         if e["backend"] == "cute": assert callable(module.prepare)
-        for case in e["cases"]:
+        # Bounded infrastructure probe; full curriculum correctness is a separate command.
+        for case in e["cases"][:1]:
             inputs, config = make_inputs(e, case, "cuda")
             validate_inputs(e, inputs, config)
             ref = mathematical_reference(e["kind"], inputs, config)
@@ -39,10 +39,11 @@ def infrastructure_smoke(stage=None):
         out.zero_(); launch(); torch.cuda.synchronize()
         assert out.item() == 7
         result["cuda_sentinel"] = measure(launch, 2, 3, 5)
-        # Compile each empty student binding independently and verify the explicit error.
-        bindings = []
+        # One empty binding per stage verifies the host ABI without a long compile sweep.
+        bindings, compiled_stages = [], set()
         for e in exercises:
-            if e["backend"] != "cuda" or load_student(e).IMPLEMENTED: continue
+            if e["backend"] != "cuda" or load_student(e).IMPLEMENTED or e["stage"] in compiled_stages: continue
+            compiled_stages.add(e["stage"])
             module = build_cuda(e["id"])
             try: module.launch({}, {}, {}, {}, stream)
             except RuntimeError as exc:

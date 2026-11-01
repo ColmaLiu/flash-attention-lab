@@ -26,13 +26,15 @@ def torch_module():
 
 def snapshot():
     packages = {}
-    for name in ("torch", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base", "cuda-python", "cuda-bindings", "pytest", "ninja"):
+    for name in ("torch", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base", "cuda-python", "cuda-bindings", "pytest", "ninja", "quack-kernels", "apache-tvm-ffi", "torch-c-dlpack-ext", "einops"):
         try: packages[name] = metadata.version(name)
         except metadata.PackageNotFoundError: packages[name] = None
     from .cpp_dependencies import cutlass_revision, cutlass_root
     toolkit = cuda_home()
     info = {"os": platform.platform(), "python": sys.version, "executable": sys.executable,
-            "cpp_cutlass": {"commit": cutlass_revision(), "root": str(cutlass_root())},
+            "cpp_cutlass": {"enabled": bool(os.getenv("LAB_CUTLASS_ROOT")),
+                            "commit": cutlass_revision(),
+                            "root": str(cutlass_root()) if os.getenv("LAB_CUTLASS_ROOT") else None},
             "packages": packages, "python_prefix": sys.prefix,
             "conda_prefix": os.getenv("CONDA_PREFIX"), "conda_environment": os.getenv("CONDA_DEFAULT_ENV"),
             "cuda_home": str(toolkit) if toolkit else None,
@@ -87,8 +89,8 @@ def require_environment(backend):
             raise EnvironmentUnsupported("CC does not name an executable host compiler")
     elif backend == "cute":
         try:
-            if metadata.version("nvidia-cutlass-dsl") != "4.4.1":
-                raise EnvironmentUnsupported("student DSL exercises target nvidia-cutlass-dsl==4.4.1")
+            # Optional language tooling only. Official reference adapters validate
+            # their own pinned compiler version; CUDA students do not use DSL.
             import cutlass.cute  # noqa: F401
             from cuda.bindings import driver  # noqa: F401
         except (ImportError, OSError, metadata.PackageNotFoundError) as exc:

@@ -1,4 +1,4 @@
-# Complete project setup: bash scripts/bootstrap.sh (Python packages + C++ headers).
+# CUDA/PTX course setup: bash scripts/bootstrap.sh (no mandatory CUTLASS/DSL).
 # Python-only step: python -m pip install -r requirements.txt
 # Project dependencies are in pyproject.toml; this recipe selects the CUDA wheel variant.
 --extra-index-url https://download.pytorch.org/whl/cu128

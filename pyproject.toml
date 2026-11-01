@@ -4,10 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flash-attention-lab"
-version = "0.1.0"
+version = "0.2.0"
 description = "B200 kernel exercises; student kernels intentionally unimplemented"
 requires-python = ">=3.12,<3.13"
-dependencies = ["torch==2.10.0", "nvidia-cutlass-dsl==4.4.1", "cuda-python==12.9.4", "cuda-bindings==12.9.4", "ninja==1.13.0", "pytest==9.0.2"]
+dependencies = ["torch==2.10.0", "ninja==1.13.0", "pytest==9.0.2"]
+
+[project.optional-dependencies]
+# Optional language experiment; the CUDA/PTX course does not import these.
+cute = ["nvidia-cutlass-dsl==4.6.2", "cuda-python==12.9.4", "cuda-bindings==12.9.4"]
+
+fa4 = ["nvidia-cutlass-dsl==4.6.2", "cuda-python==12.9.4", "cuda-bindings==12.9.4", "einops==0.8.1", "apache-tvm-ffi==0.1.15.post2", "torch-c-dlpack-ext==0.1.5", "quack-kernels==0.6.4"]
 
 [project.scripts]
 fa-lab = "flash_attention_lab.cli:main"

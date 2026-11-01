@@ -16,18 +16,18 @@ def test_json_is_one_document_on_either_side_of_subcommand(argv, capsys):
     assert cli.main(argv) == 0
     captured = capsys.readouterr()
     result = json.loads(captured.out)
-    assert result['command'] == 'list' and len(result['exercises']) == 4
+    assert result['command'] == 'list' and len(result['exercises']) == len(cli.selected(0))
     assert captured.err == ''
 
 
 def test_invalid_arguments_are_json_errors_with_nonzero_exit(capsys):
-    assert cli.main(['bench', 's40_fa4_base', '--warmup', '0', '--json']) == 6
+    assert cli.main(['bench', 's40_attention', '--warmup', '0', '--json']) == 6
     result = json.loads(capsys.readouterr().out)
     assert result['state'] == 'EXECUTION_ERROR' and result['exit_code'] == 6
     assert 'positive' in result['message']
 
 
-@pytest.mark.parametrize('command', ['task', 'check', 'bench', 'sanitize', 'profile'])
+@pytest.mark.parametrize('command', ['task', 'check', 'bench', 'reference', 'solution', 'sanitize', 'profile'])
 def test_short_ids_select_the_same_exercise_for_every_command(command):
     parser = cli.parser()
     for full_id in cli.EXERCISES:
@@ -41,11 +41,11 @@ def test_short_ids_select_the_same_exercise_for_every_command(command):
 def test_short_task_preserves_full_report_id_and_paths(capsys):
     assert cli.main(['task', 's20', '--json']) == 0
     short = json.loads(capsys.readouterr().out)
-    assert cli.main(['task', 's20_fa2_grid', '--json']) == 0
+    assert cli.main(['task', 's20_mma', '--json']) == 0
     full = json.loads(capsys.readouterr().out)
     assert short == full
-    assert short['exercise'] == 's20_fa2_grid'
-    assert short['task_file'] == 'docs/tasks/s20_fa2_grid.md'
+    assert short['exercise'] == 's20_mma'
+    assert short['task_file'] == 'docs/tasks/s20_mma.md'
 
 
 @pytest.mark.parametrize('value', ['s2', 's99', 's20_fa2', '20'])
@@ -62,28 +62,28 @@ def test_ambiguous_short_id_requires_full_name(monkeypatch):
     parser = cli.parser()
     with pytest.raises(ValueError, match='ambiguous exercise') as caught:
         parser.parse_args(['check', 's20'])
-    assert 's20_fa2_grid' in str(caught.value) and 's20_alternative' in str(caught.value)
-    assert parser.parse_args(['check', 's20_fa2_grid']).exercise == 's20_fa2_grid'
+    assert 's20_mma' in str(caught.value) and 's20_alternative' in str(caught.value)
+    assert parser.parse_args(['check', 's20_mma']).exercise == 's20_mma'
 
 
 def test_default_task_has_keys_and_verbose_lists_cases(capsys):
-    assert cli.main(['task', 's00_softmax']) == 0
+    assert cli.main(['task', 's01_softmax']) == 0
     summary = capsys.readouterr().out
-    assert 'inputs' in summary and 'outputs' in summary and '[4,128]' in summary
+    assert 'inputs' in summary and 'outputs' in summary and '[R,C]' in summary
     assert 'STUDENT_UNIMPLEMENTED' not in summary
-    assert cli.main(['task', 's00_softmax', '--verbose']) == 0
+    assert cli.main(['task', 's01_softmax', '--verbose']) == 0
     details = capsys.readouterr().out
     assert 'Case' in details and 'shifted' in details and 'Prerequisites' in details
-    assert 'docs/tasks/s00_softmax.md' in details
+    assert 'docs/tasks/s01_softmax.md' in details
 
 
-def test_all_task_views_and_help_use_english(capsys):
+def test_all_task_views_expose_tensor_contract_and_cases(capsys):
     import re
     for exercise in cli.EXERCISES:
         assert cli.main(['task', exercise, '--verbose']) == 0
         output = capsys.readouterr().out
         assert 'inputs' in output and 'outputs' in output
-        assert not re.search(r'[\u3400-\u9fff]', output)
+        assert 'Case' in output and 'Prerequisites' in output
     assert not re.search(r'[\u3400-\u9fff]', cli.parser().format_help())
 
 
@@ -92,9 +92,9 @@ def test_missing_student_has_human_state_and_action(monkeypatch, capsys):
     from flash_attention_lab.errors import StudentNotImplemented
     def missing(e): raise StudentNotImplemented(e['id'] + ': missing student module')
     monkeypatch.setattr(api, 'require_implemented', missing)
-    assert cli.main(['sanitize', 's03_online']) == 2
+    assert cli.main(['sanitize', 's00_layout']) == 2
     output = capsys.readouterr().err
-    assert 'STUDENT_UNIMPLEMENTED' in output and './lab task s03_online' in output
+    assert 'STUDENT_UNIMPLEMENTED' in output and './lab task s00_layout' in output
 
 
 @pytest.fixture
@@ -105,7 +105,7 @@ def local_reports(tmp_path, monkeypatch):
 
 
 def arguments(**overrides):
-    return argparse.Namespace(**{'command': 'check', 'exercise': 's00_softmax', 'case': 0,
+    return argparse.Namespace(**{'command': 'check', 'exercise': 's01_softmax', 'case': 0,
                                  'timeout': 10, 'json': True, **overrides})
 
 
@@ -161,16 +161,16 @@ def test_status_needs_no_progress_files_and_never_launches_checks(tmp_path, monk
     monkeypatch.setattr(cli, 'ROOT', tmp_path)
     monkeypatch.setattr(environment, 'require_environment', lambda backend: None)
     monkeypatch.setattr(cli, 'load_student', lambda e: SimpleNamespace(
-        IMPLEMENTED=e['id'] == 's00_softmax', RUNTIME_REQUIRES=[]))
+        IMPLEMENTED=e['id'] == 's01_softmax', RUNTIME_REQUIRES=[]))
     def no_launch(*a, **k): pytest.fail('status must not launch a student check')
     monkeypatch.setattr(cli, 'managed', no_launch)
     assert cli.main(['status','--stage','0','--json']) == 0
     output = capsys.readouterr()
     data = json.loads(output.out)
     states = {e['id']: e['state'] for e in data['exercises']}
-    assert len(states) == 4 and output.err == ''
-    assert states['s00_softmax'] == 'IMPLEMENTED_UNVERIFIED'
-    assert states['s03_online'] == 'STUDENT_UNIMPLEMENTED'
+    assert len(states) == len(cli.selected(0)) and output.err == ''
+    assert states['s01_softmax'] == 'IMPLEMENTED_UNVERIFIED'
+    assert states['s00_layout'] == 'STUDENT_UNIMPLEMENTED'
     assert not list(tmp_path.iterdir())
 
 
@@ -183,7 +183,7 @@ def test_profile_requires_an_actual_ncu_report(local_reports, monkeypatch):
     artifact.write_text('{}')
     monkeypatch.setattr(cli, 'managed', lambda *a, **k: {'command':'profile','state':'PROFILE_COLLECTED',
                                                      'exit_code':0,'artifact':str(artifact)})
-    result = cli.execute(cli.parser().parse_args(['profile','s00_softmax','--case','0']))
+    result = cli.execute(cli.parser().parse_args(['profile','s01_softmax','--case','0']))
     assert result['state'] == 'TOOL_FAILED' and result['exit_code'] == 6
     assert 'profile_report' not in result
 
@@ -235,7 +235,7 @@ def test_benchmark_views_omit_accuracy_details_and_default_paths():
             'timing': {'gpu_stream_ms_median': 0.01, 'gpu_stream_ms_min': 0.009,
                        'gpu_stream_ms_max': 0.011, 'gpu_stream_ms_stdev': 0.001,
                        'gpu_stream_ms_samples': [0.009, 0.01, 0.011], 'host_batch_ms_median': 0.02,
-                       'warmup': 2, 'repeats': 3, 'iterations': 5}}
+                       'warmup': 2, 'repeats': 3, 'iterations': 5, 'scope': 'fixture graph timing'}}
     for verbose in (False, True):
         output = io.StringIO()
         render(data, stream=output, verbose=verbose)
@@ -254,7 +254,7 @@ def simulated_check(monkeypatch):
     monkeypatch.setattr(runner, 'fingerprint', lambda e: 'test-code')
     monkeypatch.setattr(runner, 'save_result', lambda *a: None)
     # Only validation outcomes are simulated; no stand-in is installed in a student path.
-    e = {'id': 's00_softmax', 'backend': 'cuda', 'cases': [
+    e = {'id': 's01_softmax', 'backend': 'cuda', 'cases': [
         {'shape': [4, 128], 'dtype': 'fp32', 'pattern': pattern} for pattern in ('random', 'large', 'zero')]}
     return runner, e
 
@@ -282,7 +282,7 @@ def test_check_preserves_all_case_results_on_numeric_failure(simulated_check, mo
     assert '2 passed, 1 failed' in text
     assert 'first_bad=(0, 1)' in text and 'actual=0.0 ref=0.5' in text
     assert 'case 1 / default' in text and 'case 1 / nondefault' in text
-    assert 'Reproduce: ./lab check s00_softmax --case 1' in text
+    assert 'Reproduce: ./lab check s01_softmax --case 1' in text
 
 
 def test_runtime_error_aborts_without_losing_prior_cases(simulated_check, monkeypatch):

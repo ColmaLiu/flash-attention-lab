@@ -5,7 +5,7 @@
 `./lab check`/`bench` 在独立子进程运行，默认 180 秒；首次编译可 `--timeout 300`，smoke 默认 600 秒。父进程只终止自己的进程组。对于异步错误，发生非法访问的子进程退出后重新启动，不能信任同一 CUDA context 的后续结果。不要以无限等待或系统级 GPU reset 解决学生死锁。
 
 ```bash
-./lab sanitize s00_softmax --tool memcheck --case 0
+./lab sanitize s01_softmax --tool memcheck --case 0
 ./lab sanitize s33_tma --tool racecheck --case 0 --timeout 180
 ./lab sanitize s35_pipeline --tool synccheck --case 0 --timeout 180
 ./lab sanitize s38_async_gemm --tool initcheck --case 0 --timeout 180
@@ -47,6 +47,6 @@ Conda 环境或新增 CUDA 文件后重新生成。脚本只配置解析，不�
 `.vscode/` 中的个人编辑器配置也被 Git 忽略。
 
 在 VS Code 命令面板执行 **clangd: Restart language server**。使用支持 SM100a 的
-clangd；可通过 `clangd --check=students/cuda/s00_softmax/kernel.cu` 独立检查解析诊断。
+clangd；可通过 `clangd --check=students/cuda/s01_softmax/kernel.cu` 独立检查解析诊断。
 编辑器使用 Clang CUDA 参数，实际构建仍使用 `build.py` 的 nvcc 参数；
 无编辑器诊断不代表 nvcc 构建成功或学生正确性通过。

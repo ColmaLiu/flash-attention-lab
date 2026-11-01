@@ -50,5 +50,20 @@
     "id": "cutlass_cpp",
     "path": "third_party/cutlass",
     "version_source": "gitlink:third_party/cutlass"
+  },
+  {
+    "id": "cutlass_sm100_vendored",
+    "commit": "4370102f9dacab813282e1d67722fceb0b90a019",
+    "path": "references/cutlass-sm100",
+    "version": "v4.4.1",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "id": "fa4_vendored",
+    "commit": "1fc0221183e799363001394a12dd9e78e15f5dda",
+    "path": "references/flash-attention",
+    "version": "fa4-v4.0.0.beta35",
+    "patches": "references/flash-attention/PATCHES.md",
+    "license": "BSD-3-Clause"
   }
 ]

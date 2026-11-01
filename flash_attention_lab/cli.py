@@ -41,9 +41,9 @@ def parser():
     display.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="full JSON report")
     display.add_argument("--verbose", "-v", action="store_true", default=argparse.SUPPRESS, help="show diagnostics, details and report paths")
     p = Parser(prog="./lab", description="FlashAttention Lab: GPU kernel exercises", parents=[display])
-    public = "doctor,list,task,status,check,bench,smoke,sanitize,profile,python"
+    public = "doctor,list,task,status,check,bench,reference,solution,smoke,sanitize,profile,python"
     sub = p.add_subparsers(dest="command", required=True, metavar="{" + public + "}")
-    descriptions = {"doctor": "check environment", "smoke": "check infrastructure", "status": "exercise status", "list": "list exercises", "task": "show task and tensor contract", "check": "validate student kernel", "bench": "validate, then benchmark", "sanitize": "run Compute Sanitizer", "profile": "run Nsight Compute", "python": "run Python in the project environment"}
+    descriptions = {"doctor": "check environment", "smoke": "check infrastructure", "status": "exercise status", "list": "list exercises", "task": "show task and tensor contract", "check": "validate student kernel", "bench": "validate, then compare with optimized reference", "reference": "validate and time the optimized library reference", "solution": "validate and compare the complete kernel answer", "sanitize": "run Compute Sanitizer", "profile": "run Nsight Compute", "python": "run Python in the project environment"}
     def add(command):
         kwargs = {"help": descriptions[command]} if command in descriptions else {}
         return sub.add_parser(command, parents=[display], **kwargs)
@@ -52,7 +52,7 @@ def parser():
         q.add_argument("--stage", type=int, choices=range(5), help="select a stage")
         if command == "smoke": q.add_argument("--timeout", type=float, default=600)
     q = add("task"); q.add_argument("exercise", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
-    for command in ("check", "bench", "sanitize", "profile", "_worker", "_profile"):
+    for command in ("check", "bench", "reference", "solution", "sanitize", "profile", "_worker", "_profile"):
         q = add(command)
         if command == "check":
             scope = q.add_mutually_exclusive_group(required=True)
@@ -61,14 +61,16 @@ def parser():
         else:
             q.add_argument("exercise", type=exercise_id, metavar="ID", help="full or short exercise ID (e.g. s20)")
         q.add_argument("--case", type=int)
+        if command in ("check", "sanitize", "profile", "_worker", "_profile"):
+            q.add_argument("--solution", action="store_true", help="use the independent complete answer")
         q.add_argument("--timeout", type=float, default=180,
                        help="timeout in seconds (per exercise for --stage)" if command == "check" else "timeout in seconds")
-        if command in ("bench", "_worker"):
+        if command in ("bench", "reference", "solution", "_worker"):
             q.add_argument("--warmup", type=positive_int, default=5)
             q.add_argument("--repeats", type=positive_int, default=7)
             q.add_argument("--iterations", type=positive_int, default=10)
         if command == "sanitize": q.add_argument("--tool", choices=("memcheck", "racecheck", "synccheck", "initcheck"), default="memcheck")
-        if command == "_worker": q.add_argument("--operation", choices=("check", "bench"), required=True)
+        if command == "_worker": q.add_argument("--operation", choices=("check", "bench", "reference", "solution"), required=True)
         if command.startswith("_"): q.add_argument("--report-file", help=argparse.SUPPRESS)
     q = add("_smoke"); q.add_argument("--stage", type=int, choices=range(5)); q.add_argument("--report-file", help=argparse.SUPPRESS)
     q = add("python"); q.add_argument("args", nargs=argparse.REMAINDER)
@@ -103,7 +105,8 @@ def emit(result, args=None):
 def worker_command(args, operation):
     cmd = [sys.executable, "-m", "flash_attention_lab", "_worker", args.exercise, "--operation", operation]
     if args.case is not None: cmd += ["--case", str(args.case)]
-    if operation == "bench":
+    if getattr(args, "solution", False): cmd += ["--solution"]
+    if operation in ("bench", "reference", "solution"):
         cmd += ["--warmup", str(args.warmup), "--repeats", str(args.repeats), "--iterations", str(args.iterations)]
     return cmd
 
@@ -215,7 +218,7 @@ def status_report(stage):
                 path = ROOT / "progress/results" / (e["id"] + ".json")
                 if path.exists():
                     data = json.loads(path.read_text())
-                    if digest is None: digest = fingerprint(e)
+                    digest = fingerprint(e)
                     if data.get("fingerprint") == digest and data.get("full_contract"):
                         state, reason = data["state"], data.get("reason", "Current full check; design review separate")
                     else: reason = "Stale or partial check"
@@ -249,7 +252,7 @@ def error_report(exc, args):
     if state == "ENV_UNSUPPORTED": result["hint"] = "Diagnose: ./lab doctor --verbose"
     # Preserve failure bookkeeping: a counterexample invalidates an older success,
     # including failures found by a single-case check or benchmark validation.
-    if getattr(args, "command", None) == "_worker" and code in (3, 6):
+    if getattr(args, "command", None) == "_worker" and getattr(args, "operation", None) in ("check", "bench") and not getattr(args, "solution", False) and code in (3, 6):
         from .runner import save_result
         e = EXERCISES[exercise]
         save_result(e, {"state": "CORRECTNESS_FAILED", "fingerprint": fingerprint(e), "full_contract": True, "reason": str(exc)})
@@ -266,8 +269,8 @@ def execute(args):
     if name == "task":
         files = [f"students/{e['backend']}/{e['id']}/entry.py"]
         if e["backend"] == "cuda": files.append(f"students/cuda/{e['id']}/kernel.cu")
-        document = (ROOT / "docs/tasks" / (e["id"] + ".md")).read_text()
-        tensors = re.findall(r'^\| `(inputs|outputs)` \| `"([a-z]+)"` \| `([^`]+)` \| ([^|]+) \|', document, re.M)
+        from .cases import tensor_contract
+        tensors = tensor_contract(e)
         return {**brief(e), "command": name, "exercise": e["id"], "purpose": e["purpose"],
                 "dtypes": sorted({c["dtype"] for c in e["cases"]}), "student_files": files,
                 "task_file": f"docs/tasks/{e['id']}.md", "tensors": [[v.strip() for v in row] for row in tensors], "cases": e["cases"]}
@@ -292,18 +295,23 @@ def execute(args):
         return {**infrastructure_smoke(args.stage), "command": "smoke"}
     if name == "check" and getattr(args, "stage", None) is not None:
         return check_stage(args)
-    if name in ("check", "bench"): return managed(worker_command(args, name), args)
+    if name in ("check", "bench", "reference", "solution"): return managed(worker_command(args, name), args)
     if name == "_worker":
-        from .runner import benchmark, check, save_result
+        from .runner import benchmark, check, save_result, reference
         if args.operation == "check":
-            result = check(e, args.case)
-            if args.case is None: save_result(e, result)
-        else: result = benchmark(e, 0 if args.case is None else args.case, args.warmup, args.repeats, args.iterations)
+            result = check(e, args.case, solution=args.solution)
+            if args.case is None and not args.solution: save_result(e, result)
+        else:
+            case = args.case if args.case is not None else next(i for i,c in enumerate(e["cases"]) if c["suite"] == "perf")
+            if args.operation == "reference":
+                result = reference(e, case, args.warmup, args.repeats, args.iterations)
+            else:
+                result = benchmark(e, case, args.warmup, args.repeats, args.iterations, solution=args.operation == "solution")
         return {**result, "command": args.operation}
     if name in ("sanitize", "profile"):
         from .api import require_implemented
         from .runtime import require_tool
-        require_implemented(e)
+        if not args.solution: require_implemented(e)
         case = 0 if args.case is None else args.case
         if name == "sanitize":
             binary = require_tool("compute-sanitizer", "LAB_SANITIZER")
@@ -318,6 +326,7 @@ def execute(args):
             cmd = [binary, "--nvtx", "--nvtx-include", "lab_profile/", "--section", "LaunchStats",
                    "--section", "MemoryWorkloadAnalysis", "--section", "SpeedOfLight", "-o", str(output),
                    sys.executable, "-m", "flash_attention_lab", "_profile", args.exercise, "--case", str(case)]
+        if args.solution: cmd += ["--solution"]
         result = managed(cmd, args, tool=True)
         if name == "profile" and result["exit_code"] == 0:
             report = Path(str(output) + ".ncu-rep")
@@ -334,9 +343,9 @@ def execute(args):
         from .cases import make_inputs
         from .api import prepare
         case = 0 if args.case is None else args.case
-        validation = check(e, case)
+        validation = check(e, case, solution=args.solution)
         inputs, cfg = make_inputs(e, e["cases"][case], "cuda")
-        plan = prepare(e["id"], inputs, cfg)
+        plan = prepare(e["id"], inputs, cfg, solution=args.solution)
         for _ in range(3): plan.launch()
         torch.cuda.synchronize()
         torch.cuda.nvtx.range_push("lab_profile")

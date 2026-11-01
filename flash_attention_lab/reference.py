@@ -23,7 +23,7 @@ def _attention_rows(q, k, v, scale, causal, query_start=0):
 
 
 def _attention_reference(inputs, config):
-    q, k, v = (inputs[n].double() for n in ("q", "k", "v"))
+    q, k, v = (inputs[n].permute(0, 2, 1, 3).double() for n in ("q", "k", "v"))
     b, h, n, _ = q.shape
     if b * h * n * n <= ATTENTION_SCORE_ELEMENTS:
         out, lse = _attention_rows(q, k, v, config["scale"], config["causal"])
@@ -38,7 +38,7 @@ def _attention_reference(inputs, config):
                     out[batch, head, start:stop], lse[batch, head, start:stop] = _attention_rows(
                         q[batch, head, start:stop], k[batch, head], v[batch, head],
                         config["scale"], config["causal"], start)
-    return {"o": out, "lse": lse}
+    return {"o": out.permute(0, 2, 1, 3).contiguous(), "lse": lse}
 
 
 def mathematical_reference(kind, inputs, config):

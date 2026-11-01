@@ -28,13 +28,14 @@ class Prepared:
     outputs: dict
     workspace: dict
     inputs: dict
+    extra_workspace_bytes: int = 0
 
 
-def prepare(exercise_id, inputs, config=None):
+def prepare(exercise_id, inputs, config=None, *, solution=False):
     e = EXERCISES[exercise_id]
-    module = require_implemented(e)
+    module = load_student(e, solution=True) if solution else require_implemented(e)
     cfg = {"causal": False, "scale": 1.0, **module.CONFIG, **(config or {})}
-    if e["kind"] == "attention" and (not config or "scale" not in config):
+    if e["kind"] == "attention" and "scale" not in module.CONFIG and (not config or "scale" not in config):
         cfg["scale"] = inputs["q"].shape[-1] ** -0.5
     validate_inputs(e, inputs, cfg)
     t = next(iter(inputs.values()))
@@ -44,15 +45,15 @@ def prepare(exercise_id, inputs, config=None):
         workspace = {n: torch.empty(shape, dtype=dtype, device=t.device)
                      for n, (shape, dtype) in spec.items()}
         stream = torch.cuda.current_stream(t.device).cuda_stream
-        if e["backend"] == "cuda":
+        if e["backend"] == "cuda" and getattr(module, "BACKEND", None) != "python":
             from .build import build_cuda, descriptors
-            lib = build_cuda(exercise_id)
+            lib = build_cuda(exercise_id, solution=solution)
             args = (descriptors(inputs), descriptors(outputs), descriptors(workspace), cfg, stream)
             launch = lambda: lib.launch(*args)
         else:
             launch = module.prepare(inputs, outputs, workspace, cfg, stream)
         if not callable(launch): raise TypeError("student prepare must return a zero-argument launch callable")
-    return Prepared(launch, outputs, workspace, inputs)
+    return Prepared(launch, outputs, workspace, inputs, getattr(launch, "extra_workspace_bytes", 0))
 
 
 def run(exercise_id, inputs, config=None):

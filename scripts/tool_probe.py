@@ -1,4 +1,5 @@
 """Only scalar infrastructure sentinels; never a student's kernel or acceptance."""
+import argparse
 from pathlib import Path
 import sys
 
@@ -9,19 +10,24 @@ configure_runtime()
 
 import torch
 from flash_attention_lab.build import build_cuda, descriptors
-from flash_attention_lab.cute_smoke import prepare_sentinel
 
 
 def main():
     from flash_attention_lab.environment import require_environment
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cute", action="store_true", help="also test optional CuTe DSL tooling")
+    args = parser.parse_args()
     require_environment("cuda")
-    require_environment("cute")
     output = torch.zeros(1, device="cuda", dtype=torch.int32)
     stream = torch.cuda.current_stream().cuda_stream
     cpp = build_cuda("infra_smoke")
     cuda_launch = lambda: cpp.launch({}, descriptors({"sentinel": output}), {}, {}, stream)
-    cute_launch = prepare_sentinel(output, stream)
-    for name, launch in (("cuda", cuda_launch), ("cute", cute_launch)):
+    launches = [("cuda", cuda_launch)]
+    if args.cute:
+        require_environment("cute")
+        from flash_attention_lab.cute_smoke import prepare_sentinel
+        launches.append(("cute", prepare_sentinel(output, stream)))
+    for name, launch in launches:
         output.zero_()
         torch.cuda.nvtx.range_push("infra_tool_probe")
         launch()

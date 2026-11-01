@@ -1,5163 +1,2445 @@
 [
   {
-    "id": "s00_softmax",
+    "id": "s00_layout",
     "stage": 0,
     "backend": "cuda",
-    "kind": "softmax",
-    "title": "Stable row-wise softmax",
-    "prerequisites": [],
-    "cases": [
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "constant"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "shifted"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      }
-    ],
-    "purpose": "Implement FP32 softmax for 4 rows of 128 values and establish the build and validation workflow.",
-    "math": "对每行 x，m=max(x)，y_j=exp(x_j-m)/Σ_k exp(x_k-m)。对任意有限常数 c，softmax(x+c)=softmax(x)。从分子分母同时乘 exp(-m) 推导稳定性；不要求先支持所有宽度。",
-    "task": "自行设计 reduction、线程到行/元素的映射、存储位置和 launch。实现完整的一行稳定 softmax 模块；不得调用现成 softmax。",
-    "evidence": "画出一行数据由哪些线程拥有；解释最大值和分母如何传播。所有输出非负、每行和约为 1，偏移 10000 仍有限。",
-    "experiment": "记录一次正确实现的耗时与 launch 配置；解释小规模运行为何可能由 launch 开销主导。比较 constant 和 large 输入误差，不以速度决定正确性。",
-    "symptoms": "大正数输入出现 NaN/Inf；每行和不是 1；只有第一行正确；运行之间随机变化。"
-  },
-  {
-    "id": "s01_reduce",
-    "stage": 0,
-    "backend": "cuda",
-    "kind": "reduce",
-    "title": "Row reductions and tails",
-    "prerequisites": [
-      "s00_softmax"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          1,
-          1
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          1,
-          1
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          7,
-          31
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          7,
-          31
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          7,
-          31
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          7,
-          31
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          2048
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          8192
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          31,
-          4097
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      }
-    ],
-    "purpose": "Separate row reductions from softmax and validate lengths that do not fill a warp or block.",
-    "math": "maximum_r=max_j x_rj；sum_r=Σ_j x_rj。空参与线程不等于真实的零输入；本关没有空行。浮点加法不满足结合律。",
-    "task": "实现行最大值与行总和两个输出；选择线程分工、局部/跨线程 reduction 及尾部谓词。",
-    "evidence": "说明所有有效元素恰好参与一次；记录 negative 输入和单元素输入的边界处理；不规定一个 CTA 必须对应一行。",
-    "experiment": "比较宽度 31、128、257 的通信与空闲线程；用 NCU LaunchStats/MemoryWorkloadAnalysis 解释实际布局访问。",
-    "symptoms": "负数行最大值变成 0；C=257 漏最后一个值；取消相加时误差异常；线程不一致到达同步点。"
-  },
-  {
-    "id": "s02_naive",
-    "stage": 0,
-    "backend": "cuda",
-    "kind": "attention",
-    "title": "Naive attention forward",
-    "prerequisites": [
-      "s00_softmax",
-      "s01_reduce"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          32,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          32,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          32,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          64,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          64,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          64,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          32,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          8,
-          512,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          8,
-          2048,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Connect softmax to a FP32 attention baseline with explicit intermediate matrices allowed.",
-    "math": "S=scale QKᵀ；P=softmax_row(S)；O=PV；LSE_i=log Σ_j exp(S_ij)。默认 scale=1/√D。",
-    "task": "自行实现 QK、softmax 和 PV，可以多次 launch 并把 S/P 写入 global memory。在 workspace_spec 中自行声明需要的临时张量。",
-    "evidence": "列出 Q/K/V/S/P/O 的产生者、保存位置、读者和生存期。输出 O 与 FP32 LSE；未使用 Tensor Core。",
-    "experiment": "估算物化 S/P 的字节数并与 NCU DRAM 计数比较；解释 L2 缓存为何使二者不同。",
-    "symptoms": "K 转置方向错误；漏乘 scale；batch/head 索引混叠；LSE 中自然对数与 log2 混用。"
-  },
-  {
-    "id": "s03_online",
-    "stage": 0,
-    "backend": "cuda",
-    "kind": "online",
-    "title": "Online softmax and state invariants",
-    "prerequisites": [
-      "s00_softmax",
-      "s01_reduce"
-    ],
-    "cases": [
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "shifted"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "shifted"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          3,
-          257
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          513
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          513
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "shifted"
-      },
-      {
-        "shape": [
-          2,
-          513
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          2,
-          513
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          32,
-          2048
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          32,
-          8192
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          7,
-          4097
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "shifted"
-      }
-    ],
-    "purpose": "Validate statistics across chunks before FA1. Online softmax alone does not complete FA1.",
-    "math": "对已处理的索引集合 A，m_A=max_{j∈A}x_j，l_A=Σ_{j∈A}exp(x_j-m_A)。用不变量推导不相交集合合并后同一归一化基准下的表示。最终 y 是整行 softmax。",
-    "task": "实现按块处理的 online 统计和最终归一化输出 y,m,l。块大小、扫描与输出组织均由你决定，不能退回一次性整行统计冒充 online。",
-    "evidence": "给出跨块状态不变量及初始化依据；至少演示两个不同块大小以及尾块。无需在 API 中返回全部中间状态。",
-    "experiment": "固定输入比较块大小对舍入误差、读入次数和存储量的影响；解释输出概率是否要求再读取输入。",
-    "symptoms": "新块最大值更大时旧统计失效；尾块影响分母；只归一化了最后一块。"
-  },
-  {
-    "id": "s10_fa1",
-    "stage": 1,
-    "backend": "cuda",
-    "kind": "attention",
-    "title": "FA1: KV outer loop and IO reuse",
-    "prerequisites": [
-      "s02_naive",
-      "s03_online"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Implement the FP32 teaching version of the paper, examining output-state updates under KV-outer, Q-inner traversal.",
-    "math": "已处理键集合 A 的不变量：m_i=max S_iA，l_i=Σ exp(S_iA-m_i)，O_i=Σ exp(S_ij-m_i)V_j/l_i。T_c=ceil(N/B_c)，T_r=ceil(N/B_r)。",
-    "task": "实现 KV 外层/Q 内层的 tiled attention，不物化 N×N S/P。保持 K/V tile 在遍历多个 Q tile 时的复用；自行选择 CTA ownership、SMEM、寄存器及 O/m/l 的保存。",
-    "evidence": "源码和记录必须证明循环顺序、KV 复用以及每次更新后 O/m/l 的含义。先解释并发写 O 的安全性；只使用 online softmax 不算 FA1 设计验收。",
-    "experiment": "按 docs/io_model.md 对每个 tensor 的每次循环读写计数；固定 B/H/N/D 对比 s02。报告教学版 B200 性能，不代表原版 FA1。",
-    "symptoms": "多个 KV 工作者竞争同一 O；每次调用沿用旧状态；O 的归一化约定中途改变；共享内存大小超限。"
-  },
-  {
-    "id": "s11_fa1_edges",
-    "stage": 1,
-    "backend": "cuda",
-    "kind": "attention",
-    "title": "FA1: tails and causal masking",
-    "prerequisites": [
-      "s10_fa1"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          3,
-          65,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          3,
-          65,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          3,
-          65,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          3,
-          65,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          3,
-          65,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          3,
-          65,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          2049,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          4,
-          4097,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": true,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Extend B/H/D, sequence tails and causal masking while preserving the original FA1 entry point.",
-    "math": "causal 只允许 j≤i；被屏蔽位置数学分数为 -∞。self-attention 的对角线有效，整个有效 query 行不会全屏蔽，但某个 KV tile 可能全屏蔽。",
-    "task": "在新入口实现边界和 mask 规则；选择对全屏蔽 tile 和尾部元素的处理，不能改变 s10 的结果记录。",
-    "evidence": "区分越界 padding 与有效但被 mask 的元素；展示 N=1、65、129 和 causal/noncausal 的通过结果。",
-    "experiment": "分别报告实际有效 pair FLOPs 和 dense-equivalent FLOPs；分析对角 tile 的额外工作。",
-    "symptoms": "全屏蔽 tile 产生 -∞ 减 -∞；三角形方向反了；尾部 global 越界；不同 head 互相污染。"
-  },
-  {
-    "id": "s20_fa2_grid",
-    "stage": 2,
-    "backend": "cuda",
-    "kind": "attention",
-    "title": "FA2: query grid parallelism",
-    "prerequisites": [
-      "s10_fa1"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Isolate query-tile grid parallelism with the same FP32 shapes. This is one part of FA2.",
-    "math": "attention 的不同输出行在 forward 中相互独立。对一个 query tile，它需要覆盖完整有效 key 集合，拥有该 tile 的输出状态。",
-    "task": "自行实现 query tile ownership 和对应循环顺序；比较 FA1 输出状态驻留时间。此关尚不要求 sliced-Q 或 Tensor Core。",
-    "evidence": "给出 grid 各轴含义、每个 CTA 的输出所有权、为何无需跨 CTA 合并 O。仅增加无效 CTA 数量不算实现。",
-    "experiment": "固定精度和 tile 字节预算对比 s10；同时记录 CTA 数、寄存器、SMEM 与 GPU 利用，不把 grid 并行和 CTA 内分工混淆。",
-    "symptoms": "同一 query tile 多次写出；K 维漏遍历；grid 数变多但输出 ownership 没变。"
-  },
-  {
-    "id": "s21_fa2_sliced",
-    "stage": 2,
-    "backend": "cuda",
-    "kind": "attention",
-    "title": "FA2: sliced-Q and scalar work",
-    "prerequisites": [
-      "s20_fa2_grid"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          32
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Add CTA-local sliced-Q and reduce non-matmul work while keeping FP32 to isolate the design change.",
-    "math": "不归一化分子 U_i=Σ exp(S_ij-m_i)V_j，O_i=U_i/l_i。推导延迟归一化何时与逐块归一化等价。不同 Q 行的 reduction 是独立的。",
-    "task": "实现 warp 间 Q 行分工、K/V 复用和最终输出；重新审视每次归一化及跨 warp 合并是否必要。线程映射和通信机制由你设计。",
-    "evidence": "画 CTA 内各 warp 的 Q/K/V/O 所有权；用源码/NCU 证据解释跨 warp 部分输出合并是否消除。s20+s21 才构成本仓库 FA2 算法结构版。",
-    "experiment": "固定 grid、dtype、shape 对比 s20；计数归一化操作、SMEM 读写和同步次数。不得仅凭更快就认定 sliced-Q 已实现。",
-    "symptoms": "warp 之间仍重复计算相同 Q；输出分子和已归一化 O 混用；减少同步后出现竞争。"
-  },
-  {
-    "id": "s22_mma",
-    "stage": 2,
-    "backend": "cuda",
-    "kind": "gemm",
-    "title": "CUDA Tensor Core GEMM",
-    "prerequisites": [
-      "s01_reduce"
-    ],
-    "cases": [
-      {
-        "shape": [
-          16,
-          16,
-          16
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          16,
-          16,
-          16
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          16,
-          16,
-          16
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          16,
-          16,
-          16
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          16,
-          16,
-          16
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          16,
-          16,
-          16
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          32,
-          32,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          32,
-          32,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          32,
-          32,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          32,
-          32,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          32,
-          32,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          32,
-          32,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          256,
-          256,
-          256
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1024,
-          1024,
-          1024
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2048,
-          2048,
-          2048
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096,
-          4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096,
-          128,
-          4096
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          512,
-          2048,
-          256
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          256,
-          256,
-          256
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1024,
-          1024,
-          1024
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2048,
-          2048,
-          2048
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096,
-          4096,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096,
-          128,
-          4096
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          512,
-          2048,
-          256
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Learn warp-level Tensor Core operands, then scale to full GEMM problems before low-precision attention.",
-    "math": "C=A B，A:[M,K]，B:[K,N]，C:[M,N]。A/B 为 FP16 或 BF16；乘积累加与 C 为 FP32，不做 TF32。",
-    "task": "自行选择 WMMA 或 mma.sync 的合法指令形状、fragment layout、加载和存储。不可调用 cuBLAS，也不预填 launch 和 SMEM。",
-    "evidence": "在 B200 生成代码中确认 Tensor Core 指令；说明 collective 参与线程和对齐约束；不要把 CUDA WMMA 当作 Blackwell tcgen05。",
-    "experiment": "对同一已量化输入测误差，分开记录量化与累加误差；记录选择的指令与 SM100 编译目标。",
-    "symptoms": "fragment 按普通连续矩阵访问；参与线程不完整；B layout 方向错误；输出被低精度累加。"
-  },
-  {
-    "id": "s23_fa2_tensor",
-    "stage": 2,
-    "backend": "cuda",
-    "kind": "attention",
-    "title": "FA2: Tensor Core integration",
-    "prerequisites": [
-      "s21_fa2_sliced",
-      "s22_mma"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          256,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          256,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          256,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          256,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          256,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          256,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Integrate the validated Tensor Core computation into FA2, tracking precision and compute-engine changes separately.",
-    "math": "Q/K/V/O 使用输入 dtype；分数、softmax 统计、O 累加和 LSE 为 FP32。若 P 转为低精度供 MMA 使用，误差必须单独记录。",
-    "task": "实现两次矩阵乘和 softmax 的数据交接；支持 FP16/BF16，保留 s21 FP32 入口。",
-    "evidence": "说明 QK 与 PV 的 accumulator 所在位置和 P 的转换点；证明 sliced-Q 所有权仍成立。",
-    "experiment": "用同一量化输入转换回 FP32 做对照，分别列出 dtype 与 Tensor Core 变化；不能将两者的总收益全部归因于 FA2。",
-    "symptoms": "softmax 统计误用 half；PV 输入 layout 错位；只在 random 小值输入上正确。"
-  },
-  {
-    "id": "s24_fa2_edges",
-    "stage": 2,
-    "backend": "cuda",
-    "kind": "attention",
-    "title": "FA2: low-precision edge cases",
-    "prerequisites": [
-      "s23_fa2_tensor"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          65,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          2049,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          4,
-          4097,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          2049,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          4,
-          4097,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Extend the Tensor Core version to tails and causal masking as a restricted baseline for the DSL port.",
-    "math": "矩阵指令的物理 tile 与有效的 N 不同；只有有效且未 mask 的 pair 参与 softmax 的分母。",
-    "task": "完成低精度 MMA tile 的合法 padding、mask 和写回，不让无效元素改变统计。",
-    "evidence": "输出 N=1 与 N=65/129 的最大误差；说明合法 MMA shape 与逻辑边界的区别。",
-    "experiment": "比较 FP16/BF16 的 near-zero 误差与大 logits；对 causal 分开统计有效 FLOPs 和实际指令工作。",
-    "symptoms": "尾块仍使用未初始化 shared 数据；mask 在指数之后处理；首行输出不等于第一个 V。"
-  },
-  {
-    "id": "s30_layout",
-    "stage": 3,
-    "backend": "cute",
     "kind": "transpose",
-    "title": "CuTe layouts and thread mapping",
+    "title": "\u5185\u5b58\u3001\u7ebf\u7a0b\u4e0e\u8f6c\u7f6e",
     "prerequisites": [],
+    "domain": {
+      "dtypes": [
+        "fp32"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        1,
+        1
+      ]
+    },
     "cases": [
       {
+        "id": "small",
         "shape": [
-          17,
-          33
+          7,
+          11
         ],
         "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "debug",
+        "purpose": "\u77e9\u5f62\u8f6c\u7f6e\uff0c\u660e\u786e\u8f93\u5165/\u8f93\u51fa\u7684\u7ebf\u6027\u5730\u5740\u3002"
       },
       {
+        "id": "coordinates",
         "shape": [
-          17,
-          33
+          33,
+          65
         ],
         "dtype": "fp32",
+        "pattern": "coordinate",
         "causal": false,
-        "pattern": "random"
+        "suite": "edge",
+        "purpose": "\u8de8 warp \u8fb9\u754c\u548c\u5c3e\u90e8\uff0c\u68c0\u67e5\u6bcf\u4e2a\u5750\u6807\u6070\u597d\u5199\u5165\u4e00\u6b21\u3002"
       },
       {
+        "id": "single_row",
         "shape": [
-          32,
-          64
+          1,
+          257
         ],
         "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "edge",
+        "purpose": "\u9000\u5316\u7ef4\u5ea6\uff0c\u533a\u5206 transpose \u4e0e copy\u3002"
       },
       {
-        "shape": [
-          32,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1024,
-          2048
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
+        "id": "tall",
         "shape": [
           1025,
-          2049
+          17
         ],
         "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "stress",
+        "purpose": "\u957f\u77e9\u5f62\u53ca\u5c3e\u90e8\uff0c\u89c2\u5bdf\u6620\u5c04\u8986\u76d6\u3002"
+      },
+      {
+        "id": "bandwidth",
+        "shape": [
+          2048,
+          2048
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u8f83\u5927\u77e9\u9635\u7684\u5168\u5c40\u8bbf\u5b58\u6548\u7387\u3002"
+      },
+      {
+        "id": "wide",
+        "shape": [
+          1024,
+          8192
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u957f\u884c\u53ca\u4e0d\u540c\u5bbd\u9ad8\u6bd4\uff1b\u62a5\u544a\u6709\u6548\u5b57\u8282\u7387\u800c\u975e\u5047\u5b9a HBM \u5e26\u5bbd\u3002"
       }
     ],
-    "purpose": "Explore layout domains, shapes and strides; validate JIT, DLPack and your thread mapping.",
-    "math": "输入 X:[R,C] row-major；输出 Y:[C,R] row-major；Y[j,i]=X[i,j]。CuTe layout 将逻辑坐标映射到线性偏移；线程 layout 是另一层映射。",
-    "task": "实现 transpose；自行设计 layout、partition 和 grid/block。可先用普通 global load/store，再研究合并访问，不指定答案 layout。",
-    "evidence": "为一个小角落列出逻辑坐标、内存偏移和线程编号；证明一对一覆盖与尾部保护。",
-    "experiment": "比较读合并与写合并的取舍；记录编译时间与重复执行时间，不把首次 JIT 纳入 kernel 耗时。",
-    "symptoms": "shape 正确但 stride 错误；转置两次；把线程编号误当 tensor offset；JIT 类型/动态参数混用。"
+    "purpose": "\u4ece\u7ebf\u7a0b\u5730\u5740\u5230\u5408\u5e76\u8bbf\u5b58\uff0c\u5efa\u7acb\u53ef\u6d4b\u91cf\u7684 CUDA \u7a0b\u5e8f\u3002",
+    "evidence": "\u8bf4\u660e ownership\u3001\u5168\u5c40\u8bbf\u5b58\u65b9\u5411\u53ca shared-memory bank \u884c\u4e3a\uff1b\u63d0\u4f9b\u81f3\u5c11\u4e24\u79cd\u6620\u5c04\u7684\u5b9e\u6d4b\u5bf9\u6bd4\u3002",
+    "experiment": "\u9884\u6d4b\u54ea\u79cd\u8bbf\u95ee\u4f1a\u589e\u52a0\u4e8b\u52a1\uff0c\u518d\u7528 profiler \u548c\u540c\u5f62\u72b6 native transpose \u5bf9\u7167\u3002",
+    "lesson": "docs/tasks/s00_layout.md",
+    "baseline": "torch_native"
   },
   {
-    "id": "s31_port",
-    "stage": 3,
-    "backend": "cute",
+    "id": "s01_softmax",
+    "stage": 0,
+    "backend": "cuda",
     "kind": "softmax",
-    "title": "CUDA to CuTe DSL port",
+    "title": "\u884c\u5f52\u7ea6\u4e0e\u7a33\u5b9a softmax",
     "prerequisites": [
-      "s00_softmax",
-      "s30_layout"
+      "s00_layout"
     ],
+    "domain": {
+      "dtypes": [
+        "fp32"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        1,
+        1
+      ]
+    },
     "cases": [
       {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "constant"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "shifted"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "negative"
-      },
-      {
-        "shape": [
-          4,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
-      }
-    ],
-    "purpose": "Rewrite your completed s00 kernel in CuTe DSL and explain the correspondence between the two implementations.",
-    "math": "数学契约与 s00 完全相同，精度和形状不变；语言变化不应改变 softmax 定义。",
-    "task": "重新实现稳定 softmax 的映射和 reduction；仅参考自己的 s00，不复制官方 attention。",
-    "evidence": "记录 CUDA 的 launch、指针、thread index 与 DSL 各构件对应关系；运行两关同一组输入。",
-    "experiment": "比较编译/调用开销与 GPU 时间；解释差异来自编译、mapping 还是数值实现。",
-    "symptoms": "Python 执行与 JIT 编译阶段混淆；错误 specialization；reduce 的逻辑轴不一致。"
-  },
-  {
-    "id": "s32_async",
-    "stage": 3,
-    "backend": "cute",
-    "kind": "copy",
-    "title": "Async copies and visibility",
-    "prerequisites": [
-      "s30_layout"
-    ],
-    "cases": [
-      {
-        "shape": [
-          32,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          32,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1024,
-          1024
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          2048,
-          4096
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "coordinate"
-      }
-    ],
-    "purpose": "Use a small copy exercise to study async submission, completion and shared-data visibility.",
-    "math": "Y=X；输入输出 FP32。异步操作的提交顺序不等于其他线程观察数据的顺序；描述 happens-before 图而非只列 barrier 名称。",
-    "task": "通过 cp.async 路径将 global 数据经 SMEM 传递到输出；自行实现分工、提交、等待和 SMEM 复用。",
-    "evidence": "标出生产者写入、完成确认、消费者读取、缓冲区释放四种事件。同步点参与范围必须与所用指令一致。",
-    "experiment": "对 copy 的字节数与实际 global 读写对照；运行 racecheck 和 synccheck。不能靠添加 host synchronize 掩盖 kernel 内竞争。",
-    "symptoms": "偶发旧数据；最后一批没有排空；只在调试模式正确；部分线程永远等待。"
-  },
-  {
-    "id": "s33_tma",
-    "stage": 3,
-    "backend": "cute",
-    "kind": "copy",
-    "title": "TMA and single-buffer mbarrier",
-    "prerequisites": [
-      "s32_async"
-    ],
-    "cases": [
-      {
-        "shape": [
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          256,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          256,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1024,
-          1024
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          2048,
-          4096
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      }
-    ],
-    "purpose": "Move to TMA with a single buffer and validate byte-count and phase protocols.",
-    "math": "Y=X；FP16 contiguous。TMA 描述符编码全局 tensor 的 shape/stride 与传输 tile；mbarrier 同时涉及到达参与者与事务完成字节。",
-    "task": "自行创建合法 TMA atom/descriptor 和 SMEM layout，实现 load 到 SMEM 后写回。launch、alignment、transaction bytes 和 phase 由你设计。",
-    "evidence": "按 docs/blackwell.md 核对 SM100 接口、base/stride 对齐、SMEM swizzle 约束；记录实际接口签名和合法 tile。",
-    "experiment": "用不同输入重复运行同一已编译函数；测 memcheck、racecheck 和等待相关 stall。",
-    "symptoms": "描述符 invalid argument；expected bytes 不匹配而死锁；phase 翻转错误；SMEM 对齐异常。"
-  },
-  {
-    "id": "s34_warp_specialize",
-    "stage": 3,
-    "backend": "cute",
-    "kind": "affine",
-    "title": "Warp specialization",
-    "prerequisites": [
-      "s33_tma"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
+        "id": "small",
         "shape": [
           3,
-          128,
-          64
+          37
         ],
-        "dtype": "fp16",
+        "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "debug",
+        "purpose": "\u8de8 warp \u975e\u6574\u500d\u6570\u884c\uff0c\u5efa\u7acb\u7a33\u5b9a softmax\u3002"
       },
       {
-        "shape": [
-          3,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          64,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          257,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      }
-    ],
-    "purpose": "Separate producer and consumer warp roles with a single stage before adding buffering.",
-    "math": "输入 X:[T,128,64] FP16，输出 Y 同 shape FP32，Y=2X+1。T 是独立数据 tile 的序列，不是线程数。",
-    "task": "用 TMA producer 和独立 consumer 实现转换；自行决定角色、参与计数和 release 协议。",
-    "evidence": "画角色间依赖图，指出每个 buffer 被谁持有、何时可覆盖；说明退出前哪些异步动作必须完成。",
-    "experiment": "比较同一任务统一 warp 分工与 specialization 的 register/SMEM 成本；不要求此小任务提速。",
-    "symptoms": "producer 等待永远不会发生的 release；consumer 读取上一 tile；角色分支跨越错误的 CTA 同步。"
-  },
-  {
-    "id": "s35_pipeline",
-    "stage": 3,
-    "backend": "cute",
-    "kind": "affine",
-    "title": "Multi-buffer pipelines and drain",
-    "prerequisites": [
-      "s34_warp_specialize"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          1,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          2,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          3,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          3,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
+        "id": "single",
         "shape": [
           7,
-          128,
-          64
+          1
         ],
-        "dtype": "fp16",
+        "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "edge",
+        "purpose": "\u5bbd\u5ea6\u4e00\u5e94\u8f93\u51fa\u4e00\u3002"
       },
       {
+        "id": "negative",
         "shape": [
-          7,
-          128,
-          64
+          13,
+          129
         ],
-        "dtype": "fp16",
+        "dtype": "fp32",
+        "pattern": "negative",
         "causal": false,
-        "pattern": "random"
+        "suite": "edge",
+        "purpose": "\u5168\u8d1f\u8f93\u5165\uff0c\u8bc6\u522b\u9519\u8bef\u6700\u5927\u503c\u521d\u59cb\u5316\u3002"
       },
       {
-        "shape": [
-          17,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
+        "id": "shift",
         "shape": [
           17,
-          128,
-          64
+          257
         ],
-        "dtype": "fp16",
+        "dtype": "fp32",
+        "pattern": "shifted",
         "causal": false,
-        "pattern": "random"
+        "suite": "stress",
+        "purpose": "\u5927\u6574\u4f53\u504f\u79fb\uff0c\u68c0\u67e5 exp \u524d\u7684\u7a33\u5b9a\u5316\u3002"
       },
       {
+        "id": "uniform",
         "shape": [
-          64,
-          128,
-          64
+          5,
+          33
         ],
-        "dtype": "fp16",
+        "dtype": "fp32",
+        "pattern": "constant",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "debug",
+        "purpose": "\u5747\u5300\u5206\u5e03\u548c\u6bcf\u884c\u548c\u4e3a\u4e00\u3002"
       },
       {
+        "id": "wide_tail",
         "shape": [
-          257,
-          128,
-          64
+          31,
+          8193
         ],
-        "dtype": "fp16",
+        "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "stress",
+        "purpose": "\u5bbd\u884c\u3001\u591a\u6b21\u5904\u7406\u53ca\u5c3e\u90e8\u3002"
       },
       {
+        "id": "many_short",
+        "shape": [
+          4096,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u77ed\u884c\u591a\u884c\u7684\u5e76\u884c\u5ea6\u53ca launch \u6210\u672c\u3002"
+      },
+      {
+        "id": "medium",
         "shape": [
           1024,
-          128,
-          64
+          2048
         ],
-        "dtype": "fp16",
+        "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "coordinate"
-      }
-    ],
-    "purpose": "Add cyclic buffering to the same computation and validate prologue, steady state, epilogue and phase wrap.",
-    "math": "Y=2X+1 不变。buffer 的占用区间从 producer acquire 开始，到最后一个 consumer release 结束；环形索引相同不意味着 phase 相同。",
-    "task": "自行设计至少两种 stage 数的多缓冲流水线；选择配置字段，保留 s34 单缓冲入口。",
-    "evidence": "测试 T=1/2/3/7/17 以及多次启动；提交生命周期图，证明没有提前覆盖和未完成退出。",
-    "experiment": "固定计算量研究 stage 数、SMEM 占用和 overlap；给出性能下降的一个可验证解释。",
-    "symptoms": "短循环死锁；T 大于 ring 长度才出错；第一次正确第二次错误；末尾输出遗漏。"
-  },
-  {
-    "id": "s36_tmem",
-    "stage": 3,
-    "backend": "cute",
-    "kind": "copy",
-    "title": "TMEM allocation and lifetime",
-    "prerequisites": [
-      "s30_layout",
-      "s32_async"
-    ],
-    "cases": [
+        "suite": "perf",
+        "purpose": "\u4e2d\u7b49\u884c\u5bbd\u7684\u5f52\u7ea6\u548c\u8bbf\u5b58\u5e73\u8861\u3002"
+      },
       {
+        "id": "wide",
         "shape": [
           128,
+          8192
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u5bbd\u884c\u7684\u8d44\u6e90\u4e0e\u5f52\u7ea6\u6210\u672c\u3002"
+      }
+    ],
+    "purpose": "\u5728\u4e00\u4e2a\u5b8c\u6574\u7b97\u5b50\u4e2d\u5b66\u4e60 warp/CTA \u5f52\u7ea6\u3001\u6570\u503c\u7a33\u5b9a\u6027\u53ca\u4e0d\u540c\u957f\u5ea6\u7684\u8c03\u5ea6\u3002",
+    "evidence": "\u7ed9\u51fa\u6700\u5927\u503c\u3001\u5206\u6bcd\u7684\u53c2\u4e0e\u96c6\u5408\u53ca\u6709\u6548\u7ebf\u7a0b\u8fb9\u754c\uff1b\u89e3\u91ca\u77ed\u884c\u548c\u5bbd\u884c\u7684\u8d44\u6e90\u5dee\u5f02\u3002",
+    "experiment": "\u5728\u77ed/\u4e2d/\u5bbd\u884c\u4e09\u4e2a\u5de5\u4f5c\u8d1f\u8f7d\u4e0a\u6bd4\u8f83 native softmax\uff0c\u4e0d\u7528\u4e00\u4e2a\u56fa\u5b9a\u5bbd\u5ea6\u6982\u62ec\u541e\u5410\u3002",
+    "lesson": "docs/tasks/s01_softmax.md",
+    "baseline": "torch_native"
+  },
+  {
+    "id": "s10_gemm",
+    "stage": 1,
+    "backend": "cuda",
+    "kind": "gemm",
+    "title": "SIMT \u5206\u5757 GEMM",
+    "prerequisites": [
+      "s00_layout"
+    ],
+    "domain": {
+      "dtypes": [
+        "fp32"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        1,
+        1,
+        1
+      ]
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          7,
+          11,
+          13
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u975e\u65b9\u77e9\u9635\uff0c\u533a\u5206 M/N/K \u4e0e\u4e24\u4e2a\u8f93\u5165\u7684\u884c\u5217\u3002"
+      },
+      {
+        "id": "zero",
+        "shape": [
+          64,
+          64,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "zero",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u96f6\u4e58\u79ef\u53ca\u5b8c\u6574\u8f93\u51fa\u5199\u5165\u3002"
+      },
+      {
+        "id": "coordinates",
+        "shape": [
+          128,
+          64,
           32
         ],
         "dtype": "fp32",
+        "pattern": "coordinate",
         "causal": false,
-        "pattern": "coordinate"
+        "suite": "debug",
+        "purpose": "\u53ef\u8fa8\u8ba4\u5750\u6807\u6a21\u5f0f\uff0c\u5b9a\u4f4d operand/accumulator layout\u3002"
       },
       {
+        "id": "long_k",
         "shape": [
           128,
+          128,
+          2048
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u591a\u6b21\u7d2f\u52a0\u4e0e\u7f13\u51b2\u590d\u7528\uff0c\u907f\u514d\u53ea\u9a8c\u8bc1\u4e00\u6b21 MMA\u3002"
+      },
+      {
+        "id": "tails",
+        "shape": [
+          129,
+          65,
+          257
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u4e09\u4e2a\u7ef4\u5ea6\u72ec\u7acb\u5c3e\u90e8\uff0c\u68c0\u67e5 predication\u3002"
+      },
+      {
+        "id": "square",
+        "shape": [
+          1024,
+          1024,
+          1024
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u591a CTA \u6301\u7eed GEMM\uff0c\u89c2\u5bdf\u590d\u7528\u548c\u8ba1\u7b97\u541e\u5410\u3002"
+      },
+      {
+        "id": "qk_shape",
+        "shape": [
+          2048,
+          2048,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "QK \u98ce\u683c\u77ed K\u3001\u5927\u8f93\u51fa\u77e9\u9635\u3002"
+      },
+      {
+        "id": "pv_shape",
+        "shape": [
+          2048,
+          128,
+          2048
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "PV \u98ce\u683c\u7a84 N\u3001\u957f K\uff0c\u4e0e QK \u4f7f\u7528\u4e0d\u540c\u74f6\u9888\u3002"
+      }
+    ],
+    "purpose": "\u5148\u5b66\u6570\u636e\u590d\u7528\u4e0e\u7b97\u672f\u5f3a\u5ea6\uff0c\u518d\u628a\u77e9\u9635\u4e58\u63a5\u5165 attention\u3002",
+    "evidence": "\u4ece\u6e90\u7801\u8bf4\u660e\u590d\u7528\u5c42\u6b21\u3001\u7ebf\u7a0b\u8f93\u51fa ownership\u3001\u5c3e\u90e8\u548c\u5bc4\u5b58\u5668\u5f00\u9500\u3002",
+    "experiment": "\u5bf9\u6bd4\u4e0d\u590d\u7528\u4e0e\u590d\u7528\u7248\u672c\u53ca cuBLAS\uff1b\u77ed K \u548c\u957f K \u5206\u5f00\u89e3\u91ca\u3002",
+    "lesson": "docs/tasks/s10_gemm.md",
+    "baseline": "cublas"
+  },
+  {
+    "id": "s11_materialized",
+    "stage": 1,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "\u663e\u5f0f\u4e2d\u95f4\u77e9\u9635 attention",
+    "prerequisites": [
+      "s01_softmax",
+      "s10_gemm"
+    ],
+    "domain": {
+      "dtypes": [
+        "fp32"
+      ],
+      "causal": [
+        false,
+        true
+      ],
+      "shape_multiple": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "head_dims": [
+        32,
+        64,
+        128
+      ]
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          1,
+          17,
+          1,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u5934\u57fa\u7ebf\uff0c\u5148\u6838\u5bf9 O \u4e0e\u81ea\u7136\u5bf9\u6570 LSE\u3002"
+      },
+      {
+        "id": "heads",
+        "shape": [
+          2,
+          33,
+          3,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "B\u3001H \u5747\u975e\u4e00\uff0c\u8bc6\u522b BNHD \u4e0e BHND \u6df7\u6dc6\u3002"
+      },
+      {
+        "id": "uniform",
+        "shape": [
+          1,
+          31,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "uniform_attention",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "Zero Q/K and nonzero V: verify mean of V, not vacuous zero output."
+      },
+      {
+        "id": "large_logits",
+        "shape": [
+          1,
+          65,
+          2,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "large",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u8f83\u5927 QK\uff0c\u68c0\u67e5\u6570\u503c\u7a33\u5b9a\u6027\u548c\u8f93\u51fa\u820d\u5165\u3002"
+      },
+      {
+        "id": "scale",
+        "shape": [
+          1,
+          17,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u663e\u5f0f scale\uff0c\u9632\u6b62\u786c\u7f16\u7801 1/sqrt(D)\u3002",
+        "scale": 0.25
+      },
+      {
+        "id": "single",
+        "shape": [
+          1,
+          1,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u5355 token \u65e0\u5f52\u7ea6\u957f\u5ea6\uff0c\u8f93\u51fa\u5e94\u7b49\u4e8e V\u3002"
+      },
+      {
+        "id": "tail_causal",
+        "shape": [
+          2,
+          129,
+          3,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "query/key \u5c3e\u90e8\u3001\u542b\u5bf9\u89d2\u7ebf\u7684 causal \u53ca\u591a\u5934\u7d22\u5f15\u3002"
+      },
+      {
+        "id": "tail_full",
+        "shape": [
+          1,
+          257,
+          2,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u975e causal \u5c3e\u90e8\uff0c\u68c0\u67e5\u63a9\u7801\u4e0d\u4f1a\u9519\u8bef\u5730\u4f9d\u8d56 causal\u3002"
+      },
+      {
+        "id": "few_heads",
+        "shape": [
+          1,
+          1024,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u5c11\u91cf heads\uff0c\u89c2\u5bdf query \u7ef4\u5e76\u884c\u5ea6\u3002"
+      },
+      {
+        "id": "many_heads",
+        "shape": [
+          2,
+          1024,
+          16,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u8f83\u591a\u72ec\u7acb heads\uff0c\u6bd4\u8f83\u541e\u5410\u4e0e\u8d44\u6e90\u5360\u7528\u3002"
+      },
+      {
+        "id": "long_sequence",
+        "shape": [
+          1,
+          4096,
+          8,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u957f key \u5faa\u73af\uff0c\u89c2\u5bdf\u878d\u5408\u548c\u6d41\u6c34\u7ebf\u7684\u7a33\u6001\u4f5c\u7528\u3002"
+      },
+      {
+        "id": "causal_uniform",
+        "shape": [
+          1,
+          31,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "uniform_attention",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "Uniform causal weights require the exact prefix mean of nonzero V."
+      }
+    ],
+    "purpose": "\u5c06 GEMM\u3001softmax \u7ec4\u5408\u6210\u53ef\u8c03\u8bd5\u7684 attention\uff0c\u5efa\u7acb\u63a5\u53e3\u4e0e IO \u57fa\u7ebf\u3002",
+    "evidence": "\u753b\u51fa QK\u3001P\u3001PV \u7684\u6570\u636e\u6d41\uff0c\u5217\u51fa\u4e34\u65f6\u5185\u5b58\u4e0e\u6bcf\u4e00\u6b65\u7684 dtype\u3002",
+    "experiment": "\u4e0e cuBLAS/softmax \u7ec4\u5408\u57fa\u7ebf\u540c\u8f93\u5165\u6bd4\u8f83\uff0c\u8bb0\u5f55\u5cf0\u503c workspace \u968f N \u7684\u53d8\u5316\u3002",
+    "lesson": "docs/tasks/s11_materialized.md",
+    "baseline": "materialized_attention"
+  },
+  {
+    "id": "s12_online",
+    "stage": 1,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "\u6d41\u5f0f attention \u4e0e IO",
+    "prerequisites": [
+      "s11_materialized"
+    ],
+    "domain": {
+      "dtypes": [
+        "fp32"
+      ],
+      "causal": [
+        false,
+        true
+      ],
+      "shape_multiple": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "head_dims": [
+        32,
+        64,
+        128
+      ]
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          1,
+          17,
+          1,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u5934\u57fa\u7ebf\uff0c\u5148\u6838\u5bf9 O \u4e0e\u81ea\u7136\u5bf9\u6570 LSE\u3002"
+      },
+      {
+        "id": "heads",
+        "shape": [
+          2,
+          33,
+          3,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "B\u3001H \u5747\u975e\u4e00\uff0c\u8bc6\u522b BNHD \u4e0e BHND \u6df7\u6dc6\u3002"
+      },
+      {
+        "id": "uniform",
+        "shape": [
+          1,
+          31,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "uniform_attention",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "Zero Q/K and nonzero V: verify mean of V, not vacuous zero output."
+      },
+      {
+        "id": "large_logits",
+        "shape": [
+          1,
+          65,
+          2,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "large",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u8f83\u5927 QK\uff0c\u68c0\u67e5\u6570\u503c\u7a33\u5b9a\u6027\u548c\u8f93\u51fa\u820d\u5165\u3002"
+      },
+      {
+        "id": "scale",
+        "shape": [
+          1,
+          17,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u663e\u5f0f scale\uff0c\u9632\u6b62\u786c\u7f16\u7801 1/sqrt(D)\u3002",
+        "scale": 0.25
+      },
+      {
+        "id": "single",
+        "shape": [
+          1,
+          1,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u5355 token \u65e0\u5f52\u7ea6\u957f\u5ea6\uff0c\u8f93\u51fa\u5e94\u7b49\u4e8e V\u3002"
+      },
+      {
+        "id": "tail_causal",
+        "shape": [
+          2,
+          129,
+          3,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "query/key \u5c3e\u90e8\u3001\u542b\u5bf9\u89d2\u7ebf\u7684 causal \u53ca\u591a\u5934\u7d22\u5f15\u3002"
+      },
+      {
+        "id": "tail_full",
+        "shape": [
+          1,
+          257,
+          2,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u975e causal \u5c3e\u90e8\uff0c\u68c0\u67e5\u63a9\u7801\u4e0d\u4f1a\u9519\u8bef\u5730\u4f9d\u8d56 causal\u3002"
+      },
+      {
+        "id": "rising_max",
+        "shape": [
+          1,
+          512,
+          2,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "max_ramp",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u540e\u7eed key \u7684\u6700\u5927\u503c\u4e0a\u5347\uff0c\u68c0\u9a8c\u5386\u53f2\u72b6\u6001 rescale\u3002"
+      },
+      {
+        "id": "few_heads",
+        "shape": [
+          1,
+          1024,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u5c11\u91cf heads\uff0c\u89c2\u5bdf query \u7ef4\u5e76\u884c\u5ea6\u3002"
+      },
+      {
+        "id": "many_heads",
+        "shape": [
+          2,
+          1024,
+          16,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u8f83\u591a\u72ec\u7acb heads\uff0c\u6bd4\u8f83\u541e\u5410\u4e0e\u8d44\u6e90\u5360\u7528\u3002"
+      },
+      {
+        "id": "long_sequence",
+        "shape": [
+          1,
+          4096,
+          8,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u957f key \u5faa\u73af\uff0c\u89c2\u5bdf\u878d\u5408\u548c\u6d41\u6c34\u7ebf\u7684\u7a33\u6001\u4f5c\u7528\u3002"
+      },
+      {
+        "id": "causal_uniform",
+        "shape": [
+          1,
+          31,
+          2,
+          64
+        ],
+        "dtype": "fp32",
+        "pattern": "uniform_attention",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "Uniform causal weights require the exact prefix mean of nonzero V."
+      }
+    ],
+    "purpose": "\u901a\u8fc7\u5f52\u4e00\u5316\u72b6\u6001\u4e0d\u53d8\u91cf\u6d88\u9664 N\u00d7N \u4e2d\u95f4\u77e9\u9635\uff1b\u5b66\u4e60 FA1 \u7684 IO \u89c6\u89d2\u3002",
+    "evidence": "\u8bc1\u660e\u5df2\u5904\u7406 key \u96c6\u5408\u7684\u7edf\u8ba1\u542b\u4e49\uff0c\u5206\u6790\u904d\u5386\u6b21\u5e8f\u4e0e O \u72b6\u6001\u5b58\u50a8\uff1b\u4e0d\u80fd\u53ea\u4ee5\u6570\u503c\u901a\u8fc7\u547d\u540d FA1\u3002",
+    "experiment": "\u4e0e s11 \u4fdd\u6301 FP32 \u6bd4\u8f83\uff0c\u533a\u5206\u663e\u5b58\u5360\u7528\u4e0b\u964d\u4e0e\u5b9e\u9645 DRAM \u6d41\u91cf/\u901f\u5ea6\u53d8\u5316\u3002",
+    "lesson": "docs/tasks/s12_online.md",
+    "baseline": "materialized_attention"
+  },
+  {
+    "id": "s20_mma",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "gemm",
+    "title": "Warp Tensor Core GEMM",
+    "prerequisites": [
+      "s10_gemm"
+    ],
+    "domain": {
+      "dtypes": [
+        "fp16",
+        "bf16"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        16,
+        16,
+        16
+      ]
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          32,
+          48,
+          16
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u975e\u65b9\u77e9\u9635\uff0c\u533a\u5206 M/N/K \u4e0e\u4e24\u4e2a\u8f93\u5165\u7684\u884c\u5217\u3002"
+      },
+      {
+        "id": "zero",
+        "shape": [
+          64,
+          64,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "zero",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u96f6\u4e58\u79ef\u53ca\u5b8c\u6574\u8f93\u51fa\u5199\u5165\u3002"
+      },
+      {
+        "id": "coordinates",
+        "shape": [
+          128,
+          64,
           32
         ],
-        "dtype": "fp32",
+        "dtype": "bf16",
+        "pattern": "coordinate",
         "causal": false,
-        "pattern": "random"
+        "suite": "debug",
+        "purpose": "\u53ef\u8fa8\u8ba4\u5750\u6807\u6a21\u5f0f\uff0c\u5b9a\u4f4d operand/accumulator layout\u3002"
       },
       {
+        "id": "long_k",
         "shape": [
           128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
           128,
-          64
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "coordinate"
-      },
-      {
-        "shape": [
-          128,
-          128
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Learn SM100 TMEM addressing, access and lifetime independently of shared memory.",
-    "math": "Y=X，FP32；TMEM 使用二维 lane/column 组织，分配与 ld/st 的 collective 要求由指令决定。逻辑矩阵维度不等同于申请列数。",
-    "task": "实现 global→寄存器→TMEM→寄存器→global 的 roundtrip；自行选择 TMEM copy atom、布局、allocator 参与者与释放。",
-    "evidence": "核实分配列数及参与线程约束，画输入坐标与 TMEM 地址对应；检查每次调用都释放资源。",
-    "experiment": "比较申请列数和有效数据比例；连续运行检查资源泄漏，NCU 查看 TMEM 指令与 occupancy。",
-    "symptoms": "TMEM 地址当字节指针；申请粒度错误；少线程执行 collective；dealloc 时仍有使用者。"
-  },
-  {
-    "id": "s37_tcgen05",
-    "stage": 3,
-    "backend": "cute",
-    "kind": "gemm",
-    "title": "Single async tcgen05 MMA",
-    "prerequisites": [
-      "s33_tma",
-      "s36_tmem"
-    ],
-    "cases": [
-      {
-        "shape": [
-          128,
-          64,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          64,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          64,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          128,
-          64,
-          64
+          2048
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "stress",
+        "purpose": "\u591a\u6b21\u7d2f\u52a0\u4e0e\u7f13\u51b2\u590d\u7528\uff0c\u907f\u514d\u53ea\u9a8c\u8bc1\u4e00\u6b21 MMA\u3002"
       },
       {
+        "id": "rectangular",
         "shape": [
-          128,
-          64,
-          64
+          192,
+          144,
+          80
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "zero"
+        "suite": "edge",
+        "purpose": "\u5408\u6cd5\u6574\u500d\u6570\u7684\u975e\u65b9\u5c3a\u5bf8\uff0c\u907f\u514d\u53ea\u652f\u6301\u65b9\u9635\u56fa\u5b9a tile\u3002"
       },
       {
-        "shape": [
-          128,
-          64,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "cancellation"
-      }
-    ],
-    "purpose": "Connect TMA, SMEM and TMEM to Blackwell MMA using a single CTA and a single computation path.",
-    "math": "C=A B；FP16/BF16 输入、FP32 累加/输出。tcgen05 MMA 的结果位于 TMEM，发出指令并不意味着结果已经可读。",
-    "task": "自行选择 MmaF16BF16Op 的合法 major/layout/shape，安排 MMA 发起、完成通知、TMEM 读回和 epilogue。",
-    "evidence": "使用 SM100 tcgen05 指令证据；说明为什么 Hopper wgmma 的寄存器协议不能直接搬来。此关不使用 2-CTA mode。",
-    "experiment": "固定 A/B 比较 FP16/BF16，保存合法指令 shape、SMEM 对齐和 TMEM 生命周期证据。",
-    "symptoms": "等待了 TMA 却没等待 MMA；TMEM 读到未完成累加；descriptor major 错误；累加器初始化错误。"
-  },
-  {
-    "id": "s38_async_gemm",
-    "stage": 3,
-    "backend": "cute",
-    "kind": "gemm",
-    "title": "TMA + tcgen05 pipelined GEMM",
-    "prerequisites": [
-      "s35_pipeline",
-      "s37_tcgen05"
-    ],
-    "cases": [
-      {
-        "shape": [
-          128,
-          128,
-          256
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          256
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          256
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          256
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          256
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          256
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          512
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          512
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          512
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          512
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          512
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          128,
-          128,
-          512
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "cancellation"
-      },
-      {
-        "shape": [
-          256,
-          256,
-          256
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
+        "id": "square",
         "shape": [
           1024,
           1024,
           1024
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u591a CTA \u6301\u7eed GEMM\uff0c\u89c2\u5bdf\u590d\u7528\u548c\u8ba1\u7b97\u541e\u5410\u3002"
       },
       {
+        "id": "qk_shape",
         "shape": [
           2048,
           2048,
-          2048
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096,
-          4096,
           128
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "QK \u98ce\u683c\u77ed K\u3001\u5927\u8f93\u51fa\u77e9\u9635\u3002"
       },
       {
+        "id": "pv_shape",
         "shape": [
-          4096,
-          128,
-          4096
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          512,
           2048,
-          256
+          128,
+          2048
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "PV \u98ce\u683c\u7a84 N\u3001\u957f K\uff0c\u4e0e QK \u4f7f\u7528\u4e0d\u540c\u74f6\u9888\u3002"
       },
       {
+        "id": "fp16",
         "shape": [
-          256,
-          256,
-          256
+          128,
+          96,
+          64
         ],
         "dtype": "fp16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "debug",
+        "purpose": "FP16 \u7279\u5316\u53ca FP32 \u7d2f\u52a0\u8def\u5f84\u3002"
+      }
+    ],
+    "purpose": "\u5efa\u7acb\u4f4e\u7cbe\u5ea6\u8f93\u5165\u3001FP32 accumulator \u7684\u77e9\u9635\u5f15\u64ce\u6570\u636e\u901a\u8def\u3002",
+    "evidence": "\u89e3\u91ca fragment/ldmatrix/SMEM \u7684\u5bf9\u5e94\uff1b\u7528\u751f\u6210\u6307\u4ee4\u786e\u8ba4 Tensor Core \u6267\u884c\u3002",
+    "experiment": "\u540c\u4e00\u91cf\u5316\u8f93\u5165\u4e0e cuBLAS \u6bd4\u8f83\uff1b\u4e00\u6b21 MMA \u7684\u6b63\u786e\u6027\u4e0d\u4ee3\u66ff\u5b8c\u6574 GEMM\u3002",
+    "lesson": "docs/tasks/s20_mma.md",
+    "baseline": "cublas"
+  },
+  {
+    "id": "s21_pipeline",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "gemm",
+    "title": "\u5f02\u6b65\u642c\u8fd0\u7684 Tensor Core GEMM",
+    "prerequisites": [
+      "s20_mma"
+    ],
+    "domain": {
+      "dtypes": [
+        "fp16",
+        "bf16"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        16,
+        16,
+        16
+      ],
+      "pointer_alignment": 16
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          32,
+          48,
+          16
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u975e\u65b9\u77e9\u9635\uff0c\u533a\u5206 M/N/K \u4e0e\u4e24\u4e2a\u8f93\u5165\u7684\u884c\u5217\u3002"
       },
       {
+        "id": "zero",
+        "shape": [
+          64,
+          64,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "zero",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u96f6\u4e58\u79ef\u53ca\u5b8c\u6574\u8f93\u51fa\u5199\u5165\u3002"
+      },
+      {
+        "id": "coordinates",
+        "shape": [
+          128,
+          64,
+          32
+        ],
+        "dtype": "bf16",
+        "pattern": "coordinate",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u53ef\u8fa8\u8ba4\u5750\u6807\u6a21\u5f0f\uff0c\u5b9a\u4f4d operand/accumulator layout\u3002"
+      },
+      {
+        "id": "long_k",
+        "shape": [
+          128,
+          128,
+          2048
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u591a\u6b21\u7d2f\u52a0\u4e0e\u7f13\u51b2\u590d\u7528\uff0c\u907f\u514d\u53ea\u9a8c\u8bc1\u4e00\u6b21 MMA\u3002"
+      },
+      {
+        "id": "rectangular",
+        "shape": [
+          192,
+          144,
+          80
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u5408\u6cd5\u6574\u500d\u6570\u7684\u975e\u65b9\u5c3a\u5bf8\uff0c\u907f\u514d\u53ea\u652f\u6301\u65b9\u9635\u56fa\u5b9a tile\u3002"
+      },
+      {
+        "id": "square",
         "shape": [
           1024,
           1024,
           1024
         ],
-        "dtype": "fp16",
+        "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u591a CTA \u6301\u7eed GEMM\uff0c\u89c2\u5bdf\u590d\u7528\u548c\u8ba1\u7b97\u541e\u5410\u3002"
       },
       {
+        "id": "qk_shape",
         "shape": [
           2048,
+          2048,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "QK \u98ce\u683c\u77ed K\u3001\u5927\u8f93\u51fa\u77e9\u9635\u3002"
+      },
+      {
+        "id": "pv_shape",
+        "shape": [
+          2048,
+          128,
+          2048
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "PV \u98ce\u683c\u7a84 N\u3001\u957f K\uff0c\u4e0e QK \u4f7f\u7528\u4e0d\u540c\u74f6\u9888\u3002"
+      },
+      {
+        "id": "fp16",
+        "shape": [
+          128,
+          96,
+          64
+        ],
+        "dtype": "fp16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "FP16 \u7279\u5316\u53ca FP32 \u7d2f\u52a0\u8def\u5f84\u3002"
+      }
+    ],
+    "purpose": "\u5728\u5df2\u6b63\u786e\u7684 GEMM \u4e0a\u52a0\u5165\u5f02\u6b65\u642c\u8fd0\u3001\u7f13\u51b2\u590d\u7528\u548c\u53ef\u6d4b\u91cf\u7684 overlap\u3002",
+    "evidence": "\u7ed9\u51fa producer/consumer \u751f\u547d\u5468\u671f\u4e0e\u5b8c\u6210\u4e8b\u4ef6\uff1b\u68c0\u9a8c prologue\u3001\u7a33\u6001\u3001drain\u3002",
+    "experiment": "\u4e0e s20 \u76f8\u540c\u5f62\u72b6\u548c dtype\uff0c\u6bd4\u8f83\u77ed/\u957f K\uff0c\u8bb0\u5f55\u662f\u5426\u6709\u771f\u5b9e overlap \u4e0e spills\u3002",
+    "lesson": "docs/tasks/s21_pipeline.md",
+    "baseline": "cublas"
+  },
+  {
+    "id": "s22_fa2",
+    "stage": 2,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "FA2 \u5e76\u884c\u4e0e Tensor Core \u878d\u5408",
+    "prerequisites": [
+      "s12_online",
+      "s21_pipeline"
+    ],
+    "domain": {
+      "dtypes": [
+        "fp16",
+        "bf16"
+      ],
+      "causal": [
+        false,
+        true
+      ],
+      "shape_multiple": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "head_dims": [
+        64,
+        128
+      ],
+      "pointer_alignment": 16
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          1,
+          128,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u5934\u57fa\u7ebf\uff0c\u5148\u6838\u5bf9 O \u4e0e\u81ea\u7136\u5bf9\u6570 LSE\u3002"
+      },
+      {
+        "id": "heads",
+        "shape": [
+          2,
+          256,
+          3,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "B\u3001H \u5747\u975e\u4e00\uff0c\u8bc6\u522b BNHD \u4e0e BHND \u6df7\u6dc6\u3002"
+      },
+      {
+        "id": "uniform",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "uniform_attention",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "Zero Q/K and nonzero V: verify mean of V, not vacuous zero output."
+      },
+      {
+        "id": "large_logits",
+        "shape": [
+          1,
+          256,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "large",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u8f83\u5927 QK\uff0c\u68c0\u67e5\u6570\u503c\u7a33\u5b9a\u6027\u548c\u8f93\u51fa\u820d\u5165\u3002"
+      },
+      {
+        "id": "scale",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u663e\u5f0f scale\uff0c\u9632\u6b62\u786c\u7f16\u7801 1/sqrt(D)\u3002",
+        "scale": 0.25
+      },
+      {
+        "id": "single",
+        "shape": [
+          1,
+          1,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u5355 token \u65e0\u5f52\u7ea6\u957f\u5ea6\uff0c\u8f93\u51fa\u5e94\u7b49\u4e8e V\u3002"
+      },
+      {
+        "id": "tail_causal",
+        "shape": [
+          2,
+          129,
+          3,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "query/key \u5c3e\u90e8\u3001\u542b\u5bf9\u89d2\u7ebf\u7684 causal \u53ca\u591a\u5934\u7d22\u5f15\u3002"
+      },
+      {
+        "id": "tail_full",
+        "shape": [
+          1,
+          257,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u975e causal \u5c3e\u90e8\uff0c\u68c0\u67e5\u63a9\u7801\u4e0d\u4f1a\u9519\u8bef\u5730\u4f9d\u8d56 causal\u3002"
+      },
+      {
+        "id": "rising_max",
+        "shape": [
+          1,
+          512,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "max_ramp",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u540e\u7eed key \u7684\u6700\u5927\u503c\u4e0a\u5347\uff0c\u68c0\u9a8c\u5386\u53f2\u72b6\u6001 rescale\u3002"
+      },
+      {
+        "id": "few_heads",
+        "shape": [
+          1,
+          1024,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u5c11\u91cf heads\uff0c\u89c2\u5bdf query \u7ef4\u5e76\u884c\u5ea6\u3002"
+      },
+      {
+        "id": "many_heads",
+        "shape": [
+          2,
+          1024,
+          16,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u8f83\u591a\u72ec\u7acb heads\uff0c\u6bd4\u8f83\u541e\u5410\u4e0e\u8d44\u6e90\u5360\u7528\u3002"
+      },
+      {
+        "id": "long_sequence",
+        "shape": [
+          1,
+          4096,
+          8,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u957f key \u5faa\u73af\uff0c\u89c2\u5bdf\u878d\u5408\u548c\u6d41\u6c34\u7ebf\u7684\u7a33\u6001\u4f5c\u7528\u3002"
+      },
+      {
+        "id": "fp16_causal",
+        "shape": [
+          2,
+          257,
+          2,
+          128
+        ],
+        "dtype": "fp16",
+        "pattern": "random",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "\u53e6\u4e00\u8f93\u5165\u683c\u5f0f\u3001causal \u548c\u5c3e\u90e8\u7684\u7ec4\u5408\u3002"
+      },
+      {
+        "id": "causal_uniform",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "uniform_attention",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "Uniform causal weights require the exact prefix mean of nonzero V."
+      }
+    ],
+    "purpose": "\u5c06\u5728\u7ebf\u5f52\u4e00\u5316\u4e0e\u4e24\u6b21 Tensor Core \u77e9\u9635\u4e58\u878d\u5408\uff0c\u5b66\u4e60 query \u5e76\u884c\u548c\u5de5\u4f5c\u5212\u5206\u3002",
+    "evidence": "\u6838\u5bf9 query grid\u3001CTA \u5185\u8f93\u51fa ownership\u3001\u8de8 warp \u901a\u4fe1\u53ca\u975e\u77e9\u9635\u5de5\u4f5c\uff1b\u6807\u660e P \u7684\u7cbe\u5ea6\u8f6c\u6362\u3002",
+    "experiment": "\u4e0e\u540c\u8f93\u5165 cuDNN O+LSE \u6bd4\u8f83\uff1b\u4fdd\u7559 dtype/\u7ed3\u6784\u6d88\u878d\uff0c\u4e0d\u80fd\u628a\u5168\u90e8\u6536\u76ca\u5f52\u56e0\u4e8e FA2\u3002",
+    "lesson": "docs/tasks/s22_fa2.md",
+    "baseline": "cudnn_attention"
+  },
+  {
+    "id": "s30_tma",
+    "stage": 3,
+    "backend": "cuda",
+    "kind": "transpose",
+    "title": "TMA \u4e0e\u751f\u4ea7\u6d88\u8d39\u534f\u8bae",
+    "prerequisites": [
+      "s21_pipeline"
+    ],
+    "domain": {
+      "dtypes": [
+        "fp32"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        1,
+        4
+      ],
+      "pointer_alignment": 16
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          64,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u6b21\u4f20\u8f93\u4e0e\u8f93\u51fa ownership\u3002"
+      },
+      {
+        "id": "coordinates",
+        "shape": [
+          257,
+          132
+        ],
+        "dtype": "fp32",
+        "pattern": "coordinate",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u6ee1\u8db3\u63cf\u8ff0\u7b26\u884c\u6b65\u957f\u5bf9\u9f50\u7684\u884c\u5c3e/\u5217\u5c3e\uff0c\u68c0\u67e5\u8fb9\u754c\u3002"
+      },
+      {
+        "id": "short",
+        "shape": [
+          1,
+          128
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u77ed\u4efb\u52a1\u7684\u521d\u59cb\u5316\u4e0e drain\u3002"
+      },
+      {
+        "id": "reuse",
+        "shape": [
+          4097,
+          256
+        ],
+        "dtype": "fp32",
+        "pattern": "random",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u591a\u6b21 stage \u5faa\u73af\uff0c\u89e6\u53d1 phase/buffer \u590d\u7528\u9519\u8bef\u3002"
+      },
+      {
+        "id": "bandwidth",
+        "shape": [
           2048,
           2048
         ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096,
-          4096,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096,
-          128,
-          4096
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          512,
-          2048,
-          256
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Combine buffering and async MMA in GEMM to validate synchronization between engines before attention.",
-    "math": "C=A B，K 被分块；每个累加片段必须包含所有 K 项恰好一次。SMEM buffer 只有在其最后一个 MMA 读者完成后才能复用。",
-    "task": "实现 pipelined GEMM，不复用官方 GEMM 内核。自行安排 TMA→MMA 与 MMA→SMEM release 的跨引擎协议。",
-    "evidence": "提交每个 buffer 的生产/消费/释放图；说明至少两个 stage 的实际重叠证据，单看 launch 个数不够。",
-    "experiment": "固定 K，比较单 stage 与多 stage；记录占用、SMEM bytes 和 stall，用 profiler 判断瓶颈而非猜测。",
-    "symptoms": "K=64 正确而 K=512 失败；TMA 覆盖正在消费的数据；累加 flag 错误；drain 漏最后一项。"
-  },
-  {
-    "id": "s40_fa4_base",
-    "stage": 4,
-    "backend": "cute",
-    "kind": "attention",
-    "title": "FA4: restricted SM100 forward",
-    "prerequisites": [
-      "s31_port",
-      "s38_async_gemm"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          128,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
+        "dtype": "fp32",
         "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u4e0e s00 \u76f8\u540c shape \u5bf9\u7167\u5f02\u6b65\u4f20\u8f93\u5f00\u9500\u3002"
       },
       {
+        "id": "wide",
         "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          8,
           1024,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Connect TMA, tcgen05 and TMEM to stable attention as a baseline. This alone does not complete FA4.",
-    "math": "数学定义与 s23 相同。BF16 Q/K/V/O，FP32 softmax 统计、MMA 累加与 LSE；D=128，非 causal，整块 N。",
-    "task": "自行实现单 CTA mode 的分块 forward，设计 S/P/O 的 TMEM、SMEM、寄存器交接。允许串行依赖以先保证正确，不预填 layout 或 tile。",
-    "evidence": "记录 QK 与 PV 的输入来源、TMEM accumulator 和精度转换；不得通过 DSL 包装现成 attention。",
-    "experiment": "与 s23 做相同 dtype 的受限比较（若 shape 不重合，显式增补受审阅契约，不混报不同 shape）；先画本实现的依赖时间线。",
-    "symptoms": "TMEM S/P 覆盖冲突；PV 读到未发布的 P；自然指数与 exp2 的 scale 不一致。"
-  },
-  {
-    "id": "s41_fa4_pipeline",
-    "stage": 4,
-    "backend": "cute",
-    "kind": "attention",
-    "title": "FA4: matmul/softmax/correction overlap",
-    "prerequisites": [
-      "s40_fa4_base"
-    ],
-    "cases": [
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random",
-        "scale": 0.25
-      },
-      {
-        "shape": [
-          1,
-          8,
-          1024,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          8,
-          2048,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      }
-    ],
-    "purpose": "Study the forward pipeline and how correction work can leave the critical path.",
-    "math": "每个 query tile 的分母与输出分子必须处于相同缩放基准；对多个在途 tile，数据和统计具有独立的生存期。",
-    "task": "自行设计多 tile overlap、warp specialization 和 correction 协作；保留基础版本。具体角色数量、buffer layout、barrier 和 launch 全由你实现。",
-    "evidence": "提交纸面依赖图与 profiler/源码证据，分别定位 TMA、QK、softmax、PV、correction 与 epilogue。正确性测试不能证明 overlap。",
-    "experiment": "固定 dtype/shape 比较单 tile 与多 tile；研究 SMEM/TMEM/寄存器压力，报告 spills 和占用变化。",
-    "symptoms": "统计来自另一个 tile；correction 与 PV 竞争 O；扩大 tile 后寄存器溢出；epilogue 提前读回。"
-  },
-  {
-    "id": "s42_exp",
-    "stage": 4,
-    "backend": "cute",
-    "kind": "exp2",
-    "title": "FA4: exponential approximation",
-    "prerequisites": [
-      "s31_port"
-    ],
-    "cases": [
-      {
-        "shape": [
-          4096
+          8192
         ],
         "dtype": "fp32",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          4096
-        ],
-        "dtype": "fp32",
-        "causal": false,
-        "pattern": "large"
+        "suite": "perf",
+        "purpose": "\u4e0e s00 \u76f8\u540c\u957f\u884c\uff0c\u6bd4\u8f83\u541e\u5410\u3002"
       }
     ],
-    "purpose": "Validate software exponentials independently so approximation errors can be distinguished from pipeline bugs.",
-    "math": "目标 y=2^x，FP32 输入输出；测试区间 [-16,0] 和 [-80,8]。相对误差预算 1e-4，绝对 floor 1e-38。不得通过输出 BF16 来隐藏 FP32 误差。",
-    "task": "自行设计软件近似及硬件/软件指数分配，系数、映射与求值方式均由你实现；仓库不提供多项式答案。",
-    "evidence": "对区间端点、整数及密集采样检查误差；解释输入域、溢出/下溢范围和转换到 BF16 后的误差变化。",
-    "experiment": "单独记录 FP32 误差、BF16 量化误差、MUFU/FMA 指令与耗时；全软件指数不必更快。",
-    "symptoms": "负数区间出现不连续；整数边界误差跳变；近零输出相对误差被错误分母放大。"
+    "purpose": "\u4ee5\u5df2\u638c\u63e1\u7684\u8f6c\u7f6e\u8bed\u4e49\u5b66\u4e60 tensor descriptor\u3001mbarrier \u4e0e buffer \u751f\u547d\u5468\u671f\u3002",
+    "evidence": "\u63cf\u8ff0\u4e8b\u52a1\u5b8c\u6210\u4e0e\u6570\u636e\u53ef\u89c1\u6027\u7684\u533a\u522b\uff1b\u8ffd\u8e2a\u81f3\u5c11\u4e00\u6b21 buffer/phase \u56de\u7ed5\u3002",
+    "experiment": "\u4e0e s00 \u540c\u5f62\u72b6\u53ca native transpose \u6bd4\u8f83\uff0c\u89e3\u91ca\u77ed\u4efb\u52a1\u4e0e\u7a33\u6001\u7684\u4e0d\u540c\u6210\u672c\u3002",
+    "lesson": "docs/tasks/s30_tma.md",
+    "baseline": "torch_native"
   },
   {
-    "id": "s43_fa4_exp",
-    "stage": 4,
-    "backend": "cute",
-    "kind": "attention",
-    "title": "FA4: exponential throughput",
+    "id": "s31_tcgen",
+    "stage": 3,
+    "backend": "cuda",
+    "kind": "gemm",
+    "title": "Blackwell tcgen05 \u4e0e TMEM",
     "prerequisites": [
-      "s41_fa4_pipeline",
-      "s42_exp"
+      "s20_mma",
+      "s30_tma"
     ],
+    "domain": {
+      "dtypes": [
+        "bf16"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        64,
+        8,
+        16
+      ],
+      "pointer_alignment": 16
+    },
     "cases": [
       {
+        "id": "small",
         "shape": [
-          1,
-          1,
-          256,
-          128
+          64,
+          16,
+          32
         ],
         "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
         "pattern": "random",
-        "scale": 0.25
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u975e\u65b9\u77e9\u9635\uff0c\u533a\u5206 M/N/K \u4e0e\u4e24\u4e2a\u8f93\u5165\u7684\u884c\u5217\u3002"
       },
       {
+        "id": "zero",
         "shape": [
-          1,
-          1,
-          256,
-          128
+          64,
+          64,
+          64
         ],
         "dtype": "bf16",
+        "pattern": "zero",
         "causal": false,
-        "pattern": "random",
-        "scale": 0.25
+        "suite": "debug",
+        "purpose": "\u96f6\u4e58\u79ef\u53ca\u5b8c\u6574\u8f93\u51fa\u5199\u5165\u3002"
       },
       {
+        "id": "coordinates",
         "shape": [
-          1,
-          8,
+          128,
+          64,
+          32
+        ],
+        "dtype": "bf16",
+        "pattern": "coordinate",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u53ef\u8fa8\u8ba4\u5750\u6807\u6a21\u5f0f\uff0c\u5b9a\u4f4d operand/accumulator layout\u3002"
+      },
+      {
+        "id": "long_k",
+        "shape": [
+          128,
+          128,
+          2048
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u591a\u6b21\u7d2f\u52a0\u4e0e\u7f13\u51b2\u590d\u7528\uff0c\u907f\u514d\u53ea\u9a8c\u8bc1\u4e00\u6b21 MMA\u3002"
+      },
+      {
+        "id": "rectangular",
+        "shape": [
+          192,
+          136,
+          80
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u5408\u6cd5\u6574\u500d\u6570\u7684\u975e\u65b9\u5c3a\u5bf8\uff0c\u907f\u514d\u53ea\u652f\u6301\u65b9\u9635\u56fa\u5b9a tile\u3002"
+      },
+      {
+        "id": "square",
+        "shape": [
           1024,
-          128
+          1024,
+          1024
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u591a CTA \u6301\u7eed GEMM\uff0c\u89c2\u5bdf\u590d\u7528\u548c\u8ba1\u7b97\u541e\u5410\u3002"
       },
       {
+        "id": "qk_shape",
         "shape": [
-          2,
-          8,
+          2048,
           2048,
           128
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "QK \u98ce\u683c\u77ed K\u3001\u5927\u8f93\u51fa\u77e9\u9635\u3002"
       },
       {
+        "id": "pv_shape",
         "shape": [
-          1,
-          16,
-          4096,
-          128
+          2048,
+          128,
+          2048
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "PV \u98ce\u683c\u7a84 N\u3001\u957f K\uff0c\u4e0e QK \u4f7f\u7528\u4e0d\u540c\u74f6\u9888\u3002"
       }
     ],
-    "purpose": "Integrate the exponential mechanism into a correct pipeline and study non-matmul execution resources.",
-    "math": "exp(s)=2^(s log2(e))；attention 的 scale、最大值与缩放状态必须采用一致的底数。",
-    "task": "自行把经过独立误差验证的指数实现接入 softmax，并选择软件/硬件计算比例；保持 s41 独立入口。",
-    "evidence": "解释近似误差如何影响 softmax 分母、P 转换和 O；提供与 s41 相同输入的误差分布。",
-    "experiment": "固定 pipeline 和 tile，仅改变指数实现；检查 register 增加或 FMA 争用是否抵消收益。",
-    "symptoms": "exp 与 exp2 的系数乘两次；某些分支精度不同；指数优化后 spills 导致性能下降。"
+    "purpose": "\u7528\u5b8c\u6574 GEMM \u7406\u89e3\u5f02\u6b65 MMA\u3001TMEM accumulator \u548c\u8de8\u5f15\u64ce\u5b8c\u6210\u8bed\u4e49\u3002",
+    "evidence": "\u8bf4\u660e SMEM descriptor\u3001TMEM lifetime\u3001\u53d1\u5e03/\u7b49\u5f85\u548c\u8f93\u51fa\u4ea4\u63a5\uff1b\u68c0\u67e5\u5b9e\u9645 tcgen05 \u6307\u4ee4\u3002",
+    "experiment": "\u4e0e s20\u3001cuBLAS \u5728\u5171\u540c\u5f62\u72b6\u6bd4\u8f83\uff0c\u89e3\u91ca\u67b6\u6784\u53d8\u5316\u4e0e\u6027\u80fd\u5dee\u8ddd\u3002",
+    "lesson": "docs/tasks/s31_tcgen.md",
+    "baseline": "cublas"
   },
   {
-    "id": "s44_fa4_rescale",
-    "stage": 4,
-    "backend": "cute",
-    "kind": "attention",
-    "title": "FA4: conditional rescaling",
+    "id": "s32_specialize",
+    "stage": 3,
+    "backend": "cuda",
+    "kind": "gemm",
+    "title": "Warp specialization \u6d41\u6c34\u7ebf",
     "prerequisites": [
-      "s43_fa4_exp"
+      "s21_pipeline",
+      "s31_tcgen"
     ],
+    "domain": {
+      "dtypes": [
+        "bf16"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        64,
+        8,
+        16
+      ],
+      "pointer_alignment": 16
+    },
     "cases": [
       {
+        "id": "small",
         "shape": [
-          1,
-          1,
-          256,
-          128
+          64,
+          16,
+          32
         ],
         "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "max_ramp"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "constant"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "max_ramp"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "constant"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
         "pattern": "random",
-        "scale": 0.25
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u975e\u65b9\u77e9\u9635\uff0c\u533a\u5206 M/N/K \u4e0e\u4e24\u4e2a\u8f93\u5165\u7684\u884c\u5217\u3002"
       },
       {
+        "id": "zero",
         "shape": [
-          1,
-          8,
-          1024,
-          128
+          64,
+          64,
+          64
         ],
         "dtype": "bf16",
+        "pattern": "zero",
         "causal": false,
-        "pattern": "random"
+        "suite": "debug",
+        "purpose": "\u96f6\u4e58\u79ef\u53ca\u5b8c\u6574\u8f93\u51fa\u5199\u5165\u3002"
       },
       {
+        "id": "coordinates",
         "shape": [
-          2,
-          8,
+          128,
+          64,
+          32
+        ],
+        "dtype": "bf16",
+        "pattern": "coordinate",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u53ef\u8fa8\u8ba4\u5750\u6807\u6a21\u5f0f\uff0c\u5b9a\u4f4d operand/accumulator layout\u3002"
+      },
+      {
+        "id": "long_k",
+        "shape": [
+          128,
+          128,
+          2048
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u591a\u6b21\u7d2f\u52a0\u4e0e\u7f13\u51b2\u590d\u7528\uff0c\u907f\u514d\u53ea\u9a8c\u8bc1\u4e00\u6b21 MMA\u3002"
+      },
+      {
+        "id": "rectangular",
+        "shape": [
+          192,
+          136,
+          80
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u5408\u6cd5\u6574\u500d\u6570\u7684\u975e\u65b9\u5c3a\u5bf8\uff0c\u907f\u514d\u53ea\u652f\u6301\u65b9\u9635\u56fa\u5b9a tile\u3002"
+      },
+      {
+        "id": "square",
+        "shape": [
+          1024,
+          1024,
+          1024
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u591a CTA \u6301\u7eed GEMM\uff0c\u89c2\u5bdf\u590d\u7528\u548c\u8ba1\u7b97\u541e\u5410\u3002"
+      },
+      {
+        "id": "qk_shape",
+        "shape": [
+          2048,
           2048,
           128
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "QK \u98ce\u683c\u77ed K\u3001\u5927\u8f93\u51fa\u77e9\u9635\u3002"
       },
       {
+        "id": "pv_shape",
         "shape": [
-          1,
-          16,
-          4096,
-          128
+          2048,
+          128,
+          2048
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "PV \u98ce\u683c\u7a84 N\u3001\u957f K\uff0c\u4e0e QK \u4f7f\u7528\u4e0d\u540c\u74f6\u9888\u3002"
       }
     ],
-    "purpose": "Study conditional rescaling and the balance between reduced non-matmul work and finite dynamic range.",
-    "math": "选定缩放锚点 a 后，l=Σ exp(s-a)，U=Σ exp(s-a)V，O=U/l。a 不必总等于真实最大值，但 l/U/P 的动态范围必须合法，最终 LSE 要恢复真实值。",
-    "task": "自行设计保留锚点、触发重缩放和最终归一化的协议；阈值单位、输入低精度上界和 P 转换必须推导，不把论文阈值盲套到自然指数。",
-    "evidence": "对 max_ramp 与 large 输入证明锚点一致性及溢出边界；记录触发频率；不能只测试最大值不变的常量输入。",
-    "experiment": "固定 s43 其余配置比较重缩放次数、非矩阵指令和时间；分开记录数值收益/代价。",
-    "symptoms": "分母锚点与 U 不一致；跳过更新但仍用新最大值；FP16/BF16 P 溢出；LSE 错而 O 看似正确。"
+    "purpose": "\u628a TMA \u548c\u5f02\u6b65 MMA \u7ec4\u7ec7\u6210\u6301\u4e45\u751f\u4ea7\u6d88\u8d39\u6d41\u7a0b\uff0c\u4e3a attention \u8c03\u5ea6\u51c6\u5907\u3002",
+    "evidence": "\u7528\u72b6\u6001\u56fe\u8bc1\u660e\u6240\u6709\u7f13\u51b2\u8bfb\u5199\u4e0e\u590d\u7528\u6709\u987a\u5e8f\uff0c\u77ed K/\u957f K \u5747\u80fd drain\u3002",
+    "experiment": "\u4e0e s31 \u540c\u4e00 GEMM \u5bf9\u6bd4\uff0c\u591a\u7f13\u51b2\u6570\u91cf\u4e0e\u8d44\u6e90\u5360\u7528\u4f5c\u4e3a\u53d8\u91cf\uff0c\u4e0d\u9884\u8bbe\u8d8a\u591a\u8d8a\u5feb\u3002",
+    "lesson": "docs/tasks/s32_specialize.md",
+    "baseline": "cublas"
   },
   {
-    "id": "s45_fa4_edges",
+    "id": "s40_attention",
     "stage": 4,
-    "backend": "cute",
+    "backend": "cuda",
     "kind": "attention",
-    "title": "FA4: tails, causal and precision",
+    "title": "SM100 attention \u57fa\u7ebf",
     "prerequisites": [
-      "s44_fa4_rescale"
+      "s22_fa2",
+      "s32_specialize"
     ],
+    "domain": {
+      "dtypes": [
+        "bf16"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        1,
+        128,
+        1,
+        1
+      ],
+      "head_dims": [
+        64,
+        128
+      ],
+      "pointer_alignment": 16
+    },
     "cases": [
       {
+        "id": "small",
         "shape": [
           1,
+          128,
           1,
-          1,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          2,
-          127,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
           64
         ],
         "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          2,
-          2,
-          129,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "zero"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          257,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          1,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": false,
         "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u5934\u57fa\u7ebf\uff0c\u5148\u6838\u5bf9 O \u4e0e\u81ea\u7136\u5bf9\u6570 LSE\u3002"
+      },
+      {
+        "id": "heads",
+        "shape": [
+          2,
+          256,
+          3,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "B\u3001H \u5747\u975e\u4e00\uff0c\u8bc6\u522b BNHD \u4e0e BHND \u6df7\u6dc6\u3002"
+      },
+      {
+        "id": "uniform",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "uniform_attention",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "Zero Q/K and nonzero V: verify mean of V, not vacuous zero output."
+      },
+      {
+        "id": "large_logits",
+        "shape": [
+          1,
+          256,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "large",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u8f83\u5927 QK\uff0c\u68c0\u67e5\u6570\u503c\u7a33\u5b9a\u6027\u548c\u8f93\u51fa\u820d\u5165\u3002"
+      },
+      {
+        "id": "scale",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u663e\u5f0f scale\uff0c\u9632\u6b62\u786c\u7f16\u7801 1/sqrt(D)\u3002",
         "scale": 0.25
       },
       {
+        "id": "rising_max",
         "shape": [
           1,
-          1,
-          256,
+          512,
+          2,
           128
         ],
         "dtype": "bf16",
+        "pattern": "max_ramp",
         "causal": false,
-        "pattern": "random"
+        "suite": "stress",
+        "purpose": "\u540e\u7eed key \u7684\u6700\u5927\u503c\u4e0a\u5347\uff0c\u68c0\u9a8c\u5386\u53f2\u72b6\u6001 rescale\u3002"
       },
       {
+        "id": "few_heads",
         "shape": [
           1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          8,
           1024,
+          2,
           64
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u5c11\u91cf heads\uff0c\u89c2\u5bdf query \u7ef4\u5e76\u884c\u5ea6\u3002"
       },
       {
+        "id": "many_heads",
         "shape": [
           2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          2049,
-          64
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          4,
-          4097,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          8,
           1024,
-          64
+          16,
+          128
         ],
-        "dtype": "fp16",
+        "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u8f83\u591a\u72ec\u7acb heads\uff0c\u6bd4\u8f83\u541e\u5410\u4e0e\u8d44\u6e90\u5360\u7528\u3002"
       },
       {
-        "shape": [
-          2,
-          8,
-          2048,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
+        "id": "long_sequence",
         "shape": [
           1,
-          16,
           4096,
+          8,
           128
         ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "fp16",
+        "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          2049,
-          64
-        ],
-        "dtype": "fp16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          4,
-          4097,
-          128
-        ],
-        "dtype": "fp16",
-        "causal": true,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u957f key \u5faa\u73af\uff0c\u89c2\u5bdf\u878d\u5408\u548c\u6d41\u6c34\u7ebf\u7684\u7a33\u6001\u4f5c\u7528\u3002"
       }
     ],
-    "purpose": "Extend the restricted forward implementation while preserving earlier ablation entry points.",
-    "math": "causal 规则仍为 j≤i；逻辑尾块不改变 Tensor Core 的物理指令约束。FP16 与 BF16 的指数范围不同，重缩放策略必须重新核对。",
-    "task": "自行实现 TMA/SMEM/MMA/softmax 各层的边界、causal 和 D=64/128 支持。仍不实现 backward、varlen、GQA 或 paged attention。",
-    "evidence": "完成所有契约案例、memcheck/racecheck/synccheck 与设计证据。明确这仍是受限 FA4 forward 学习实现。",
-    "experiment": "对 causal 分开报告有效 pair FLOPs 与 dense equivalent；比较 D 和 dtype 时独立记录配置，避免混合优化来源。",
-    "symptoms": "TMA OOB 行为与 softmax mask 混淆；部分 tile 全屏蔽导致 NaN；FP16 在条件重缩放下溢出。"
+    "purpose": "\u5148\u7ec4\u5408 TMA\u3001tcgen05\u3001TMEM \u4e0e\u7a33\u5b9a attention\uff0c\u4fdd\u6301\u4f9d\u8d56\u5173\u7cfb\u53ef\u89e3\u91ca\u3002",
+    "evidence": "\u6807\u660e S\u3001P\u3001O \u53ca LSE \u7684\u5b58\u50a8\u4f4d\u7f6e\u3001\u7cbe\u5ea6\u4e0e\u751f\u547d\u5468\u671f\uff1b\u4e0d\u5f97\u5305\u88c5\u5b98\u65b9 attention\u3002",
+    "experiment": "\u4e0e s22 \u53ca cuDNN \u540c\u4e00 BF16 \u8f93\u5165\u6bd4\u8f83\uff0c\u5efa\u7acb\u540e\u7eed\u4f18\u5316\u5171\u540c\u57fa\u7ebf\u3002",
+    "lesson": "docs/tasks/s40_attention.md",
+    "baseline": "cudnn_attention"
   },
   {
-    "id": "s46_fa4_schedule",
+    "id": "s41_overlap",
     "stage": 4,
-    "backend": "cute",
+    "backend": "cuda",
     "kind": "attention",
-    "title": "FA4: scheduling and resources",
+    "title": "Matmul\u3001softmax \u4e0e correction overlap",
     "prerequisites": [
-      "s45_fa4_edges"
+      "s40_attention"
     ],
+    "domain": {
+      "dtypes": [
+        "bf16"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        1,
+        128,
+        1,
+        1
+      ],
+      "head_dims": [
+        64,
+        128
+      ],
+      "pointer_alignment": 16
+    },
     "cases": [
       {
+        "id": "small",
         "shape": [
           1,
+          128,
           1,
-          256,
-          128
+          64
         ],
         "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
-          4,
-          512,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "large"
-      },
-      {
-        "shape": [
-          1,
-          1,
-          256,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
         "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u5934\u57fa\u7ebf\uff0c\u5148\u6838\u5bf9 O \u4e0e\u81ea\u7136\u5bf9\u6570 LSE\u3002"
+      },
+      {
+        "id": "heads",
+        "shape": [
+          2,
+          256,
+          3,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "B\u3001H \u5747\u975e\u4e00\uff0c\u8bc6\u522b BNHD \u4e0e BHND \u6df7\u6dc6\u3002"
+      },
+      {
+        "id": "uniform",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "uniform_attention",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "Zero Q/K and nonzero V: verify mean of V, not vacuous zero output."
+      },
+      {
+        "id": "large_logits",
+        "shape": [
+          1,
+          256,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "large",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u8f83\u5927 QK\uff0c\u68c0\u67e5\u6570\u503c\u7a33\u5b9a\u6027\u548c\u8f93\u51fa\u820d\u5165\u3002"
+      },
+      {
+        "id": "scale",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u663e\u5f0f scale\uff0c\u9632\u6b62\u786c\u7f16\u7801 1/sqrt(D)\u3002",
         "scale": 0.25
       },
       {
+        "id": "rising_max",
         "shape": [
           1,
-          8,
+          512,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "max_ramp",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u540e\u7eed key \u7684\u6700\u5927\u503c\u4e0a\u5347\uff0c\u68c0\u9a8c\u5386\u53f2\u72b6\u6001 rescale\u3002"
+      },
+      {
+        "id": "few_heads",
+        "shape": [
+          1,
           1024,
-          128
+          2,
+          64
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u5c11\u91cf heads\uff0c\u89c2\u5bdf query \u7ef4\u5e76\u884c\u5ea6\u3002"
       },
       {
+        "id": "many_heads",
         "shape": [
           2,
-          8,
-          2048,
+          1024,
+          16,
           128
         ],
         "dtype": "bf16",
+        "pattern": "random",
         "causal": false,
-        "pattern": "random"
+        "suite": "perf",
+        "purpose": "\u8f83\u591a\u72ec\u7acb heads\uff0c\u6bd4\u8f83\u541e\u5410\u4e0e\u8d44\u6e90\u5360\u7528\u3002"
       },
       {
+        "id": "long_sequence",
         "shape": [
           1,
-          16,
           4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          8192,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": false,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          2,
           8,
-          2048,
           128
         ],
         "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
-      },
-      {
-        "shape": [
-          1,
-          16,
-          4096,
-          128
-        ],
-        "dtype": "bf16",
-        "causal": true,
-        "pattern": "random"
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u957f key \u5faa\u73af\uff0c\u89c2\u5bdf\u878d\u5408\u548c\u6d41\u6c34\u7ebf\u7684\u7a33\u6001\u4f5c\u7528\u3002"
       }
     ],
-    "purpose": "Compare CTA scheduling and resource allocation with fixed functionality; official-level performance is not required.",
-    "math": "每个合法输出 query tile 恰好执行一次；调度改变执行顺序，不能改变数学依赖。causal 下不同 query tile 的有效 key 工作量不同。",
-    "task": "实现并比较至少两种你选择的 tile 调度/资源配置；持久化 CTA 可选，不预先规定 scheduler。保留前一版。",
-    "evidence": "给出无遗漏/无重复 ownership 证明；源码说明调度策略，测量 tail 与资源占用，而非仅给总时间。",
-    "experiment": "固定 shape/dtype/数学路径比较调度；记录是否受 CTA 尾部、register、SMEM 或 TMEM 容量限制。官方结果只作独立对照。",
-    "symptoms": "persistent 循环漏任务；causal 工作分配失衡；resource 配置导致 launch 失败；多 CTA 写同一输出。"
+    "purpose": "\u4ece\u4f9d\u8d56\u56fe\u5206\u6790\u5173\u952e\u8def\u5f84\uff0c\u628a\u975e\u77e9\u9635\u5de5\u4f5c\u4e0e\u5f02\u6b65 MMA \u91cd\u53e0\u3002",
+    "evidence": "\u7ed9\u51fa\u8de8 tile \u7684\u5c31\u7eea\u6761\u4ef6\u4e0e\u4e0d\u4f1a\u8986\u76d6\u6d3b\u8dc3\u6570\u636e\u7684\u8bc1\u636e\uff1b\u7528\u65f6\u95f4\u7ebf\u9a8c\u8bc1 overlap\u3002",
+    "experiment": "\u4e0e s40 \u56fa\u5b9a shape/dtype/\u6570\u5b66\u8bed\u4e49\u6bd4\u8f83\uff0c\u8bb0\u5f55\u74f6\u9888\u662f\u5426\u4ece MMA \u8f6c\u79fb\u3002",
+    "lesson": "docs/tasks/s41_overlap.md",
+    "baseline": "cudnn_attention"
+  },
+  {
+    "id": "s42_numerics",
+    "stage": 4,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "Softmax \u541e\u5410\u4e0e\u6570\u503c\u9884\u7b97",
+    "prerequisites": [
+      "s41_overlap"
+    ],
+    "domain": {
+      "dtypes": [
+        "bf16"
+      ],
+      "causal": [
+        false
+      ],
+      "shape_multiple": [
+        1,
+        128,
+        1,
+        1
+      ],
+      "head_dims": [
+        64,
+        128
+      ],
+      "pointer_alignment": 16
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          1,
+          128,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u5934\u57fa\u7ebf\uff0c\u5148\u6838\u5bf9 O \u4e0e\u81ea\u7136\u5bf9\u6570 LSE\u3002"
+      },
+      {
+        "id": "heads",
+        "shape": [
+          2,
+          256,
+          3,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "B\u3001H \u5747\u975e\u4e00\uff0c\u8bc6\u522b BNHD \u4e0e BHND \u6df7\u6dc6\u3002"
+      },
+      {
+        "id": "uniform",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "uniform_attention",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "Zero Q/K and nonzero V: verify mean of V, not vacuous zero output."
+      },
+      {
+        "id": "large_logits",
+        "shape": [
+          1,
+          256,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "large",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u8f83\u5927 QK\uff0c\u68c0\u67e5\u6570\u503c\u7a33\u5b9a\u6027\u548c\u8f93\u51fa\u820d\u5165\u3002"
+      },
+      {
+        "id": "scale",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u663e\u5f0f scale\uff0c\u9632\u6b62\u786c\u7f16\u7801 1/sqrt(D)\u3002",
+        "scale": 0.25
+      },
+      {
+        "id": "rising_max",
+        "shape": [
+          1,
+          512,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "max_ramp",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u540e\u7eed key \u7684\u6700\u5927\u503c\u4e0a\u5347\uff0c\u68c0\u9a8c\u5386\u53f2\u72b6\u6001 rescale\u3002"
+      },
+      {
+        "id": "few_heads",
+        "shape": [
+          1,
+          1024,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u5c11\u91cf heads\uff0c\u89c2\u5bdf query \u7ef4\u5e76\u884c\u5ea6\u3002"
+      },
+      {
+        "id": "many_heads",
+        "shape": [
+          2,
+          1024,
+          16,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u8f83\u591a\u72ec\u7acb heads\uff0c\u6bd4\u8f83\u541e\u5410\u4e0e\u8d44\u6e90\u5360\u7528\u3002"
+      },
+      {
+        "id": "long_sequence",
+        "shape": [
+          1,
+          4096,
+          8,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u957f key \u5faa\u73af\uff0c\u89c2\u5bdf\u878d\u5408\u548c\u6d41\u6c34\u7ebf\u7684\u7a33\u6001\u4f5c\u7528\u3002"
+      }
+    ],
+    "purpose": "\u7814\u7a76\u6307\u6570\u8d44\u6e90\u548c rescale \u6210\u672c\uff0c\u4ee5\u72ec\u7acb\u8bef\u5dee\u9884\u7b97\u7ea6\u675f\u4f18\u5316\u3002",
+    "evidence": "\u533a\u5206\u6307\u6570\u8fd1\u4f3c\u8bef\u5dee\u3001\u6982\u7387\u820d\u5165\u4e0e\u72b6\u6001 rescale\uff1b\u4fdd\u6301 LSE \u81ea\u7136\u5bf9\u6570\u7ea6\u5b9a\u3002",
+    "experiment": "\u5206\u522b\u6d88\u878d\u6307\u6570\u5b9e\u73b0\u548c rescale \u7b56\u7565\uff1bmax_ramp \u5fc5\u987b\u901a\u8fc7\uff0c\u672a\u83b7\u76ca\u7684\u5b9e\u9a8c\u4e5f\u8981\u89e3\u91ca\u3002",
+    "lesson": "docs/tasks/s42_numerics.md",
+    "baseline": "cudnn_attention"
+  },
+  {
+    "id": "s43_schedule",
+    "stage": 4,
+    "backend": "cuda",
+    "kind": "attention",
+    "title": "\u8fb9\u754c\u3001\u8c03\u5ea6\u4e0e\u6027\u80fd\u7ed3\u4e1a\u5b9e\u9a8c",
+    "prerequisites": [
+      "s42_numerics"
+    ],
+    "domain": {
+      "dtypes": [
+        "bf16",
+        "fp16"
+      ],
+      "causal": [
+        false,
+        true
+      ],
+      "shape_multiple": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "head_dims": [
+        64,
+        128
+      ],
+      "pointer_alignment": 16
+    },
+    "cases": [
+      {
+        "id": "small",
+        "shape": [
+          1,
+          128,
+          1,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u5355\u5934\u57fa\u7ebf\uff0c\u5148\u6838\u5bf9 O \u4e0e\u81ea\u7136\u5bf9\u6570 LSE\u3002"
+      },
+      {
+        "id": "heads",
+        "shape": [
+          2,
+          256,
+          3,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "B\u3001H \u5747\u975e\u4e00\uff0c\u8bc6\u522b BNHD \u4e0e BHND \u6df7\u6dc6\u3002"
+      },
+      {
+        "id": "uniform",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "uniform_attention",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "Zero Q/K and nonzero V: verify mean of V, not vacuous zero output."
+      },
+      {
+        "id": "large_logits",
+        "shape": [
+          1,
+          256,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "large",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u8f83\u5927 QK\uff0c\u68c0\u67e5\u6570\u503c\u7a33\u5b9a\u6027\u548c\u8f93\u51fa\u820d\u5165\u3002"
+      },
+      {
+        "id": "scale",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "debug",
+        "purpose": "\u663e\u5f0f scale\uff0c\u9632\u6b62\u786c\u7f16\u7801 1/sqrt(D)\u3002",
+        "scale": 0.25
+      },
+      {
+        "id": "single",
+        "shape": [
+          1,
+          1,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u5355 token \u65e0\u5f52\u7ea6\u957f\u5ea6\uff0c\u8f93\u51fa\u5e94\u7b49\u4e8e V\u3002"
+      },
+      {
+        "id": "tail_causal",
+        "shape": [
+          2,
+          129,
+          3,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "query/key \u5c3e\u90e8\u3001\u542b\u5bf9\u89d2\u7ebf\u7684 causal \u53ca\u591a\u5934\u7d22\u5f15\u3002"
+      },
+      {
+        "id": "tail_full",
+        "shape": [
+          1,
+          257,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "edge",
+        "purpose": "\u975e causal \u5c3e\u90e8\uff0c\u68c0\u67e5\u63a9\u7801\u4e0d\u4f1a\u9519\u8bef\u5730\u4f9d\u8d56 causal\u3002"
+      },
+      {
+        "id": "rising_max",
+        "shape": [
+          1,
+          512,
+          2,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "max_ramp",
+        "causal": false,
+        "suite": "stress",
+        "purpose": "\u540e\u7eed key \u7684\u6700\u5927\u503c\u4e0a\u5347\uff0c\u68c0\u9a8c\u5386\u53f2\u72b6\u6001 rescale\u3002"
+      },
+      {
+        "id": "few_heads",
+        "shape": [
+          1,
+          1024,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u5c11\u91cf heads\uff0c\u89c2\u5bdf query \u7ef4\u5e76\u884c\u5ea6\u3002"
+      },
+      {
+        "id": "many_heads",
+        "shape": [
+          2,
+          1024,
+          16,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u8f83\u591a\u72ec\u7acb heads\uff0c\u6bd4\u8f83\u541e\u5410\u4e0e\u8d44\u6e90\u5360\u7528\u3002"
+      },
+      {
+        "id": "long_sequence",
+        "shape": [
+          1,
+          4096,
+          8,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": false,
+        "suite": "perf",
+        "purpose": "\u957f key \u5faa\u73af\uff0c\u89c2\u5bdf\u878d\u5408\u548c\u6d41\u6c34\u7ebf\u7684\u7a33\u6001\u4f5c\u7528\u3002"
+      },
+      {
+        "id": "fp16_tail",
+        "shape": [
+          2,
+          257,
+          2,
+          128
+        ],
+        "dtype": "fp16",
+        "pattern": "random",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "FP16 \u52a8\u6001\u8303\u56f4\u3001causal \u4e0e\u5c3e\u90e8\u3002"
+      },
+      {
+        "id": "causal_perf",
+        "shape": [
+          1,
+          4096,
+          8,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": true,
+        "suite": "perf",
+        "purpose": "\u4e09\u89d2\u5de5\u4f5c\u91cf\u4e0b\u7684\u5c3e\u90e8\u8c03\u5ea6\u3002"
+      },
+      {
+        "id": "causal_uniform",
+        "shape": [
+          1,
+          128,
+          2,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "uniform_attention",
+        "causal": true,
+        "suite": "edge",
+        "purpose": "Uniform causal weights require the exact prefix mean of nonzero V."
+      }
+    ],
+    "purpose": "\u6269\u5c55\u5230\u8fb9\u754c\u548c causal\uff0c\u5728\u660e\u786e\u76ee\u6807\u5de5\u4f5c\u8d1f\u8f7d\u4e0a\u4f18\u5316\u8c03\u5ea6\u4e0e\u8d44\u6e90\u5206\u914d\u3002",
+    "evidence": "\u63d0\u4f9b\u5b8c\u6574\u6b63\u786e\u6027\u3001\u5185\u5b58\u5b89\u5168\u3001\u8bbe\u8ba1\u8bc1\u636e\u4e0e\u540c\u673a\u53c2\u8003\u6027\u80fd\uff0c\u5206\u522b\u8bf4\u660e\u541e\u5410\u548c\u5c3e\u5ef6\u8fdf\u3002",
+    "experiment": "\u81f3\u5c11\u6bd4\u8f83\u4e24\u79cd\u8c03\u5ea6/\u8d44\u6e90\u914d\u7f6e\uff1b\u4ee5\u5168\u90e8\u76ee\u6807 case \u7684\u7ed3\u679c\u8bf4\u660e\u53d6\u820d\uff0c\u4e0d\u53ea\u5c55\u793a\u6700\u5feb\u4e00\u4e2a\u70b9\u3002",
+    "lesson": "docs/tasks/s43_schedule.md",
+    "baseline": "cudnn_attention"
   }
 ]

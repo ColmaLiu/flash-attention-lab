@@ -50,7 +50,7 @@ def test_invalid_stage_scope_never_launches_checks(arguments, monkeypatch, capsy
 def test_stage_checks_all_exercises_despite_mixed_failures(local_reports, monkeypatch, capsys):
     exercises = cli.selected(2)
     outcomes = [("CORRECTNESS_PASSED", 0), ("STUDENT_UNIMPLEMENTED", 2),
-                ("CORRECTNESS_FAILED", 3), ("TIMEOUT", 5), ("EXECUTION_ERROR", 6)]
+                ("CORRECTNESS_FAILED", 3)]
     calls = []
     def managed(command, args):
         e = exercises[len(calls)]
@@ -75,10 +75,10 @@ def test_stage_success_prints_each_case_and_final_summary(local_reports, monkeyp
     assert cli.main(["check", "--stage", "1"]) == 0
     output = capsys.readouterr()
     assert output.err == ""
-    assert output.out.count(": check (all cases)") == 2
-    assert "s10_fa1" in output.out and "s11_fa1_edges" in output.out
+    assert output.out.count(": check (all cases)") == 3
+    assert "s10_gemm" in output.out and "s11_materialized" in output.out
     assert "Stage 1: check summary" in output.out
-    assert "2/2 exercises passed" in output.out
+    assert "3/3 exercises passed" in output.out
     report = json.loads(next((local_reports / "artifacts/runs").glob("check_stage_*.json")).read_text())
     assert report["state"] == "STAGE_PASSED"
 
@@ -90,7 +90,7 @@ def test_stage_missing_implementations_or_environment_are_not_passes(
     monkeypatch.setattr(cli, "managed", lambda command, args: result_for(cli.EXERCISES[args.exercise], state, code))
     assert cli.main(["check", "--stage", "1"]) == code
     text = capsys.readouterr().out
-    assert "0/2 exercises passed" in text and label in text
+    assert "0/3 exercises passed" in text and label in text
     assert "fixture failure" in text
 
 
@@ -105,7 +105,7 @@ def test_interrupt_preserves_completed_results_and_stops_remaining_exercises(loc
     report = json.loads(capsys.readouterr().out)
     assert report["state"] == "INTERRUPTED"
     assert len(calls) == 2
-    assert [r["state"] for r in report["exercises"]] == ["CORRECTNESS_PASSED", "INTERRUPTED", *["NOT_RUN"]*3]
+    assert [r["state"] for r in report["exercises"]] == ["CORRECTNESS_PASSED", "INTERRUPTED", *["NOT_RUN"]*(len(cli.selected(2))-2)]
     assert Path(report["artifact"]).exists()
 
 
@@ -118,7 +118,7 @@ def test_worker_launch_error_does_not_abort_the_stage(local_reports, monkeypatch
     monkeypatch.setattr(cli, "managed", managed)
     assert cli.main(["check", "--stage", "1", "--json"]) == 6
     report = json.loads(capsys.readouterr().out)
-    assert [r["state"] for r in report["exercises"]] == ["EXECUTION_ERROR", "CORRECTNESS_PASSED"]
+    assert [r["state"] for r in report["exercises"]] == ["EXECUTION_ERROR", "CORRECTNESS_PASSED", "CORRECTNESS_PASSED"]
     assert "cannot start" in report["exercises"][0]["message"]
 
 
@@ -141,7 +141,7 @@ Path(sys.argv[-1]).write_text(sys.argv[2])
     output = capsys.readouterr()
     report = json.loads(output.out)
     assert output.err == ""
-    assert [r["state"] for r in report["exercises"]] == ["TIMEOUT", "CORRECTNESS_PASSED"]
-    assert len({r["log"] for r in report["exercises"]}) == 2
+    assert [r["state"] for r in report["exercises"]] == ["TIMEOUT", "CORRECTNESS_PASSED", "CORRECTNESS_PASSED"]
+    assert len({r["log"] for r in report["exercises"]}) == 3
     assert all(Path(r["log"]).exists() for r in report["exercises"])
     assert "fixture child output" in Path(report["exercises"][1]["log"]).read_text()

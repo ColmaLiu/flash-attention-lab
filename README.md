@@ -1,91 +1,54 @@
-# flash-attention-lab
+# FlashAttention GPU Kernel Lab
 
-在 NVIDIA Blackwell SM100（例如 B200）上亲手实现 FlashAttention-1/2（CUDA C++）与受限 FlashAttention-4 forward（CuTe DSL）。阶段 0–4 共 27 个练习，包含任务、空学生入口、独立数学参考、测试和 benchmark。**核心 kernel 由学习者编写；未实现的入口明确报错。** 不独立实现 FA3，其异步执行与同步基础在阶段 3 补齐。
+以 FlashAttention 为主线，从内存访问、归约和 GEMM，走到 B200 上的 Tensor Core、异步搬运与 attention 流水线。课程分 **5 个阶段、15 个完整实验**，默认使用 **CUDA C++ 与 PTX**；CuTe 是阅读和表达复杂布局的可选工具，不要求中途更换语言。
 
-## 安装与检查
+每课包含概念讲解、有目的的测试、独立 FP64 数学参考、完整可读答案和快速库性能基线。`students/` 是独立实现入口；`solutions/` 与 `references/` 提供答案及固定版本的上游源码。基础设施通过、答案通过与学生通过是不同状态。
 
-安装配置面向 **Linux x86_64（glibc ≥ 2.28）、SM100 GPU、Conda**。需要可用的 NVIDIA 驱动；CuTe DSL CUDA 12 系列建议驱动至少 575.51.03。其它 Blackwell compute capability 或 CPU 平台不在此配置的支持范围内。完整要求和来源见 [环境与安装](docs/environment.md)。
+第一次写 CUDA，请先读 [从零开始：读懂第一个 GPU kernel](docs/starting-from-zero.md)，再进入课程。
 
-使用 `git clone --recurse-submodules <repo-url>` 克隆仓库，进入仓库根目录后执行（已有 Git checkout 也可直接运行 bootstrap）：
+## 开始
 
 ```bash
-# 已有 CUDA Toolkit 12.8 和兼容 C++ 编译器，且 nvcc 在 PATH 中：
 bash scripts/bootstrap.sh
-# 若缺少 Toolkit/编译器，改用下面这条，在专用 Conda 环境内安装：
-# bash scripts/bootstrap.sh --with-cuda
-
-./lab doctor                  # 检查选中设备、依赖和工具链
-./lab python -m pytest -q      # 基础设施测试，不执行学生 kernel
-./lab smoke --timeout 600      # 实际编译、绑定、GPU 调用和计时设施检查
+./lab doctor
+./lab python -m pytest -q
+./lab smoke
+./lab task s00_layout -v
+./lab reference s00_layout --case 0
+./lab solution s00_layout --case 0
 ```
 
-安装脚本创建 `flash-attention-lab` Conda 环境，安装 Python 依赖，并初始化固定版本的 CUTLASS submodule。所有 CUDA 关卡共用头文件配置，无需逐关安装或声明。`./lab` 自动激活该环境，可在任意目录调用其路径；无需预先存在缓存或结果文件；需保留 Git 元数据以初始化和校验 submodule。首次编译/JIT 较慢，后续运行复用缓存。
+默认使用独立 Conda 环境 `flash-attention-lab`，可由 `LAB_CONDA_ENV` 配置。GPU 由 `LAB_GPU` 选择；尊重已有 `CUDA_VISIBLE_DEVICES`，默认只运行一张。安装和各编译链见 [environment](docs/environment.md)。Blackwell 专用实验针对 SM100，例如 B200；不把消费级 Blackwell 当成相同指令集。
 
-默认使用一张 GPU：已有 `CUDA_VISIBLE_DEVICES` 时选其中第一张，否则选 GPU 0。`LAB_GPU` 可指定索引或 UUID；已有可见设备列表时，值必须是列表中的原始标识，不会越过调度器的分配。工具链发现顺序是 `LAB_CUDA_HOME`、`CUDA_HOME`、`PATH` 中的 `nvcc`。多版本 Toolkit 应显式选择 12.8。
+打开 [第一课](docs/tasks/s00_layout.md)，先阅读实验目标并运行参考，再实现 `students/cuda/s00_layout/kernel.cu` 与必要的 workspace 声明。完成后设置本课 `entry.py` 中的 `IMPLEMENTED=True`：
 
 ```bash
-LAB_GPU=1 ./lab doctor
-# 若已有 CUDA_VISIBLE_DEVICES，则 LAB_GPU 必须选该列表中的设备。
-# 非默认安装位置：export LAB_CUDA_HOME=/path/to/cuda-12.8
-# 自定义环境名称：LAB_CONDA_ENV=my-fa-lab bash scripts/bootstrap.sh
-# 后续命令也使用同一个 LAB_CONDA_ENV。
+./lab check s00_layout --case 0
+./lab check s00_layout
+./lab bench s00_layout --case 0
+./lab sanitize s00_layout --tool memcheck --case 0
 ```
 
-项目安装配置固定 PyTorch `2.10.0+cu128`、CuTe DSL `4.4.1` 和 CUDA Python `12.9.4`；项目依赖声明在 `pyproject.toml`，`requirements.txt` 指定 PyTorch 的 CUDA wheel 变体及官方源。驱动支持版本、nvcc Toolkit 与 PyTorch runtime 是不同概念。官方 FA4 是独立可选对照，不是安装前提。
+空学生入口以非零状态明确失败。`bench` 先检验当前输入，再自动比较学生与快速库；`solution` 检验独立答案。阅读答案后仍需能解释数据 ownership、同步与性能变化。先选小例定位，再选课程表中的 perf 案例测量；不要自动运行长 sweep。
 
-## 从第一关开始
+## 学习路线
 
-先读 [协作边界](AGENTS.md)，再打开 [s00_softmax](docs/tasks/s00_softmax.md)。[路线表](docs/roadmap.md) 列出所有任务、文件、依赖和验收命令；[验证流程](docs/validation.md) 说明检查结果的含义。
+| 阶段 | 完整实验 | 这一阶段解决什么问题 |
+|---|---|---|
+| 0 | layout / softmax | 地址、线程协作、归约、数值与测量 |
+| 1 | SIMT GEMM / materialized attention / online attention | 数据复用、组合算子、消除 N² 中间存储 |
+| 2 | warp MMA / pipeline GEMM / FA2 | Tensor Core 数据布局、异步搬运、query 并行与融合 |
+| 3 | TMA / tcgen05 GEMM / warp specialization | 描述符、TMEM、跨引擎同步与流水线 |
+| 4 | SM100 attention / overlap / numerics / scheduling | 生产源码阅读、消融、数值预算、完整性能实验 |
 
-实现 `students/cuda/s00_softmax/kernel.cu` 中的 `student_launch` 及自己的设备模块。launch、线程映射、reduction 和 shared memory 均由你设计；需要全局 scratch 时填写同目录 `entry.py:workspace_spec`。实现前执行验收会报 `STUDENT_UNIMPLEMENTED`，退出码 2。完成后设置 `IMPLEMENTED=True`，运行：
+完整顺序与源码阅读入口在 [roadmap](docs/roadmap.md)。每课任务文档解释为什么学、参考如何读、每个测试检查什么以及如何验证优化假设。
 
-```bash
-./lab check s00_softmax --case 0
-./lab check s00_softmax
-./lab sanitize s00_softmax --tool memcheck --case 0
-./lab sanitize s00_softmax --tool racecheck --case 0
-./lab sanitize s00_softmax --tool synccheck --case 0
-./lab bench s00_softmax --case 0
-```
+Attention 统一采用与 `flash_attn_func` 相同的 **`[B,N,H,D]`** 连续输入/输出布局；LSE 是 `[B,H,N]` FP32。仅 forward、contiguous self-attention，无 dropout/bias/GQA。测试是支持域中的代表性采样，合法 shape 不再由测试列表决定，详见 [contracts](docs/contracts.md)。
 
-通关要求为全部声明案例通过、必要内存安全检查无错误，并在 [实验记录](experiments/s00_softmax.md) 中解释稳定性与线程 ownership。完成设计 review 后进入 `s01_reduce`；第一关没有性能门槛。缺少 sanitizer/profiler 时会说明原因，不能将其计为通过。
+## 参考与性能
 
-## 日常命令
+FP64 oracle 用于判断数学正确性。教学答案用于理解完整实现。快速库使用 native CUDA 算子、cuBLAS，以及低精度 attention 的强制 cuDNN fused 路径；这是每关的实际速度比较对象。阶段 4 的完整答案采用固定官方 FA4 源码，不声称另有独立手写教学 FA4。源码版本及许可证在 [sources](docs/sources.md) 和 [references](references/README.md)。
 
-上面的验收流程适用于所有关卡，替换关卡 ID 即可。ID 支持完整名称或短编号，例如 `./lab check s20` 等价于 `./lab check s20_fa2_grid`。其他常用入口：
+计时分别呈现 CUDA Graph 与 eager launch，报告采样分布和参考/学生比值；排除编译、输入生成及预分配，明确实际布局转换和 host 成本。算法 IO 模型不等于测量 DRAM 字节，教学版 B200 数据不代表历史官方 FA 性能。见 [benchmarking](docs/benchmarking.md)。
 
-| 命令 | 用途 |
-|---|---|
-| `./lab list --stage 3` | 查看该阶段的任务；doctor、smoke、status 也支持 `--stage` |
-| `./lab task ID` | 查看 tensor 键名、学生文件和完整任务文档路径；`-v` 增加目的与案例列表 |
-| `./lab check --stage 2` | 按顺序验收阶段 2 的所有关卡和 case，最后汇总；`--timeout` 按每关计算 |
-| `./lab status` | 查看各关状态和记录，默认不运行 kernel |
-| `./lab profile ID --case 0` | 对指定案例运行 Nsight Compute |
-| `./lab --help` | 查看全部命令；子命令加 `--help` 查看参数 |
-
-每关独立运行 `./lab check ID` 或 `./lab bench ID`。status 根据实现标记和验收记录汇总各关状态；完整状态和退出码见 [状态语义](progress/README.md)。
-
-测试从小规模定位延伸到多头 1K–8K attention、大矩阵 GEMM 与长流水线；`check ID` 默认验收本关的全部尺寸，`task ID -v` 列出 case 编号。各阶段的范围及性能比较方法见 [测试规模](docs/test_scales.md)。
-
-命令默认使用英文：check 逐 case 显示 PASS/FAIL 和失败原因；bench 显示计时，不展开精度明细。`--verbose`（`-v`）展开细节及报告路径，`--json` 输出完整机器报告，例如 `./lab bench s00_softmax --json`。日志与结果保存在已忽略的 `artifacts/` 中。完整输出约定见 [终端输出说明](docs/cli.md)。
-
-## 目录
-
-```text
-students/cuda/         11 个 CUDA C++ 练习，每关 kernel.cu + entry.py
-students/cute/         16 个 CuTe DSL 练习，每关 entry.py
-flash_attention_lab/  构建、绑定、host 契约、参考、检查和计时工具
-tests/               基础设施测试与显式学生验收
-benchmarks/           可选官方 FA4 性能对照
-docs/                安装、路线、契约、算法说明和 27 关任务
-experiments/          空白实验记录模板
-progress/             验收记录和状态语义
-scripts/              安装和基础设施验证入口
-curriculum.json       关卡支持域、案例与学习依赖
-```
-
-各代实现保留独立入口。学习前置与代码复用依赖分别声明；缺少学生模块会报告具体名称，不调用参考或官方实现替代。
-
-运行生成的 `artifacts/`、`.cache/` 和 `progress/results/` 均被 Git 忽略，缺失时按需创建。实验模板和源代码纳入版本管理；发布公共模板时不附带个人进度、测量结果或机器快照。
-
-进一步阅读：[接口](docs/contracts.md) · [数值](docs/numerics.md) · [IO 推导](docs/io_model.md) · [Blackwell](docs/blackwell.md) · [调试](docs/debugging.md) · [计时](docs/benchmarking.md) · [来源版本](docs/sources.md)。
+目录：`students/` 学生代码，`solutions/` 完整答案，`references/` 固定上游源码，`flash_attention_lab/` 公共设施，`docs/tasks/` 课程，`tests/` 基础设施测试与显式学生验收。个人记录、日志、编译缓存与运行结果写入被忽略的 `artifacts/`、`.cache/`、`progress/results/`；实验模板在 [experiments](experiments/README.md)。公共文档不保存特定机器的测试或性能结论。
