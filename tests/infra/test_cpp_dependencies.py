@@ -1,4 +1,4 @@
-"""Pinned Git sources are mandatory, shared by student and solution builds."""
+"""Pinned upstream sources support reproducible design and provenance reading."""
 import subprocess
 import pytest
 from flash_attention_lab import cpp_dependencies as deps
@@ -119,7 +119,8 @@ def test_build_cache_separates_sources_helpers_flags_and_solution(build_fixture,
     solution = build.build_cuda("lesson", solution=True)
     assert student[0] == "lesson" and solution[0] == "solution_lesson"
     assert student[-1] != solution[-1]
-    assert student[5] == solution[5]  # Both use the same fixed include directories.
+    assert not any("third_party" in path for path in student[5])
+    assert student[5] == solution[5]  # Both use the same CUDA include directories, with no upstream kernel headers.
     assert solution[2] == str(root / "solutions/lesson/binding.cpp")
     helper = root / "students/lesson/helper.cuh"
     helper.write_text("// added helper")

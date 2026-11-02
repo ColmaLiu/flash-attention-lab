@@ -6,7 +6,7 @@
 
 Blackwell 上矩阵算力提升后，softmax、数据交换和 correction 的成本更显眼。优化的对象是依赖链：某块矩阵计算何时开始，另一块 softmax 是否已经具备输入，历史 O 的修正何时必须完成。只让多个 warp 同时存在，不等于计算已经重叠。
 
-从 s40 的完整源码中标记各引擎发起、等待与 buffer 释放位置。分析不同 query tile 的交错是否减少空闲时间，同时检查 accumulator 或概率存储是否因交错而增加。性能与设计证据必须相互支持；缩短总时间不能单独证明某一种 overlap，时间线出现并行也不保证端到端更快。
+参考答案为 KV 和 score 设置双缓冲，先在等待当前 QK 完成之前预取下一块 KV，并在处理当前块的 CUDA softmax/correction 之前发起下一块 QK。这样既保留当前分数，又让矩阵引擎有机会与非矩阵工作并行。先从 s40 的完整源码中标记各引擎发起、等待与 buffer 释放位置。分析相邻 key tile 的交错是否减少空闲时间，同时检查 accumulator 或概率存储是否因交错而增加。性能与设计证据必须相互支持；缩短总时间不能单独证明某一种 overlap，时间线出现并行也不保证端到端更快。
 
 ## 定义、代码与参考
 
@@ -19,7 +19,7 @@ Blackwell 上矩阵算力提升后，softmax、数据交换和 correction 的成
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
 
-源码阅读：官方 FA4 论文 §3.1.2；本地 flash_fwd_sm100.py 中的 warp 角色、pipeline 及 correction 路径。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：[kernel.cu](../../solutions/s41_overlap/kernel.cu) 与 [sm100_attention.cuh](../../solutions/s40_attention/sm100_attention.cuh)；对照 s40 的发起、等待与 correction 位置，并结合 FA4 论文 §3.1.2 分析依赖。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -27,7 +27,7 @@ Blackwell 上矩阵算力提升后，softmax、数据交换和 correction 的成
 |---|---|---|---|---|
 | `small` | debug | `(1, 128, 1, 64)` | bf16/full | 单头基线，先核对 O 与自然对数 LSE。 |
 | `heads` | debug | `(2, 256, 3, 64)` | bf16/full | B、H 均非一，识别 BNHD 与 BHND 混淆。 |
-| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Zero Q/K and nonzero V: verify mean of V, not vacuous zero output. |
+| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Q/K 为零而 V 非零，检查 V 的均值与完整输出写入。 |
 | `large_logits` | stress | `(1, 256, 2, 128)` | bf16/full | 较大 QK，检查数值稳定性和输出舍入。 |
 | `scale` | debug | `(1, 128, 2, 64)` | bf16/full | 显式 scale，防止硬编码 1/sqrt(D)。 |
 | `rising_max` | stress | `(1, 512, 2, 128)` | bf16/full | 后续 key 的最大值上升，检验历史状态 rescale。 |

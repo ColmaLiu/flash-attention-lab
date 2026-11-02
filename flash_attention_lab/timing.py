@@ -60,15 +60,18 @@ def measure_graph(launch, warmup=5, repeats=7, iterations=10):
     return timing
 
 
-def measure_graph_pair(first, second, warmup=5, repeats=7, iterations=10):
-    """Capture both candidates, then alternate AB/BA sampling order."""
+def measure_graph_group(launches, warmup=5, repeats=7, iterations=10):
+    """Capture equal batches, then rotate every candidate through sampling positions."""
+    launches = tuple(launches)
+    if not launches:
+        raise ValueError("graph timing requires at least one candidate")
     if min(warmup, repeats, iterations) < 1:
         raise ValueError("timing counts must be positive")
     stream = torch.cuda.current_stream()
     if stream == torch.cuda.default_stream():
         raise ValueError("graph timing requires a nondefault stream")
     graphs = []
-    for launch in (first, second):
+    for launch in launches:
         for _ in range(warmup): launch()
         stream.synchronize()
         graph = torch.cuda.CUDAGraph()
@@ -77,9 +80,11 @@ def measure_graph_pair(first, second, warmup=5, repeats=7, iterations=10):
         graph.replay()
         stream.synchronize()
         graphs.append(graph)
-    samples, walls = [[], []], [[], []]
+    samples = [[] for _ in launches]
+    walls = [[] for _ in launches]
     for repeat in range(repeats):
-        for index in ((0, 1) if repeat % 2 == 0 else (1, 0)):
+        for offset in range(len(launches)):
+            index = (repeat + offset) % len(launches)
             start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             wall = time.perf_counter()
             start.record()
@@ -96,9 +101,15 @@ def measure_graph_pair(first, second, warmup=5, repeats=7, iterations=10):
             "gpu_stream_ms_stdev": statistics.pstdev(gpu), "gpu_stream_ms_samples": gpu,
             "host_batch_ms_median": statistics.median(host),
             "warmup": warmup, "repeats": repeats, "iterations": iterations, "mode": "cuda_graph",
-            "sampling_order": "alternating candidate/library then library/candidate",
-            "scope": "per-operation CUDA graph replay; same captured batch size; AB/BA sampling; "
+            "sampling_order": "cyclic rotation of candidate indices",
+            "candidate_count": len(launches),
+            "scope": "per-operation CUDA graph replay; same captured batch size; cyclic sampling order; "
                      "excludes preparation, compilation, allocation and capture; includes output copies; "
                      "host_batch is amortized replay/record/wait overhead, not eager API latency",
         })
     return tuple(results)
+
+
+def measure_graph_pair(first, second, warmup=5, repeats=7, iterations=10):
+    """Capture a pair and alternate AB/BA order with the group measurement path."""
+    return measure_graph_group((first, second), warmup, repeats, iterations)

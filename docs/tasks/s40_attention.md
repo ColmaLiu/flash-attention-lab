@@ -6,7 +6,7 @@
 
 GEMM 的结果可以直接写输出，attention 的 QK 结果还要经过 softmax 后成为 PV 的输入。因此 SM100 GEMM 并不能机械拼接成高效 attention。需要追踪 S、P、O 在 TMEM、SMEM、寄存器间的流转，明确每次精度转换和 buffer 重用。
 
-本阶段答案采用 `third_party/flash-attention` 中固定的官方 CuTe DSL forward 源码。先按单个 query 块阅读数据生命周期，再阅读跨块 overlap。学生使用自己的 CUDA C++/PTX 入口逐步实现和优化。
+本阶段答案是本仓库内完整的 CUDA C++/PTX attention。先从 `kernel.cu` 沿本地 helper 读完单个 query 块的 QK、softmax、PV 和 O/LSE 写回，再研究异步工作之间的交错。与学生实现使用相同语言和输出契约，便于遇到困难时逐段对照。答案每个 CTA 处理 128 个 query，每次消费 64 个 key；TMA 直接读取 BNHD，QK/PV 用 tcgen05，行统计与 O 累加保存在 FP32 寄存器。本关按顺序完成每块 key 的 QK、softmax 和 PV，作为后续安排执行顺序的比较起点。同步审查需区分三个层面：MMA/TMEM load 的完成等待，before/after-thread-sync fence 包围的 CTA 交接，以及普通 CUDA shared 访问与后续 TMA 复用之间的 async proxy fence；它们不能互相替代。
 
 ## 定义、代码与参考
 
@@ -19,7 +19,7 @@ BF16 BNHD，D=64/128，N 是 128 的倍数，先只支持 noncausal。返回 O �
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
 
-源码阅读：third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py；对应 solutions/s40_attention/。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：[kernel.cu](../../solutions/s40_attention/kernel.cu) 与 [sm100_attention.cuh](../../solutions/s40_attention/sm100_attention.cuh)；对照 s31 的 TMEM 生命周期与 s22 的 online softmax。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -27,7 +27,7 @@ BF16 BNHD，D=64/128，N 是 128 的倍数，先只支持 noncausal。返回 O �
 |---|---|---|---|---|
 | `small` | debug | `(1, 128, 1, 64)` | bf16/full | 单头基线，先核对 O 与自然对数 LSE。 |
 | `heads` | debug | `(2, 256, 3, 64)` | bf16/full | B、H 均非一，识别 BNHD 与 BHND 混淆。 |
-| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Zero Q/K and nonzero V: verify mean of V, not vacuous zero output. |
+| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Q/K 为零而 V 非零，检查 V 的均值与完整输出写入。 |
 | `large_logits` | stress | `(1, 256, 2, 128)` | bf16/full | 较大 QK，检查数值稳定性和输出舍入。 |
 | `scale` | debug | `(1, 128, 2, 64)` | bf16/full | 显式 scale，防止硬编码 1/sqrt(D)。 |
 | `rising_max` | stress | `(1, 512, 2, 128)` | bf16/full | 后续 key 的最大值上升，检验历史状态 rescale。 |

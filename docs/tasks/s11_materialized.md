@@ -21,7 +21,7 @@ S[b,h,i,j]=scale·dot(Q[b,i,h,:],K[b,j,h,:])；P=softmax(S+mask)；O=PV；LSE=lo
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：cuBLAS 矩阵乘 + native softmax 的 FP32 显式 attention；包含其实际中间矩阵成本。
 
-源码阅读：官方 FA2 README 的 flash_attn_func 输入约定；本地 solutions/s11_materialized/kernel.cu；快速参考 materialized_attention。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：官方 FA2 README 的 flash_attn_func 输入约定；本地 solutions/s11_materialized/kernel.cu；快速参考 materialized_attention。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -29,7 +29,7 @@ S[b,h,i,j]=scale·dot(Q[b,i,h,:],K[b,j,h,:])；P=softmax(S+mask)；O=PV；LSE=lo
 |---|---|---|---|---|
 | `small` | debug | `(1, 17, 1, 64)` | fp32/full | 单头基线，先核对 O 与自然对数 LSE。 |
 | `heads` | debug | `(2, 33, 3, 64)` | fp32/full | B、H 均非一，识别 BNHD 与 BHND 混淆。 |
-| `uniform` | debug | `(1, 31, 2, 64)` | fp32/full | Zero Q/K and nonzero V: verify mean of V, not vacuous zero output. |
+| `uniform` | debug | `(1, 31, 2, 64)` | fp32/full | Q/K 为零而 V 非零，检查 V 的均值与完整输出写入。 |
 | `large_logits` | stress | `(1, 65, 2, 128)` | fp32/full | 较大 QK，检查数值稳定性和输出舍入。 |
 | `scale` | debug | `(1, 17, 2, 64)` | fp32/full | 显式 scale，防止硬编码 1/sqrt(D)。 |
 | `single` | edge | `(1, 1, 2, 64)` | fp32/full | 单 token 无归约长度，输出应等于 V。 |
@@ -38,7 +38,7 @@ S[b,h,i,j]=scale·dot(Q[b,i,h,:],K[b,j,h,:])；P=softmax(S+mask)；O=PV；LSE=lo
 | `few_heads` | perf | `(1, 1024, 2, 64)` | fp32/full | 少量 heads，观察 query 维并行度。 |
 | `many_heads` | perf | `(2, 1024, 16, 128)` | fp32/full | 较多独立 heads，比较吞吐与资源占用。 |
 | `long_sequence` | perf | `(1, 4096, 8, 128)` | fp32/full | 长 key 循环，观察融合和流水线的稳态作用。 |
-| `causal_uniform` | edge | `(1, 31, 2, 64)` | fp32/causal | Uniform causal weights require the exact prefix mean of nonzero V. |
+| `causal_uniform` | edge | `(1, 31, 2, 64)` | fp32/causal | 均匀 causal 权重要求输出为非零 V 的精确前缀均值。 |
 
 `debug` 用于缩小问题，`edge` 检验边界，`stress` 检验数值或生命周期，`perf` 选择代表性工作负载；所有声明案例都必须通过正确性验收。case 0 是第一行；用 `task -v` 查看序号。
 

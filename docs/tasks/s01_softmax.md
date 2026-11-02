@@ -18,10 +18,10 @@ m=max_j x_j；y_j=exp(x_j-m)/sum_k exp(x_k-m)。对有限常数 c，有 softmax(
 
 - 学生入口：[students/cuda/s01_softmax/kernel.cu](../../students/cuda/s01_softmax/kernel.cu)，host workspace 声明在同目录 `entry.py`。
 - 完整可读答案：[solutions/s01_softmax/](../../solutions/s01_softmax/)。可以先独立实现，也可以阅读答案后做控制变量实验；学生入口不会调用答案。
-- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
+- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；使用 FP64 显式指数与归一化检查逐行 softmax。
 - 快速库基线：PyTorch 原生 CUDA 算子，预分配输出；它是可运行的性能比较对象。
 
-源码阅读：PyTorch ATen/native/cuda/SoftMax.cu 的 dispatch 与 persistent softmax；本地 solutions/s01_softmax/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：PyTorch ATen/native/cuda/SoftMax.cu 的 dispatch 与 persistent softmax；本地 solutions/s01_softmax/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 

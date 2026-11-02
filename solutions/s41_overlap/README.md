@@ -1,17 +1,26 @@
-# s41_overlap: FA4 source experiment
+# CUDA/PTX：相邻 key tile 的 QK 与 softmax 交错
 
-Two query stages, hardware exponential, exact rescaling, nonpersistent scheduling.
+[kernel.cu](kernel.cu) 选择 `Overlap=true, Numerics=false, Persistent=false`，设备实现见 [sm100_attention.cuh](../s40_attention/sm100_attention.cuh)。数据契约、128×64 query/key tile 和 FP32 状态与 [s40](../s40_attention/README.md) 相同，新增两套 KV 和 score 存储。
 
-`entry.py` selects the experiment configuration and calls the compile helper in `s40_attention/fa4_reference.py`. The complete CuTe DSL production kernel is [flash_fwd_sm100.py](../../third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py), with softmax, MMA, copy, pipeline and scheduling helpers alongside it. The FlashAttention submodule is pinned by the parent repository's gitlink.
+## 相邻迭代如何交接
 
-[The source map](../../docs/reference-implementations.md) connects each experiment to its modules. The [rescale-threshold patch](../../patches/flash-attention/rescale-threshold.patch) is applied to a generated compilation copy under `.cache/sources/`; the upstream submodule remains clean. The student's CUDA C++/PTX implementation has its own entry.
+等待当前 score 完成之前，线程 0 发起下一块 KV 的 TMA，使搬运有机会与仍在进行的当前 QK 重叠；score 完成后，四个 warp 将其从 TMEM 读到寄存器。下一块 KV 完成后，发起下一块 QK，再执行当前块 softmax、历史 O 修正和 PV。score 的两个 TMEM 区域分别位于列 0 和 64，PV 使用列 128 起的 D 列。
 
-Prepare wraps preallocated BNHD input/output and BHN LSE tensors and compiles before measurement. Launches use the supplied stream. Query stages, exponent strategy, rescale threshold and scheduling are recorded in CONFIG. Change the two numerical controls separately when attributing their effects. A single query stage still uses asynchronous engines internally.
+`slot=tile%2` 选择存储，`(tile/2)&1` 选择每个 slot 的 barrier phase。不同槽中的 K/V 和 score 可以同时存活。每轮尾部的 `before_thread_sync` fence、CTA barrier 和 `after_thread_sync` fence 将各 warp 经 `wait::ld` 完成的 PV 读取交接给发起线程，之后才允许回绕到旧槽；最后一块不再预取。请逐项追踪首次填充、奇偶回绕与 drain，尤其区分等待 TMA 和等待 MMA。
+
+这一安排给 QK 与 CUDA softmax/correction 提供重叠机会。下一块 KV 的等待仍在当前 softmax 之前，PV 也仍逐块等待，所以它不是所有引擎都始终并行的完整生产流水线。时间线和相同输入的测量用于确定哪些等待真正缩短。
+
+## 资源与验证
+
+D64/D128 的动态 shared memory 从 s40 的 48/80 KiB 增至 64/112 KiB；TMEM 仍分配 256 列。额外存储可能减少驻留 CTA，少 heads、长序列与多 heads 的收益不能互相替代。
 
 ```bash
-bash scripts/bootstrap.sh
-./lab check s41_overlap --solution --timeout 600
-./lab solution s41_overlap --case 0 --timeout 600
+./lab check s41_overlap --solution
+./lab solution s41_overlap --case 6
+./lab solution s41_overlap --case 7
+./lab solution s41_overlap --case 8
+./lab sanitize s41_overlap --solution --tool racecheck --case 5
+./lab sanitize s41_overlap --solution --tool synccheck --case 1
 ```
 
-Validation and measurements are tied to source fingerprints in ignored artifacts.
+使用 s40 和 cuDNN 作为同契约比较对象；graph/eager 分别报告。算法、指令与上游设计来源见 [s40 README](../s40_attention/README.md)。本地双缓冲协议是可直接修改的 CUDA/PTX 实验，性能结论必须绑定实际测量。

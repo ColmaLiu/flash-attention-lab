@@ -10,16 +10,16 @@
 
 ## 定义、代码与参考
 
-数学契约与 s20 完全相同。实验必须固定 shape、输入值和 dtype，才能把变化归因于调度。
+数学契约与 s20 完全相同。参考保留相同 128×64×32 tile、XOR shared layout、PTX ldmatrix/mma.sync fragment 和输出 ownership，改用 cp.async 双缓冲。s20 提供同步对照；实验固定 shape、输入值和 dtype，分别检查异步搬运、重叠与资源变化。
 
 接口：`[M,K] @ [K,N] → [M,N] FP32`。输入必须在同一 GPU 上连续存储。精确支持域是 [curriculum.json](../../curriculum.json) 中本关的 `domain`，测试例是采样而非 shape 白名单。所有维度为正；输入有限。
 
 - 学生入口：[students/cuda/s21_pipeline/kernel.cu](../../students/cuda/s21_pipeline/kernel.cu)，host workspace 声明在同目录 `entry.py`。
 - 完整可读答案：[solutions/s21_pipeline/](../../solutions/s21_pipeline/)。可以先独立实现，也可以阅读答案后做控制变量实验；学生入口不会调用答案。
-- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
+- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；对已经量化的相同输入执行 FP64 矩阵乘，输出按公共契约比较。
 - 快速库基线：cuBLAS GEMM；保持输入 dtype 与 FP32 输出一致。
 
-源码阅读：PTX ISA cp.async completion groups；本地 solutions/s21_pipeline/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：PTX ISA cp.async completion groups；本地 solutions/s21_pipeline/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 

@@ -21,9 +21,7 @@ def main():
     stream = torch.cuda.current_stream().cuda_stream
     cpp = build_cuda("infra_smoke")
     cuda_launch = lambda: cpp.launch({}, descriptors({"sentinel": output}), {}, {}, stream)
-    require_environment("cute")
-    from flash_attention_lab.cute_smoke import prepare_sentinel
-    launches = [("cuda", cuda_launch), ("cute", prepare_sentinel(output, stream))]
+    launches = [("cuda", cuda_launch)]
     for name, launch in launches:
         output.zero_()
         torch.cuda.nvtx.range_push("infra_tool_probe")

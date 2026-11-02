@@ -26,7 +26,7 @@ def torch_module():
 
 def snapshot():
     packages = {}
-    for name in ("torch", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base", "cuda-python", "cuda-bindings", "pytest", "ninja", "quack-kernels", "apache-tvm-ffi", "torch-c-dlpack-ext", "einops"):
+    for name in ("torch", "pytest", "ninja"):
         try: packages[name] = metadata.version(name)
         except metadata.PackageNotFoundError: packages[name] = None
     from .cpp_dependencies import source_snapshot
@@ -77,20 +77,12 @@ def require_environment(backend):
         if torch.version.cuda != "12.8":
             raise EnvironmentUnsupported("install the pinned PyTorch cu128 wheel via bash scripts/bootstrap.sh")
         cuda_development_paths(toolkit)
-        from .cpp_dependencies import cpp_include_paths
-        cpp_include_paths()
         if not tool_path("ninja"):
             raise EnvironmentUnsupported("ninja is missing from PATH; run bash scripts/bootstrap.sh")
         if not tool_path(os.getenv("CXX", "c++")):
             raise EnvironmentUnsupported("C++ compiler missing; set CXX or use bootstrap --with-cuda")
         if os.getenv("CC") and not tool_path(os.environ["CC"]):
             raise EnvironmentUnsupported("CC does not name an executable host compiler")
-    elif backend == "cute":
-        try:
-            import cutlass.cute  # noqa: F401
-            from cuda.bindings import driver  # noqa: F401
-        except (ImportError, OSError, metadata.PackageNotFoundError) as exc:
-            raise EnvironmentUnsupported(f"CuTe DSL dependencies missing: {exc}") from exc
     else:
         raise ValueError(f"unknown backend: {backend}")
     from .cpp_dependencies import SOURCES, require_source
@@ -125,26 +117,3 @@ def require_ncu_sections(binary):
                if not re.search(r"\b" + s + r"\b", result.get("stdout", ""))]
     if missing:
         raise EnvironmentUnsupported("installed NCU lacks required sections: " + ", ".join(missing))
-
-
-def probe_blackwell_interfaces():
-    """Symbol availability, not correctness of any student's TMA/TMEM protocol."""
-    import inspect
-    import cutlass.cute as cute
-    import cutlass.cute.nvgpu.cpasync as cpasync
-    import cutlass.cute.nvgpu.tcgen05 as tcgen05
-    import cutlass.pipeline as pipeline
-    import cutlass.utils as utils
-    names = [(cpasync, "CopyBulkTensorTileG2SOp"), (cpasync, "make_tiled_tma_atom"),
-             (tcgen05, "MmaF16BF16Op"), (tcgen05, "CtaGroup"),
-             (tcgen05, "Ld32x32bOp"), (tcgen05, "St32x32bOp"),
-             (pipeline, "PipelineTmaUmma"), (pipeline, "PipelineUmmaAsync"),
-             (pipeline, "PipelineAsync"), (utils, "TmemAllocator"),
-             (cute.arch, "mbarrier_init"), (cute.arch, "mbarrier_wait")]
-    result = {}
-    for module, name in names:
-        obj = getattr(module, name, None)
-        try: signature = str(inspect.signature(obj)) if obj else None
-        except (ValueError, TypeError): signature = str(obj)
-        result[module.__name__ + "." + name] = {"available": obj is not None, "signature": signature}
-    return result

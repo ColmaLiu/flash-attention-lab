@@ -19,15 +19,15 @@ def test_exercise_metadata_and_small_references(e):
     assert all(dep in EXERCISES for dep in e["prerequisites"])
     student = load_student(e)
     assert callable(student.workspace_spec)
-    if e["backend"] == "cute": assert callable(student.prepare)
+    assert e["backend"] == "cuda"
     for case in e["cases"]:
         shape = case["shape"]
         assert all(isinstance(n, int) and n > 0 for n in shape)
         assert case["dtype"] in ("fp32", "fp16", "bf16")
         assert isinstance(case["causal"], bool)
         assert not case["causal"] or e["kind"] == "attention"
-        # CPU unit tests cover oracle behavior on small tensors. GPU smoke generates
-        # inputs and FP64 references for EVERY declared case, including large shapes.
+        # CPU tests cover small oracle inputs. Full GPU acceptance, separately
+        # from the bounded infrastructure smoke, includes every declared case.
         work = math.prod(shape)
         if e["kind"] == "attention": work = shape[0] * shape[2] * shape[1] ** 2
         elif e["kind"] == "gemm": work = math.prod(shape)

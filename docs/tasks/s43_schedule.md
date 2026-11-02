@@ -6,6 +6,8 @@
 
 causal attention 的不同 query 区域拥有不同有效 key 数，工作量呈三角分布。尾部 CTA 和不均匀任务可能延长总完成时间。调度策略、资源用量、tile 大小和驻留 CTA 数互相影响，所以单个吞吐数字不足以决定最佳方案。
 
+参考答案使用 static persistent 分配，让每个 CTA 依次处理多个 query tile；causal 任务跨所有 batch/head 按 query 位置从后向前排序，先安排所有 head 的较长工作块，再推进到较短块。网格规模受设备 SM 数量限制。prepare 配置 persistent=False 可在相同输入域和数值选项下关闭网格限额与全局 causal 长任务优先映射，作为整个调度策略的对照；该对比不能单独证明任务排序的收益。需要同时考虑增加驻留机会与延长单个 CTA 生命周期的代价。
+
 结业实验面向一个明确工作负载集合：少 heads、多 heads、长序列、causal，以及合法尾部。先为每一种变更提出可被结果推翻的假设，再在相同代码指纹和环境下运行正确性、sanitizer 与双边基线。展示所有目标 case 的结果及损失，说明实现何时快、何时慢、为什么仍有差距。
 
 ## 定义、代码与参考
@@ -19,7 +21,7 @@ causal attention 的不同 query 区域拥有不同有效 key 数，工作量呈
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
 
-源码阅读：FA4 论文 §3.3；本地 tile_scheduler.py、flash_fwd_sm100.py 与 solutions/s43_schedule/。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：[kernel.cu](../../solutions/s43_schedule/kernel.cu) 与 [sm100_attention.cuh](../../solutions/s40_attention/sm100_attention.cuh) 中的调度、mask helper；FA4 论文 §3.3 用于对照工作量分配。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -27,7 +29,7 @@ causal attention 的不同 query 区域拥有不同有效 key 数，工作量呈
 |---|---|---|---|---|
 | `small` | debug | `(1, 128, 1, 64)` | bf16/full | 单头基线，先核对 O 与自然对数 LSE。 |
 | `heads` | debug | `(2, 256, 3, 64)` | bf16/full | B、H 均非一，识别 BNHD 与 BHND 混淆。 |
-| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Zero Q/K and nonzero V: verify mean of V, not vacuous zero output. |
+| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Q/K 为零而 V 非零，检查 V 的均值与完整输出写入。 |
 | `large_logits` | stress | `(1, 256, 2, 128)` | bf16/full | 较大 QK，检查数值稳定性和输出舍入。 |
 | `scale` | debug | `(1, 128, 2, 64)` | bf16/full | 显式 scale，防止硬编码 1/sqrt(D)。 |
 | `single` | edge | `(1, 1, 2, 64)` | bf16/full | 单 token 无归约长度，输出应等于 V。 |
@@ -39,7 +41,9 @@ causal attention 的不同 query 区域拥有不同有效 key 数，工作量呈
 | `long_sequence` | perf | `(1, 4096, 8, 128)` | bf16/full | 长 key 循环，观察融合和流水线的稳态作用。 |
 | `fp16_tail` | edge | `(2, 257, 2, 128)` | fp16/causal | FP16 动态范围、causal 与尾部。 |
 | `causal_perf` | perf | `(1, 4096, 8, 128)` | bf16/causal | 三角工作量下的尾部调度。 |
-| `causal_uniform` | edge | `(1, 128, 2, 64)` | bf16/causal | Uniform causal weights require the exact prefix mean of nonzero V. |
+| `causal_uniform` | edge | `(1, 128, 2, 64)` | bf16/causal | 均匀 causal 权重要求输出为非零 V 的精确前缀均值。 |
+| `persistent_waves` | perf | `(1, 8192, 8, 128)` | bf16/causal | 512 个 query tile，在 B200 上超过两倍 SM 的 grid 上限；检验跨任务 barrier 重置、状态复用及长任务优先。 |
+| `persistent_reuse` | stress | `(1, 128, 512, 64)` | bf16/causal | 512 个短 query task，检查跨任务 barrier/TMEM/Q 缓冲复用，适合逐访存 sanitizer。 |
 
 `debug` 用于缩小问题，`edge` 检验边界，`stress` 检验数值或生命周期，`perf` 选择代表性工作负载；所有声明案例都必须通过正确性验收。case 0 是第一行；用 `task -v` 查看序号。
 

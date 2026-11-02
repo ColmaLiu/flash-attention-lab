@@ -6,7 +6,7 @@
 
 TMA、矩阵引擎和普通线程执行单元可以并行工作，但它们对数据的就绪条件不同。warp specialization 将角色分开，让各自推进适合的任务；这同时使同步参与者、buffer 释放时机和寄存器需求更难推理。
 
-先把 s31 的依赖画成有向图，区分必要依赖与保守等待，再比较参考代码如何组织生产与消费。检查第一次使用、每次回绕及最后一次释放。性能比较必须包含短 K 与长 K：稳态更快的实现也可能因准备开销或驻留 CTA 减少而输在短任务。
+答案保持 s31 的 128×128×64 tile，增加三组 operand 缓冲和独立的 TMA producer warp。TMA 完成将 full barrier 推进，MMA 完成将 empty barrier 推进；producer 只有等到 empty 才能覆盖旧数据，MMA 只有等到 full 才能消费新数据。先把 s31 的依赖画成有向图，区分必要依赖与保守等待，再比较参考代码如何组织生产与消费。检查第一次使用、每次回绕及最后一次释放；最终 TMEM 读取还须以 `wait::ld` 和 before/after-thread-sync fence 包围的 CTA 交接，保证释放发生在所有读取之后。性能比较必须包含短 K 与长 K：稳态更快的实现也可能因准备开销或驻留 CTA 减少而输在短任务。
 
 ## 定义、代码与参考
 
@@ -16,10 +16,10 @@ TMA、矩阵引擎和普通线程执行单元可以并行工作，但它们对�
 
 - 学生入口：[students/cuda/s32_specialize/kernel.cu](../../students/cuda/s32_specialize/kernel.cu)，host workspace 声明在同目录 `entry.py`。
 - 完整可读答案：[solutions/s32_specialize/](../../solutions/s32_specialize/)。可以先独立实现，也可以阅读答案后做控制变量实验；学生入口不会调用答案。
-- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
+- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；对已经量化的相同输入执行 FP64 矩阵乘，输出按公共契约比较。
 - 快速库基线：cuBLAS GEMM；保持输入 dtype 与 FP32 输出一致。
 
-源码阅读：本地 CUTLASS SM100 collective 与 pipeline 源码，solutions/s32_specialize/；PTX tcgen05 commit/completion。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：[kernel.cu](../../solutions/s32_specialize/kernel.cu) 与共享的 [kernel_impl.cuh](../../solutions/s31_tcgen/kernel_impl.cuh)；PTX tcgen05 commit/completion。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 

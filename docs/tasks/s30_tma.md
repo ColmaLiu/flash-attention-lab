@@ -6,7 +6,7 @@
 
 TMA 用 host 编码的 tensor descriptor 表达多维数据，减少线程逐元素计算地址与发起 copy 的工作。它并不消除对布局、对齐和边界的推理。输入描述符的 stride 合法性必须与实际连续存储一致，输出转置的 ownership 仍需由 kernel 决定。
 
-本关沿用 s00 的数学语义，让你专注于同步协议：一个事务被发起、写入完成、对消费者可见、随后 buffer 可复用，是相互关联但不同的事件。mbarrier 的参与计数、事务字节和 phase 必须对应实际工作。短输入、多轮复用和尾部都需要验证；单次 copy 成功不足以证明协议正确。
+本关沿用 s00 的数学语义，让你专注于同步协议：一个事务被发起、写入完成、对消费者可见、随后 buffer 可复用，是相互关联但不同的事件。mbarrier 的参与计数、事务字节和 phase 必须对应实际工作。TMA 完成后的读取和下一次 TMA 覆盖属于不同代理：每个线程从 tile 做完 generic load 后执行 `fence.proxy.async.shared::cta`，再由 CTA barrier 汇合，才能让发起线程安全地复用槽。只在发起线程执行 fence 不覆盖其他读者的访问。该顺序对照 PTX 8.7 §9.7.9.25.2；短输入、多轮复用和尾部都需要验证，单次 copy 成功不足以证明协议正确。
 
 ## 定义、代码与参考
 
@@ -16,10 +16,10 @@ y[j,i]=x[i,j]，逐元素精确。为合法 TMA 行步长，本关 FP32 输入�
 
 - 学生入口：[students/cuda/s30_tma/kernel.cu](../../students/cuda/s30_tma/kernel.cu)，host workspace 声明在同目录 `entry.py`。
 - 完整可读答案：[solutions/s30_tma/](../../solutions/s30_tma/)。可以先独立实现，也可以阅读答案后做控制变量实验；学生入口不会调用答案。
-- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
+- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；使用独立张量转置定义检查元素与坐标。
 - 快速库基线：PyTorch 原生 CUDA 算子，预分配输出；它是可运行的性能比较对象。
 
-源码阅读：PTX ISA cp.async.bulk.tensor、mbarrier；本地 solutions/s30_tma/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：PTX ISA cp.async.bulk.tensor、mbarrier；本地 solutions/s30_tma/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 

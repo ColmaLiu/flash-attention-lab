@@ -38,13 +38,6 @@
     "version": "fa4-v4.0.0.beta35"
   },
   {
-    "name": "CUTLASS v4.4.1 setup",
-    "url": "https://github.com/NVIDIA/cutlass/blob/4370102f9dacab813282e1d67722fceb0b90a019/python/CuTeDSL/setup.sh",
-    "commit": "4370102f9dacab813282e1d67722fceb0b90a019",
-    "sha256": "dd07c90fbc211cdc8416bcc425eef239351b9ce3578aba27c296344279e92ae6",
-    "version": "v4.4.1"
-  },
-  {
     "id": "cutlass",
     "name": "CUTLASS C++ implementation",
     "url": "https://github.com/NVIDIA/cutlass.git",
@@ -58,7 +51,6 @@
     "url": "https://github.com/Dao-AILab/flash-attention.git",
     "path": "third_party/flash-attention",
     "version_source": "gitlink:third_party/flash-attention",
-    "patches": "patches/flash-attention/rescale-threshold.patch",
     "license": "BSD-3-Clause"
   }
 ]

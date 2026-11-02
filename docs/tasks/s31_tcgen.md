@@ -6,7 +6,7 @@
 
 Blackwell 的 tcgen05 MMA 与传统 warp 同步矩阵指令具有不同的完成语义，accumulator 存在 TMEM。SMEM operand descriptor 描述输入，TMEM 地址描述结果，它们都不是普通的全局指针。理解指令合法域与资源 lifetime，比先追求复杂流水线更重要。
 
-本关参考使用固定版本 CUTLASS 的完整 Blackwell 源码。沿着 host 参数、collective、MMA、epilogue 阅读，定位真实的 tcgen05 发起、完成通知和 TMEM 访问。先让完整 GEMM 正确覆盖多 CTA 和长 K，再用 s32 讨论角色划分与 overlap。不要把能够编译一个 intrinsic 当作完整验证。
+参考答案直接使用 CUDA C++ 与内联 PTX 实现完整 GEMM。CTA 处理 128×128 输出块，每次推进 64 个 K 元素，单缓冲按 TMA 搬运、tcgen05 MMA、完成等待的顺序执行。沿 `kernel_impl.cuh` 跟踪 descriptor 编码、TMEM 分配与释放、MMA 完成通知和输出写回，再用 s32 研究如何交错这些操作。TMEM load 的 `wait::ld` 保证本线程完成，读取后的 `before_thread_sync → CTA barrier → after_thread_sync` 则建立跨线程的释放顺序，不能用其中一项替代另一项。多 CTA、长 K 与边界输出都是完整验证的一部分。
 
 ## 定义、代码与参考
 
@@ -16,10 +16,10 @@ BF16 A[M,K]、B[K,N]，FP32 C[M,N]。M 是 64 的倍数、N 是 8 的倍数、K 
 
 - 学生入口：[students/cuda/s31_tcgen/kernel.cu](../../students/cuda/s31_tcgen/kernel.cu)，host workspace 声明在同目录 `entry.py`。
 - 完整可读答案：[solutions/s31_tcgen/](../../solutions/s31_tcgen/)。可以先独立实现，也可以阅读答案后做控制变量实验；学生入口不会调用答案。
-- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
+- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；对已经量化的相同输入执行 FP64 矩阵乘，输出按公共契约比较。
 - 快速库基线：cuBLAS GEMM；保持输入 dtype 与 FP32 输出一致。
 
-源码阅读：third_party/cutlass/examples/cute/tutorial/blackwell/ 与 include/cute/arch/ 的 SM100 源码；solutions/s31_tcgen/。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：[kernel.cu](../../solutions/s31_tcgen/kernel.cu) 与 [kernel_impl.cuh](../../solutions/s31_tcgen/kernel_impl.cuh)；先跟踪一个 CTA 的完整 K 循环，再对照 PTX tcgen05 指令说明。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 

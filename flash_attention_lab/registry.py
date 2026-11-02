@@ -32,22 +32,19 @@ def fingerprint(e):
     paths = [ROOT / name for name in ("curriculum.json", "docs/sources.lock.json", "pyproject.toml", "requirements.txt", "environment.yml")]
     settings = {key: os.environ.get(key) for key in ("LAB_NVCC_FLAGS", "CXX", "CC", "LAB_CUDA_HOME", "CUDA_HOME", "CUDA_VISIBLE_DEVICES", "LAB_GPU")}
     packages = {}
-    for name in ("torch", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base", "cuda-python", "cuda-bindings", "ninja", "quack-kernels", "apache-tvm-ffi", "torch-c-dlpack-ext", "einops"):
+    for name in ("torch", "ninja"):
         try: packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError: packages[name] = None
     h.update(json.dumps({"settings": settings, "packages": packages}, sort_keys=True).encode())
     if (ROOT / ".gitmodules").is_file():
         paths.append(ROOT / ".gitmodules")
-    for folder in ("students", "solutions", "benchmarks", "flash_attention_lab", "patches"):
+    for folder in ("students", "solutions", "benchmarks", "flash_attention_lab"):
         paths += sorted(p for p in (ROOT / folder).rglob("*")
-                        if p.suffix in (".py", ".cu", ".cuh", ".h", ".hpp", ".cpp", ".json", ".patch"))
-    from .cpp_dependencies import cpp_include_paths, require_source, source_snapshot
+                        if p.suffix in (".py", ".cu", ".cuh", ".h", ".hpp", ".cpp", ".json"))
+    from .cpp_dependencies import source_snapshot
     versions = {name: {key: info[key] for key in ("expected_commit", "commit", "state")}
                 for name, info in source_snapshot().items()}
     h.update(json.dumps(versions, sort_keys=True).encode())
-    for headers in cpp_include_paths():
-        paths += sorted(p for p in headers.rglob("*") if p.is_file())
-    paths += sorted((require_source("flash-attention") / "flash_attn/cute").rglob("*.py"))
     for p in paths:
         h.update(str(p.relative_to(ROOT) if p.is_relative_to(ROOT) else p).encode())
         h.update(p.read_bytes())

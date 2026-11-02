@@ -13,20 +13,18 @@ def build_cuda(exercise_id, *, solution=False):
     from .environment import require_environment
     from .runtime import cuda_home, cuda_development_paths
     from .registry import EXERCISES
-    from .cpp_dependencies import cpp_include_paths
     require_environment("cuda")
     toolkit = cuda_home()
     cuda_includes, cuda_library = cuda_development_paths(toolkit)
-    dependency_includes = cpp_include_paths()
     source = (ROOT / "flash_attention_lab/infra_smoke.cu" if exercise_id == "infra_smoke"
               else (ROOT / "solutions" / exercise_id if solution else student_dir(EXERCISES[exercise_id])) / "kernel.cu")
-    includes = tuple(map(str, [ROOT / "flash_attention_lab", *cuda_includes, *dependency_includes]))
+    includes = tuple(map(str, [ROOT / "flash_attention_lab", *cuda_includes]))
     flags = ("-O3", "-lineinfo", "-std=c++17", "-gencode=arch=compute_100a,code=sm_100a",
              *shlex.split(os.environ.get("LAB_NVCC_FLAGS", "")))
     binding = source.parent / "binding.cpp"
     if not binding.is_file():
         binding = ROOT / "flash_attention_lab/binding.cpp"
-    # Changes to local helpers and fixed dependency headers invalidate the in-process
+    # Changes to local helpers invalidate the in-process
     # module too. Ninja alone is insufficient: cpp_extension also caches loaded modules.
     digest = hashlib.sha256()
     sources = [binding, ROOT / "flash_attention_lab/cuda_api.h", source]
@@ -51,10 +49,6 @@ def build_cuda(exercise_id, *, solution=False):
                     if helper.is_relative_to(ROOT.resolve()):
                         pending.append(helper)
                     break
-    for include in dependency_includes:
-        for path in sorted(p for p in include.rglob("*") if p.is_file()):
-            stat = path.stat()
-            digest.update(f"{path}:{stat.st_mtime_ns}:{stat.st_size}".encode())
     configuration = (str(toolkit), str(cuda_library), includes, flags, os.environ.get("CXX", "c++"), os.environ.get("CC", ""))
     digest.update(repr(configuration).encode())
     tag = digest.hexdigest()[:16]

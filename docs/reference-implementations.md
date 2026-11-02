@@ -1,49 +1,56 @@
-# 完整参考实现与源码阅读
+# 参考答案：从代码定位困难，再验证优化
 
-`solutions/` 提供可执行答案和实验配置，上游完整代码通过 `third_party/` 下的 Git submodule 引入。父仓库 gitlinks 固定版本，克隆与初始化方式如下：
+参考答案是在学生编写遇到困难时可以直接学习、修改和测量的 CUDA C++/PTX 实现。数学公式、线程分工、内存布局、指令与同步必须能沿着本地源码逐项对应；核心计算不能隐藏在库调用或编译 DSL 后面。答案还必须具备有用的性能：通过代表性输入与相邻阶段、优化库对比，确认其优化机制生效，并解释剩余差距。
 
-```bash
-git clone https://github.com/ColmaLiu/flash-attention-lab.git
-cd flash-attention-lab
-git submodule update --init -- third_party/cutlass third_party/flash-attention
-bash scripts/bootstrap.sh
-```
+`solutions/` 保存完整设备源码和 host 准备代码。每课从 `entry.py` 进入 `kernel.cu`；需要复用时只共享本仓库内可直接阅读的 helper。输出与学生入口使用相同契约。FP64 oracle 用于判断数学正确性，优化库用于判断性能差距；两者均有独立入口，不能代替参考答案。
 
-| 上游 | 路径 | gitlink 对应 commit | 许可证 |
-|---|---|---|---|
-| NVIDIA CUTLASS v4.4.1 | `third_party/cutlass` | `4370102f9dacab813282e1d67722fceb0b90a019` | [BSD-3-Clause](../third_party/cutlass/LICENSE.txt) |
-| Dao-AILab FlashAttention beta35 | `third_party/flash-attention` | `1fc0221183e799363001394a12dd9e78e15f5dda` | [BSD-3-Clause](../third_party/flash-attention/LICENSE) |
+## 阅读顺序
 
-学生入口使用 CUDA C++/PTX。答案中的 s22/s31/s32 使用 C++ CuTe 表达布局与指令，阶段 4 使用上游 CuTe DSL 生产 kernel。`bootstrap` 安装包括 CuTe DSL、quack、TVM FFI、DLPack 支持在内的完整课程依赖；版本由项目依赖声明固定。
+先运行 `./lab check ID --solution --case 0`，再结合输入 shape 阅读下面的设备入口。跟踪一个线程、一个 warp 或一个 CTA 拥有哪些元素，逐项核对地址、有效范围、同步参与者与数据释放时机。遇到共用 helper 时继续读到实际指令，不止于 host 参数或 kernel launch。
 
-## 从执行入口到设备实现
+| 课程 | 本地设备入口 | 阅读重点 |
+|---|---|---|
+| s00_layout | [kernel.cu](../solutions/s00_layout/kernel.cu) | 线程与坐标、合并访存、shared-memory 转置 |
+| s01_softmax | [kernel.cu](../solutions/s01_softmax/kernel.cu) | 最大值与求和归约、宽行分工、稳定归一化 |
+| s10_gemm | [kernel.cu](../solutions/s10_gemm/kernel.cu) | SIMT 分块、寄存器输出块、尾部处理 |
+| s11_materialized | [kernel.cu](../solutions/s11_materialized/kernel.cu) | QK、softmax、PV 三步的临时内存与 dtype |
+| s12_online | [kernel.cu](../solutions/s12_online/kernel.cu) | half-warp 行 ownership、转置/padding shared 布局、行统计与 O 的 rescale |
+| s20_mma | [kernel.cu](../solutions/s20_mma/kernel.cu) | PTX mma.sync/ldmatrix、CTA 复用、显式 fragment 与 FP32 accumulation |
+| s21_pipeline | [kernel.cu](../solutions/s21_pipeline/kernel.cu) | `cp.async`、缓冲回绕与完成等待 |
+| s22_fa2 | [kernel.cu](../solutions/s22_fa2/kernel.cu)、[fa2_optimized.cuh](../solutions/s22_fa2/fa2_optimized.cuh) | `mma.sync`、`ldmatrix`、shared-memory swizzle，寄存器 softmax 与 P fragment |
+| s30_tma | [kernel.cu](../solutions/s30_tma/kernel.cu) | TMA descriptor、事务 barrier 与数据可见性 |
+| s31_tcgen | [kernel.cu](../solutions/s31_tcgen/kernel.cu)、[kernel_impl.cuh](../solutions/s31_tcgen/kernel_impl.cuh) | 单缓冲 TMA→MMA→等待、SMEM descriptor、TMEM lifetime 和输出交接 |
+| s32_specialize | [kernel.cu](../solutions/s32_specialize/kernel.cu)、[共享设备实现](../solutions/s31_tcgen/kernel_impl.cuh) | 三缓冲 producer/consumer、TMA full 与 MMA empty barrier 的独立 phase 回绕 |
+| s40_attention | [kernel.cu](../solutions/s40_attention/kernel.cu)、[sm100_attention.cuh](../solutions/s40_attention/sm100_attention.cuh) | TMA、tcgen05 QK/PV、TMEM 分数，寄存器统计与 O，顺序完成每个 key tile |
+| s41_overlap | [kernel.cu](../solutions/s41_overlap/kernel.cu)、[共享设备实现](../solutions/s40_attention/sm100_attention.cuh) | KV 与 score 双缓冲，下一块 QK 与当前 softmax/correction 交错 |
+| s42_numerics | [kernel.cu](../solutions/s42_numerics/kernel.cu)、[共享设备实现](../solutions/s40_attention/sm100_attention.cuh) | 默认 SFU+conditional rescale；混合多项式指数独立消融，分别研究误差和吞吐 |
+| s43_schedule | [kernel.cu](../solutions/s43_schedule/kernel.cu)、[共享设备实现](../solutions/s40_attention/sm100_attention.cuh) | static persistent、跨 batch/head 的 causal 长任务优先、FP16/BF16 与尾部 |
 
-| 课程 | 执行入口 | 完整设备实现与阅读重点 | 实验配置 |
-|---|---|---|---|
-| s22_fa2 | [kernel.cu](../solutions/s22_fa2/kernel.cu)、[fa2_optimized.cuh](../solutions/s22_fa2/fa2_optimized.cuh) | 本地 attention 实现及 CUTLASS CuTe layout/MMA/copy atoms；[WMMA 答案](../solutions/s22_fa2/wmma_readable.cuh) 展示各数学阶段 | CUDA C++ CuTe 与 WMMA 两种实现使用同一公共契约 |
-| s31_tcgen | [kernel.cu](../solutions/s31_tcgen/kernel.cu)、[host 集成](../solutions/s31_tcgen/kernel_impl.cuh) | [SM100 collective](../third_party/cutlass/include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp)、[tcgen05 atom](../third_party/cutlass/include/cute/arch/mma_sm100_umma.hpp)、[TMA 教程](../third_party/cutlass/examples/cute/tutorial/blackwell/02_mma_tma_sm100.cu) | 固定两个 K buffers |
-| s32_specialize | [kernel.cu](../solutions/s32_specialize/kernel.cu) | 同一 SM100 collective、`include/cutlass/pipeline` 与 epilogue collective | 按 shared-memory 预算选择 K buffers，保持 tile/dtype 相同 |
-| s40_attention | [entry.py](../solutions/s40_attention/entry.py)、[编译入口](../solutions/s40_attention/fa4_reference.py) | [flash_fwd_sm100.py](../third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py) 中 TMA、MMA、TMEM、softmax、correction 与 epilogue | q_stage=1；硬件 exp；rescale threshold=0；非 persistent |
-| s41_overlap | [entry.py](../solutions/s41_overlap/entry.py) | forward 的双 query stage 与 [pipeline.py](../third_party/flash-attention/flash_attn/cute/pipeline.py) | q_stage=2，其余保持 s40 配置 |
-| s42_numerics | [entry.py](../solutions/s42_numerics/entry.py) | [softmax.py](../third_party/flash-attention/flash_attn/cute/softmax.py)、[utils.py](../third_party/flash-attention/flash_attn/cute/utils.py) 与 forward 的 rescale 分支 | emulated exp 与 threshold=8，可分别做消融 |
-| s43_schedule | [entry.py](../solutions/s43_schedule/entry.py) | [tile_scheduler.py](../third_party/flash-attention/flash_attn/cute/tile_scheduler.py) 与 forward 的选择逻辑 | static persistent；causal 采用源码中的 LPT 选择 |
+s40–s43 共享一个完整 CUDA C++/PTX 实现，各课 `kernel.cu` 明确选择本课的编译配置。公共 tile 为 128 个 query、64 个 key，head dimension 为 64 或 128。TMA 直接描述 BNHD；QK 分数和 PV 更新使用 TMEM，online 行统计与跨 key tile 的 O 累加保存在 FP32 寄存器中。阅读共享代码时始终对照当前课的配置，区分硬件机制与尚未启用的优化。
 
-s31/s32 都使用 producer/consumer warp 角色，可执行比较隔离缓冲数量。先通过 [01_mma_sm100.cu](../third_party/cutlass/examples/cute/tutorial/blackwell/01_mma_sm100.cu) 和 02 教程理解各机制，再在生产 collective 中阅读其组合。s40 的单 query stage 也使用异步引擎；s41 增加跨 query stage 的交错。四个 attention 答案共享完整生产源码，并在配置中明确各课研究的变量。
+## 怎样判断答案能否帮助优化
 
-## 可审阅的 FA4 补丁
-
-[rescale-threshold.patch](../patches/flash-attention/rescale-threshold.patch) 把上游 16-bit softmax 路径中固定的 rescale threshold 暴露为构造参数，默认值 8.0 保持上游策略。课程以 0.0 研究 exact rescale，以 8.0 研究 conditional rescale。
-
-公共设施从 gitlink 指定源码和补丁生成 `.cache/sources/` 下的编译副本，上游 submodule 保持干净。源码与补丁参与构建和验收指纹；修改后重新准备与验证。exp 与 query stage 使用已有对象配置。
-
-## 执行与比较
+单个小输入能通过数值检查，只说明该输入计算正确。先通过整课 correctness cases、非默认 stream 与重复调用检查，再运行每个 `perf` case：
 
 ```bash
-./lab check s31_tcgen --solution
-./lab solution s31_tcgen --case 5
-./lab check s40_attention --solution --case 0 --timeout 300
-./lab check s40_attention --solution --timeout 600
-./lab solution s40_attention --case 8 --timeout 600
+./lab task s22_fa2 -v
+./lab check s22_fa2 --solution
+./lab solution s22_fa2 --case 9
+./lab solution s22_fa2 --case 10
+./lab solution s22_fa2 --case 11
 ```
 
-prepare 完成描述符、输出/workspace 分配和编译，随后在指定 stream 上运行设备工作。attention 输入/输出是 BNHD，LSE 是 BHN。公共 benchmark 对比相同输出集合、输入值和 dtype，分别报告 graph/eager 与库基线。完整正确性还包括全 case、重复调用、非默认 stream 和 sanitizer，方法见 [验证流程](validation.md)。
+记录答案与优化库在相同输入、输出集合和计时模式下的延迟；阶段间比较使用共同支持的输入与 dtype。指出优化减少了什么工作或等待、增加了什么资源，以及哪些输入受益。不能将“代码较容易阅读”作为严重性能缺口的解释，也不能把某个 case 的收益外推到整课。维护答案时须定位影响主要 perf case 的缺口并改进实现，再提交可复现的结果。
+
+prepare 完成描述符、输出/workspace 分配和编译，计时只覆盖准备后的执行。attention 输入/输出是 BNHD，LSE 是 BHN。CUDA Graph 与 eager 分别比较。验证方法见 [validation](validation.md)，计时边界见 [benchmarking](benchmarking.md)。
+
+## 上游源码的用途
+
+固定上游用于核对论文与生产实现的关系、指令语义及设计取舍。课程的可执行答案在 `solutions/`；阅读一个本地 kernel 不需要先理解整个上游框架。
+
+| 上游 | 固定版本 | 源码与许可 |
+|---|---|---|
+| NVIDIA CUTLASS | v4.4.1 / `4370102f9dacab813282e1d67722fceb0b90a019` | [submodule](../third_party/cutlass/)、[BSD-3-Clause](../third_party/cutlass/LICENSE.txt) |
+| Dao-AILab FlashAttention | beta35 / `1fc0221183e799363001394a12dd9e78e15f5dda` | [submodule](../third_party/flash-attention/)、[BSD-3-Clause](../third_party/flash-attention/LICENSE) |
+
+父仓库 gitlinks 固定上游版本，`bash scripts/bootstrap.sh` 完成初始化。算法与指令资料见 [sources](sources.md)。直接改编的代码须在文件与答案目录中保留来源和许可；独立实现也应明确设计所依据的论文或指令文档。

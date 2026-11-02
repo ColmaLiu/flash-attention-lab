@@ -4,9 +4,9 @@
 
 ## 优化 softmax 的成本必须有数值预算
 
-指数单元、普通 FP32 算术和矩阵引擎的吞吐比例不同，软件近似可以改变资源使用，而非只是减少指令条数。近似误差应先在指数区间独立测量，再观察概率归一化和低精度舍入如何传播到 O。输入分布不同，优化收益与误差也会不同。
+指数单元、普通 FP32 算术和矩阵引擎的吞吐比例不同，软件近似可以改变资源使用，而非只是减少指令条数。参考答案提供独立的混合指数与 conditional rescale 开关。默认使用 SFU exp2 与延迟 rescale；开启 polynomial_exp 后，在相邻列间交错 SFU 与经过范围规约的六阶多项式指数。近似误差应先在指数区间独立测量，再观察概率归一化和低精度舍入如何传播到 O。输入分布不同，优化收益与误差也会不同。
 
-条件 rescale 试图避免不必要的历史状态修正，但必须解释当前状态的尺度以及允许的动态范围。max_ramp 让后续 key 的分数持续变大，用于暴露只在平稳随机输入下看似正确的实现。分别通过配置控制指数策略和 rescale threshold，并以固定输入做消融，记录误差和吞吐各自的变化。
+条件 rescale 试图避免不必要的历史状态修正，但必须解释当前状态的尺度以及允许的动态范围。max_ramp 让后续 key 的分数持续变大，用于暴露只在平稳随机输入下看似正确的实现。通过 prepare 的 polynomial_exp 与 delayed_rescale 配置分别控制两种策略；固定输入运行四种组合，记录误差和吞吐各自的变化。延迟 rescale 在参考值不变时跳过 D 个 O 元素的乘法。具体配置示例见 [答案 README](../../solutions/s42_numerics/README.md)。
 
 ## 定义、代码与参考
 
@@ -19,7 +19,7 @@ LSE 始终是自然对数。保持已有 O/LSE 容差；若某近似达不到预
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
 - 快速库基线：强制 cuDNN fused attention，返回 O+LSE；拒绝静默回退到数学实现。
 
-源码阅读：FA4 论文 §3.1.3–3.1.4；本地 softmax/exp 相关 helper 及 flash_fwd_sm100.py 的 rescale 分支。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：[kernel.cu](../../solutions/s42_numerics/kernel.cu) 与 [sm100_attention.cuh](../../solutions/s40_attention/sm100_attention.cuh) 中的 softmax/exp helper；FA4 论文 §3.1.3–3.1.4 用于对照数值策略。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -27,7 +27,7 @@ LSE 始终是自然对数。保持已有 O/LSE 容差；若某近似达不到预
 |---|---|---|---|---|
 | `small` | debug | `(1, 128, 1, 64)` | bf16/full | 单头基线，先核对 O 与自然对数 LSE。 |
 | `heads` | debug | `(2, 256, 3, 64)` | bf16/full | B、H 均非一，识别 BNHD 与 BHND 混淆。 |
-| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Zero Q/K and nonzero V: verify mean of V, not vacuous zero output. |
+| `uniform` | debug | `(1, 128, 2, 64)` | bf16/full | Q/K 为零而 V 非零，检查 V 的均值与完整输出写入。 |
 | `large_logits` | stress | `(1, 256, 2, 128)` | bf16/full | 较大 QK，检查数值稳定性和输出舍入。 |
 | `scale` | debug | `(1, 128, 2, 64)` | bf16/full | 显式 scale，防止硬编码 1/sqrt(D)。 |
 | `rising_max` | stress | `(1, 512, 2, 128)` | bf16/full | 后续 key 的最大值上升，检验历史状态 rescale。 |

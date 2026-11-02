@@ -9,7 +9,14 @@ template<int D>
 __global__ void attention(const float* q, const float* k, const float* v,
                           float* o, float* lse, int n, int heads,
                           float scale, bool causal) {
-    __shared__ float qs[16][D], ks[32][D], vs[32][D], weights[16][32];
+    // A warp consists of two half-warps owning adjacent query rows. Sixteen
+    // padding floats put their Q broadcasts (and contiguous initial writes)
+    // in disjoint bank halves instead of different words of the same bank.
+    __shared__ float qs[16][D + 16];
+    // QK lanes vary in key while the reduction column is fixed: transpose K
+    // so ks[col][key] is contiguous. The extra column keeps global-coalesced
+    // tile stores bank-conflict-free as their lanes vary in col instead.
+    __shared__ float ks[D][33], vs[32][D], weights[16][32];
     int lane = threadIdx.x, query_local = threadIdx.y;
     int tid = query_local * 16 + lane;
     int query = blockIdx.x * 16 + query_local;
@@ -27,7 +34,7 @@ __global__ void attention(const float* q, const float* k, const float* v,
         for (int index = tid; index < 32 * D; index += 256) {
             int row = index / D, col = index % D;
             int64_t offset = base + (int64_t)(start + row) * heads * D + col;
-            ks[row][col] = start + row < n ? k[offset] : 0;
+            ks[col][row] = start + row < n ? k[offset] : 0;
             vs[row][col] = start + row < n ? v[offset] : 0;
         }
         __syncthreads();
@@ -38,7 +45,7 @@ __global__ void attention(const float* q, const float* k, const float* v,
             float dot = 0, error = 0;
             #pragma unroll
             for (int col = 0; col < D; ++col) {
-                float a = qs[query_local][col], b = ks[key][col];
+                float a = qs[query_local][col], b = ks[col][key];
                 float product = __fmul_rn(a, b), next = __fadd_rn(dot, product);
                 float residual = fabsf(dot) >= fabsf(product) ? __fadd_rn(__fsub_rn(dot, next), product) : __fadd_rn(__fsub_rn(product, next), dot);
                 error += residual + fmaf(a, b, -product);

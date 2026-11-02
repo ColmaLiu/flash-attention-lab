@@ -8,7 +8,7 @@ from .environment import require_environment, snapshot
 from .errors import CorrectnessFailure
 from .reference import mathematical_reference
 from .registry import ROOT, fingerprint, load_student
-from .timing import measure, measure_graph, measure_graph_pair
+from .timing import measure, measure_graph, measure_graph_group
 from .reporting import save_artifact  # retained for callers of the original entry point
 
 
@@ -149,32 +149,48 @@ def reference(e, case_index, warmup=5, repeats=7, iterations=10):
 
 
 def benchmark(e, case_index, warmup, repeats, iterations, *, solution=False):
-    """Compare the validated student and fast library on identical inputs.
+    """Compare validated CUDA/PTX kernels and the library on identical inputs.
 
-    CUDA graph replay is the comparison metric. Eager API spans are separately
-    reported because the library may allocate internally and Python dispatch
-    costs differ. Output layout copies are inside the library's timed launch.
+    Student runs include the complete solution as a third candidate. Each kernel
+    retains its own tuning CONFIG; only the case's mathematical options are shared.
     """
     from benchmarks.reference_backends import prepare_reference
     validation = check(e, case_index, solution=solution)
+    solution_validation = None if solution else check(e, case_index, solution=True)
     case = e["cases"][case_index]
-    inputs, cfg = make_inputs(e, case, "cuda")
-    cfg = {**load_student(e, solution=solution).CONFIG, **cfg}
+    inputs, math_cfg = make_inputs(e, case, "cuda")
+    cfg = {**load_student(e, solution=solution).CONFIG, **math_cfg}
+    answer_cfg = {**load_student(e, solution=True).CONFIG, **math_cfg} if not solution else None
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         saved = {name: tensor.clone() for name, tensor in inputs.items()}
-        # Oracle is fixed before either implementation can touch the inputs.
-        oracle = mathematical_reference(e["kind"], inputs, cfg)
+        # The oracle and original inputs are fixed before any candidate prepares.
+        oracle = mathematical_reference(e["kind"], inputs, math_cfg)
         plan = prepare(e["id"], inputs, cfg, solution=solution)
-        baseline = prepare_reference(e, inputs, cfg)
-        measured = _measure_plan(e, plan, inputs, saved, oracle, warmup, repeats, iterations, graph=False)
-        fast = _measure_plan(e, baseline, inputs, saved, oracle, warmup, repeats, iterations, graph=False)
-        measured["timing"], fast["timing"] = measure_graph_pair(plan.launch, baseline.launch, warmup, repeats, iterations)
-        measured["post_timing_errors"] = compare(e, plan.outputs, oracle, inputs)
-        fast["post_timing_errors"] = compare(e, baseline.outputs, oracle, inputs)
+        answer = prepare(e["id"], inputs, answer_cfg, solution=True) if not solution else None
+        baseline = prepare_reference(e, inputs, math_cfg)
+        plans = [plan, *([answer] if answer is not None else []), baseline]
+        # Validate every participant before any timing is exposed, and check input
+        # immutability after each so one candidate cannot alter another's workload.
+        for participant in plans:
+            for tensor in participant.outputs.values():
+                tensor.fill_(float("nan"))
+            participant.launch()
+            stream.synchronize()
+            compare(e, participant.outputs, oracle, inputs)
+            _assert_unchanged(inputs, saved)
+        records = [_measure_plan(e, participant, inputs, saved, oracle,
+                                 warmup, repeats, iterations, graph=False)
+                   for participant in plans]
+        graph_timings = measure_graph_group([participant.launch for participant in plans],
+                                           warmup, repeats, iterations)
+        for participant, record, timing in zip(plans, records, graph_timings):
+            record["timing"] = timing
+            record["post_timing_errors"] = compare(e, participant.outputs, oracle, inputs)
         _assert_unchanged(inputs, saved)
     torch.cuda.current_stream().wait_stream(stream)
+    measured, fast = records[0], records[-1]
     student_ms = measured["timing"]["gpu_stream_ms_median"]
     reference_ms = fast["timing"]["gpu_stream_ms_median"]
     result = {
@@ -192,6 +208,16 @@ def benchmark(e, case_index, warmup, repeats, iterations, *, solution=False):
         "output_and_workspace_bytes": sum(t.numel() * t.element_size()
                                           for t in list(plan.outputs.values()) + list(plan.workspace.values())) + plan.extra_workspace_bytes,
     }
+    if answer is not None:
+        answer_record = records[1]
+        answer_ms = answer_record["timing"]["gpu_stream_ms_median"]
+        result["solution"] = {**answer_record, "provider": "cuda_ptx_solution",
+                              "config": answer_cfg, "validation": solution_validation,
+                              "output_and_workspace_bytes": sum(t.numel() * t.element_size()
+                                  for t in list(answer.outputs.values()) + list(answer.workspace.values())) + answer.extra_workspace_bytes}
+        result["comparison"].update(solution_over_student=answer_ms / student_ms,
+                                    student_over_solution=student_ms / answer_ms,
+                                    solution_over_reference=answer_ms / reference_ms)
     flops = _flops(e, case, cfg, result["timing"])
     if flops:
         result["flops"] = flops

@@ -45,6 +45,9 @@ __global__ void transpose_tma(const CUtensorMap* descriptor, float* out, int row
         // during transpose. The extra copy is visible overhead, not hidden setup.
         for (int offset = 0; offset < 32; offset += 8)
             padded[threadIdx.y + offset][threadIdx.x] = tile[slot][threadIdx.y + offset][threadIdx.x];
+        // Every reader orders its generic loads before this slot is eventually
+        // overwritten by another TMA transaction through the async proxy.
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         __syncthreads();
         int input_row = (index / columns) * 32 + threadIdx.x;
         int input_col = (index % columns) * 32 + threadIdx.y;

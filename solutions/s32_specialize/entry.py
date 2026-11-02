@@ -1,4 +1,4 @@
-"""Pinned CUTLASS SM100 GEMM; setup and workspace allocation occur before timing."""
+"""Native CUDA/PTX SM100 GEMM; tensor-map preparation is outside timing."""
 from flash_attention_lab.build import build_cuda
 IMPLEMENTED = True
 BACKEND = "python"

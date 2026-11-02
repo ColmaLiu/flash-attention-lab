@@ -122,10 +122,11 @@ def doctor(ui, data, verbose):
     ui.line("Driver", compact_version(driver, r"Driver Version:\s*([\d.]+)") + " | CUDA support <= " + compact_version(driver, r"CUDA Version:\s*([\d.]+)"))
     packages = data.get("packages", {})
     ui.line("CUDA", "Toolkit " + compact_version(data.get("nvcc", {}), r"release ([\d.]+)") + " | PyTorch runtime " + str(data.get("torch_cuda_runtime") or "unavailable"))
-    ui.line("Packages", f"PyTorch {packages.get('torch') or 'missing'} | CuTe DSL {packages.get('nvidia-cutlass-dsl') or 'missing'}")
+    ui.line("Packages", " | ".join(f"{label} {packages.get(name) or 'missing'}"
+                                   for label, name in (("PyTorch", "torch"), ("Ninja", "ninja"), ("pytest", "pytest"))))
     ui.line("Python", data.get("python", "unknown").split()[0] + " | Conda " + str(data.get("conda_environment") or "inactive"))
     for backend, state in data.get("checks", {}).items():
-        ui.line("CUDA C++" if backend == "cuda" else "CuTe DSL", "READY" if state == "ENVIRONMENT_OK" else state)
+        ui.line("CUDA C++" if backend == "cuda" else backend, "READY" if state == "ENVIRONMENT_OK" else state)
     tools = data.get("tools", {})
     ui.line("Tools", " | ".join(name + (": available" if tools.get(key) else ": missing") for name, key in [("Sanitizer", "compute-sanitizer"), ("NCU", "ncu")]))
     if verbose:
@@ -133,7 +134,6 @@ def doctor(ui, data, verbose):
             ui.line(label, data.get(key) or "unavailable")
         ui.line("C++", compact_version(data.get("cxx", {})))
         for name, value in tools.items(): ui.line(name, value or "missing")
-        for name, spec in data.get("blackwell_api_symbols", {}).items(): ui.line(name, spec.get("signature") or "unavailable")
         for key in ("nvcc", "cxx", "nvidia_smi", "driver_cuda_ceiling"):
             diagnostic = data.get(key, {})
             if diagnostic.get("code", 0) != 0: ui.line(key, diagnostic.get("error") or diagnostic.get("stderr") or "failed")
@@ -228,18 +228,27 @@ def bench(ui, data, verbose):
     ui.note(case_label(data["case"]))
     ui.line("GPU", data["environment"].get("selected_gpu", {}).get("name", "unknown"))
     rows = []
-    for label, record in [(implementation, data), *([("optimized library", data["reference"])] if "reference" in data else [])]:
+    records = [(implementation, data)]
+    if "solution" in data:
+        records.append(("CUDA/PTX answer", data["solution"]))
+    if "reference" in data:
+        records.append(("optimized library", data["reference"]))
+    for label, record in records:
         timing = record["timing"]
         rows.append([label, *[milliseconds(timing["gpu_stream_ms_" + key]) for key in ("median", "min", "max")]])
     ui.table(["CUDA graph / operation", "Median", "Min", "Max"], rows)
     if "reference" in data:
         ui.line("Backend", data["reference"]["provider"])
         ui.line("Time / library", f"{data['comparison']['student_over_reference']:.3f}x (lower is faster)")
+        if "solution" in data:
+            ui.line("Time / answer", f"{data['comparison']['student_over_solution']:.3f}x (lower is faster)")
     else:
         ui.line("Backend", data.get("provider", "unknown"))
         ui.note("Student implementation: NOT TESTED")
-    if "eager_timing" in data:
-        ui.line("Eager API GPU span", milliseconds(data["eager_timing"]["gpu_stream_ms_median"]))
+    eager_rows = [[label, milliseconds(record["eager_timing"]["gpu_stream_ms_median"])]
+                  for label, record in records if "eager_timing" in record]
+    if eager_rows:
+        ui.table(["Eager API GPU span", "Median"], eager_rows)
     if "flops" in data:
         ui.line("Useful TFLOP/s", number(data["flops"]["useful_tflops"]))
     ui.note("Graph replay excludes compilation, capture and allocation; includes output layout copies.")
@@ -255,8 +264,8 @@ def smoke(ui, data, verbose):
     ui.heading("Infrastructure: PASS")
     ui.line("Imports", f"{data['modules_imported']} modules | {data['input_reference_cases']} input/reference cases")
     if "cuda_stub_bindings_compiled" in data: ui.line("CUDA bindings", f"{len(data['cuda_stub_bindings_compiled'])} compiled")
-    for label, key in [("CUDA", "cuda_sentinel"), ("CuTe", "cute_sentinel")]:
-        if key in data: ui.line(label + " sentinel", "PASS" + (" | " + milliseconds(data[key]["gpu_stream_ms_median"]) if verbose else ""))
+    if "cuda_sentinel" in data:
+        ui.line("CUDA sentinel", "PASS" + (" | " + milliseconds(data["cuda_sentinel"]["gpu_stream_ms_median"]) if verbose else ""))
     ui.line("Student kernels", "NOT TESTED")
     if verbose: ui.line("Stub bindings", ", ".join(data.get("cuda_stub_bindings_compiled", [])) or "none")
 

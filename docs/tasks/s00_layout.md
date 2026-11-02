@@ -16,10 +16,10 @@ y[j,i] = x[i,j]。要求逐元素精确，不涉及浮点误差预算。
 
 - 学生入口：[students/cuda/s00_layout/kernel.cu](../../students/cuda/s00_layout/kernel.cu)，host workspace 声明在同目录 `entry.py`。
 - 完整可读答案：[solutions/s00_layout/](../../solutions/s00_layout/)。可以先独立实现，也可以阅读答案后做控制变量实验；学生入口不会调用答案。
-- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；attention 使用 FP64 的直接数学定义，并按独立 query 行限制临时内存。
+- 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；使用独立张量转置定义检查元素与坐标。
 - 快速库基线：PyTorch 原生 CUDA 算子，预分配输出；它是可运行的性能比较对象。
 
-源码阅读：NVIDIA CUDA Best Practices 的 coalesced global access、shared memory bank conflicts；本地完整答案 solutions/s00_layout/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，上游答案的对应模块见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：NVIDIA CUDA Best Practices 的 coalesced global access、shared memory bank conflicts；本地完整答案 solutions/s00_layout/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 

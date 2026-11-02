@@ -2434,6 +2434,34 @@
         "causal": true,
         "suite": "edge",
         "purpose": "Uniform causal weights require the exact prefix mean of nonzero V."
+      },
+      {
+        "id": "persistent_waves",
+        "shape": [
+          1,
+          8192,
+          8,
+          128
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": true,
+        "suite": "perf",
+        "purpose": "512 \u4e2a query tile\uff1b\u5728 B200 \u4e0a\u8d85\u8fc7\u4e24\u500d SM \u7684\u9a7b\u7559 grid\uff0c\u9a8c\u8bc1\u8de8 task barrier \u91cd\u7f6e\u53ca causal \u957f\u4efb\u52a1\u4f18\u5148\u3002"
+      },
+      {
+        "id": "persistent_reuse",
+        "shape": [
+          1,
+          128,
+          512,
+          64
+        ],
+        "dtype": "bf16",
+        "pattern": "random",
+        "causal": true,
+        "suite": "stress",
+        "purpose": "512 \u4e2a\u77ed query task\uff0c\u8986\u76d6\u540cCTA\u8de8task barrier/TMEM/Q\u7f13\u51b2\u590d\u7528\uff0c\u9002\u5408\u9010\u8bbf\u5b58sanitizer\u68c0\u67e5\u3002"
       }
     ],
     "purpose": "\u6269\u5c55\u5230\u8fb9\u754c\u548c causal\uff0c\u5728\u660e\u786e\u76ee\u6807\u5de5\u4f5c\u8d1f\u8f7d\u4e0a\u4f18\u5316\u8c03\u5ea6\u4e0e\u8d44\u6e90\u5206\u914d\u3002",
