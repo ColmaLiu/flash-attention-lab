@@ -35,4 +35,4 @@ causal 的最早几轮可能整行无有效 key，代码显式处理 `maximum=-i
 
 ## 来源
 
-分工和流式算法依据 [FA2 论文](https://arxiv.org/abs/2307.08691v1)。fragment 转换、反向 key 遍历及 staging 的设计对照为 [FlashAttention v2.7.4.post1](https://github.com/Dao-AILab/flash-attention/tree/5231d95fe13733fb534c01895f7ea88c6a6c7793) 的 `kernel_traits.h`、`utils.h`、`softmax.h`、`flash_fwd_kernel.h`，commit `5231d95fe13733fb534c01895f7ea88c6a6c7793`。沿用改编工作的 [BSD-3-Clause 许可证](../../third_party/flash-attention/LICENSE) 和 [作者署名](AUTHORS.flash-attention)。本地入口、地址计算、PTX 指令及同步均可直接阅读；固定上游源码另用于比较生产实现。
+分工和流式算法依据 [FA2 论文](https://arxiv.org/abs/2307.08691v1)。fragment 转换、反向 key 遍历及 staging 的设计对照为 [FlashAttention v2.7.4.post1](https://github.com/Dao-AILab/flash-attention/tree/5231d95fe13733fb534c01895f7ea88c6a6c7793) 的 `kernel_traits.h`、`utils.h`、`softmax.h`、`flash_fwd_kernel.h`，commit `5231d95fe13733fb534c01895f7ea88c6a6c7793`。沿用改编工作的 [BSD-3-Clause 许可证](../../third_party/flash-attention/LICENSE) 和 [作者署名](../../third_party/flash-attention/AUTHORS)。本地入口、地址计算、PTX 指令及同步均可直接阅读；固定上游源码另用于比较生产实现。
