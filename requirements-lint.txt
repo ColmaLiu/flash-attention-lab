@@ -1,0 +1,4 @@
+# Keep hook versions in .pre-commit-config.yaml synchronized with these pins.
+pre-commit==4.5.1
+clang-format==21.1.8
+ruff==0.14.14

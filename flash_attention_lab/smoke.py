@@ -10,7 +10,8 @@ from .timing import measure
 def infrastructure_smoke(stage=None):
     exercises = [e for e in CATALOG if stage is None or e["stage"] == stage]
     backends = {e["backend"] for e in exercises}
-    for backend in backends: require_environment(backend)
+    for backend in backends:
+        require_environment(backend)
     torch.set_num_threads(1)
     case_count = 0
     for e in exercises:
@@ -28,26 +29,42 @@ def infrastructure_smoke(stage=None):
                 assert tuple(tensor.shape) == tuple(expected[name][0])
                 assert torch.isfinite(tensor).all(), (e["id"], case, name)
             case_count += 1
-    result = {"state": "INFRASTRUCTURE_OK", "modules_imported": len(exercises),
-              "input_reference_cases": case_count, "student_correctness": "NOT_TESTED"}
+    result = {
+        "state": "INFRASTRUCTURE_OK",
+        "modules_imported": len(exercises),
+        "input_reference_cases": case_count,
+        "student_correctness": "NOT_TESTED",
+    }
     out = torch.empty(1, dtype=torch.int32, device="cuda")
     stream = torch.cuda.current_stream().cuda_stream
     if "cuda" in backends:
         lib = build_cuda("infra_smoke")
-        launch = lambda: lib.launch({}, descriptors({"sentinel": out}), {}, {}, stream)
-        out.zero_(); launch(); torch.cuda.synchronize()
+
+        def launch():
+            return lib.launch({}, descriptors({"sentinel": out}), {}, {}, stream)
+
+        out.zero_()
+        launch()
+        torch.cuda.synchronize()
         assert out.item() == 7
         result["cuda_sentinel"] = measure(launch, 2, 3, 5)
         # One empty binding per stage verifies the host ABI without a long compile sweep.
         bindings, compiled_stages = [], set()
         for e in exercises:
-            if e["backend"] != "cuda" or load_student(e).IMPLEMENTED or e["stage"] in compiled_stages: continue
+            if (
+                e["backend"] != "cuda"
+                or load_student(e).IMPLEMENTED
+                or e["stage"] in compiled_stages
+            ):
+                continue
             compiled_stages.add(e["stage"])
             module = build_cuda(e["id"])
-            try: module.launch({}, {}, {}, {}, stream)
+            try:
+                module.launch({}, {}, {}, {}, stream)
             except RuntimeError as exc:
                 assert "STUDENT_TODO" in str(exc), str(exc)
-            else: raise AssertionError(f"{e['id']} stub returned without error")
+            else:
+                raise AssertionError(f"{e['id']} stub returned without error")
             bindings.append(e["id"])
         result["cuda_stub_bindings_compiled"] = bindings
     return result

@@ -1,6 +1,6 @@
 # CUDA/PTX：SM100 完整 attention 基线
 
-入口为 `entry.py → binding.cpp → kernel.cu → sm100_attention.cuh`，核心实现是本地 [sm100_attention.cuh](sm100_attention.cuh)。本课选择 `Overlap=false, Numerics=false, Persistent=false`；s41–s43 用同一设备实现研究执行交错、数值和调度。`entry.py` 只负责编译和传入预分配指针，数学计算由 CUDA/PTX 完成。
+入口为 `entry.py → binding.cpp → kernel.cu → sm100_attention.cuh`，核心实现是本地 [sm100_attention.cuh](sm100_attention.cuh)。本课选择 `Overlap=false, Numerics=false, Persistent=false`；s41、s42 用同一设备实现研究执行交错与数值，s43 使用独立的两路实现。`entry.py` 只负责编译和传入预分配指针，数学计算由 CUDA/PTX 完成。
 
 ## 从 GEMM 连接到 attention
 
@@ -14,11 +14,17 @@ TMEM 一次分配 256 列：score 使用列 0–63，PV 使用列 128 起的 D �
 
 `qbar`、`kvbar` 由 TMA 完成承诺字节数；`scorebar`、`pvbar` 由对应 MMA 的 commit 推进。等待正确 phase 后再执行 `tcgen05.fence::after_thread_sync`，才进入相关读取。CUDA 写 P 后先执行 async proxy fence，再由 CTA barrier 汇合所有 P 生产者，MMA 才能消费。PV 完成后所有 warp 必须读完 TMEM，下一轮才能复用相关存储。每个 warp 的 `tcgen05.wait::ld` 仅处理读取完成；读取阶段末尾还要执行 `tcgen05.fence::before_thread_sync → CTA barrier → tcgen05.fence::after_thread_sync`，将所有消费者的完成顺序传递给下一次 MMA 的发起线程。
 
-key 循环结束后复用 Q 的 shared memory 做连续向量 O 写回，同时输出 `maximum*ln(2)+log(denominator)`。epilogue 中所有线程通过普通 CUDA 读写 Q 的 shared 空间，结束后各自执行 `fence.proxy.async.shared::cta` 再汇合，保证 persistent 下一任务的 TMA 覆盖排在这些 generic 访问之后。只有 TMA 发起线程执行 proxy fence 不足以覆盖其他线程的访问。所有消费者结束才释放 TMEM。描述符编码、编译和输出分配在 prepare 阶段完成；计时包括执行时的搬运、矩阵运算、softmax、同步和 O/LSE 写回。
+key 循环结束后复用 Q 的 shared memory 做连续向量 O 写回，同时输出自然对数 LSE。epilogue 中所有线程通过普通 CUDA 读写 Q 的 shared 空间，结束后各自执行 `fence.proxy.async.shared::cta` 再汇合，保证 persistent 下一任务的 TMA 覆盖排在这些 generic 访问之后。只有 TMA 发起线程执行 proxy fence 不足以覆盖其他线程的访问。所有消费者结束才释放 TMEM。描述符编码、编译和输出分配在 prepare 阶段完成；计时包括执行时的搬运、矩阵运算、softmax、同步和 O/LSE 写回。
+
+## 共享数值路径的边界
+
+s40–s42 的公共 scale 必须可表示为正且有限的 FP32。令 `scale2=scale*log2(e)`；scale、scale2 均为 normal 且 `scale2<=1` 时保留普通 FP32 路径，其行参考值使用 log2 单位。其余合法 scale 由 host 选择独立 specialization：最大值保留为 raw QK，先在 FP64 中计算分数差，再乘 scale 和 log2(e)，最后交给原有 exp2 实现；LSE 使用自然对数表达式 `double(raw_max)*scale+log(double(denominator))` 后转回 FP32。这样避免额外的 base-2 缩放溢出，以及微小差值在放大前丢失。
+
+s42 在这条特殊路径中也先把 raw maximum 的变化转换为缩放后的 log2 差值，再判断延迟 rescale 的阈值；SFU/多项式开关保持独立。FP64 只用于这些缩放与 LSE 步骤，QK/PV 仍为 FP32 累加，P 仍舍入到输入 dtype，输出 LSE 仍为 FP32，因此不保证任意有限输入下的全域精度。QK 累加或数学 LSE 超出对应表示范围是独立限制。
 
 ## 支持域与性能实验
 
-本课对外域是 BF16、D64/128、N 为 128 的倍数、noncausal；共享 kernel 中其他分支在 s43 的扩展域验收。代码可编译其他分支不表示本课接口自动接受它们。
+本课对外域是 BF16、D64/128、N 为 128 的倍数、noncausal。共享 kernel 的其他 dtype、mask 或尾部分支可用于底层诊断，但 s43 的独立实现通过扩展域验收不能替代本共享 kernel 的验证。代码可编译其他分支不表示本课接口自动接受它们。
 
 ```bash
 ./lab check s40_attention --solution

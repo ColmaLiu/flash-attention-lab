@@ -1,4 +1,5 @@
 """Complete teaching answer, separate from the student entry."""
+
 IMPLEMENTED = True
 RUNTIME_REQUIRES = []
 CONFIG = {}

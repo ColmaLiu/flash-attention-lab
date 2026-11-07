@@ -20,13 +20,19 @@
 | s22_fa2 | [kernel.cu](../solutions/s22_fa2/kernel.cu)、[fa2_optimized.cuh](../solutions/s22_fa2/fa2_optimized.cuh) | `mma.sync`、`ldmatrix`、shared-memory swizzle，寄存器 softmax 与 P fragment |
 | s30_tma | [kernel.cu](../solutions/s30_tma/kernel.cu) | TMA descriptor、事务 barrier 与数据可见性 |
 | s31_tcgen | [kernel.cu](../solutions/s31_tcgen/kernel.cu)、[kernel_impl.cuh](../solutions/s31_tcgen/kernel_impl.cuh) | 单缓冲 TMA→MMA→等待、SMEM descriptor、TMEM lifetime 和输出交接 |
-| s32_specialize | [kernel.cu](../solutions/s32_specialize/kernel.cu)、[共享设备实现](../solutions/s31_tcgen/kernel_impl.cuh) | 三缓冲 producer/consumer、TMA full 与 MMA empty barrier 的独立 phase 回绕 |
+| s32_specialize | [kernel.cu](../solutions/s32_specialize/kernel.cu)、[独立设备实现](../solutions/s32_specialize/kernel_impl.cuh) | 分工流水线、rank-3 TMA、窄 N 的 compact B 布局、full/empty phase 与 shape dispatch |
 | s40_attention | [kernel.cu](../solutions/s40_attention/kernel.cu)、[sm100_attention.cuh](../solutions/s40_attention/sm100_attention.cuh) | TMA、tcgen05 QK/PV、TMEM 分数，寄存器统计与 O，顺序完成每个 key tile |
 | s41_overlap | [kernel.cu](../solutions/s41_overlap/kernel.cu)、[共享设备实现](../solutions/s40_attention/sm100_attention.cuh) | KV 与 score 双缓冲，下一块 QK 与当前 softmax/correction 交错 |
 | s42_numerics | [kernel.cu](../solutions/s42_numerics/kernel.cu)、[共享设备实现](../solutions/s40_attention/sm100_attention.cuh) | 默认 SFU+conditional rescale；混合多项式指数独立消融，分别研究误差和吞吐 |
-| s43_schedule | [kernel.cu](../solutions/s43_schedule/kernel.cu)、[共享设备实现](../solutions/s40_attention/sm100_attention.cuh) | static persistent、跨 batch/head 的 causal 长任务优先、FP16/BF16 与尾部 |
+| s43_schedule | [kernel.cu](../solutions/s43_schedule/kernel.cu)、[paired 设备实现](../solutions/s43_schedule/attention_dense.cuh)、[single 设备实现](../solutions/s43_schedule/attention_single.cuh) | 根据任务数选择双 query KV 复用或单 query 双 score 流水线；TMEM P/O、显式 PV 等待、static persistent 与完整边界 |
 
-s40–s43 共享一个完整 CUDA C++/PTX 实现，各课 `kernel.cu` 明确选择本课的编译配置。公共 tile 为 128 个 query、64 个 key，head dimension 为 64 或 128。TMA 直接描述 BNHD；QK 分数和 PV 更新使用 TMEM，online 行统计与跨 key tile 的 O 累加保存在 FP32 寄存器中。阅读共享代码时始终对照当前课的配置，区分硬件机制与尚未启用的优化。
+s40–s42 共享一个完整 CUDA C++/PTX 实现，各课 `kernel.cu` 明确选择本课的编译配置。公共 tile 为 128 个 query、64 个 key，head dimension 为 64 或 128。TMA 直接描述 BNHD；QK 分数和 PV 更新使用 TMEM，online 行统计与跨 key tile 的 O 累加保存在 FP32 寄存器中。阅读共享代码时始终对照当前课的配置，区分硬件机制与尚未启用的优化。
+
+s43 使用独立的 128-query × 128-key 设备实现，[attention_common.cuh](../solutions/s43_schedule/attention_common.cuh) 仅共享 host tensor maps 与 launch state。paired 路径以 384 线程、两个 softmax WG 复用两组 KV；single 路径以 256 线程、双 score 槽和三组 KV 提高少任务输入的并行度。两者保留 FP32 寄存器行统计，把 P 和累计 O 放在 TMEM，每次执行只发射一个本地 kernel。PV 与下一次 QK 的 S/P 复用显式等待完成；barrier phase、跨任务 drain、数值选项与逐例 90% 性能门槛见 [s43 答案说明](../solutions/s43_schedule/README.md)。
+
+s43 的手工角色同步使用无 `.aligned` 的 `barrier.sync`。paired 的 TMA 线程初始化 mbarrier 后经 CTA barrier 发布，thread 0 在任务末尾排空并 invalidate，再交给下一任务。公共 scale 为正且有限的 FP32；只有 scale 与 `scale2=scale*log2(e)` 均为 normal 且 `scale2<=1` 才走 packed FP32 快路径，其余合法 scale 用原始 QK 参考值与 FP64 差乘 scale，避免 scale2 溢出或 flush-to-zero。QK 累加和最终 LSE 的 FP32 表示范围仍是数值边界。
+
+s43 默认开启 `polynomial_exp` 和 delayed rescale。两条路径共用 [attention_exp.cuh](../solutions/s43_schedule/attention_exp.cuh)：正常 scale 下每行 128 个指数中 48 个用 packed 四阶、80 个用 SFU，最后 32 个全部用 SFU；关闭 `polynomial_exp`、极端 scale 分支及 correction 使用 SFU。helper 保留固定 FA4 系数的 BSD-3-Clause 来源，显式处理 masked 零与 FTZ。局部多项式误差和指令减少都需经过完整数值及性能验证，不沿用 s42 六阶消融的结论。
 
 ## 怎样判断答案能否帮助优化
 
@@ -53,4 +59,4 @@ prepare 完成描述符、输出/workspace 分配和编译，计时只覆盖准�
 | NVIDIA CUTLASS | v4.4.1 / `4370102f9dacab813282e1d67722fceb0b90a019` | [submodule](../third_party/cutlass/)、[BSD-3-Clause](../third_party/cutlass/LICENSE.txt) |
 | Dao-AILab FlashAttention | beta35 / `1fc0221183e799363001394a12dd9e78e15f5dda` | [submodule](../third_party/flash-attention/)、[BSD-3-Clause](../third_party/flash-attention/LICENSE) |
 
-父仓库 gitlinks 固定上游版本，`bash scripts/bootstrap.sh` 完成初始化。算法与指令资料见 [sources](sources.md)。直接改编的代码须在文件与答案目录中保留来源和许可；独立实现也应明确设计所依据的论文或指令文档。
+父仓库 gitlinks 固定上游版本，`bash scripts/bootstrap.sh` 完成初始化。算法与指令资料见 [sources](sources.md)。直接改编的代码须保留来源和署名，并链接对应 submodule 的许可；独立实现也应明确设计所依据的论文或指令文档。

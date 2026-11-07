@@ -1,4 +1,5 @@
 """Only scalar infrastructure sentinels; never a student's kernel or acceptance."""
+
 import argparse
 from pathlib import Path
 import sys
@@ -6,6 +7,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from flash_attention_lab.runtime import configure_runtime
+
 configure_runtime()
 
 import torch
@@ -14,13 +16,17 @@ from flash_attention_lab.build import build_cuda, descriptors
 
 def main():
     from flash_attention_lab.environment import require_environment
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
     require_environment("cuda")
     output = torch.zeros(1, device="cuda", dtype=torch.int32)
     stream = torch.cuda.current_stream().cuda_stream
     cpp = build_cuda("infra_smoke")
-    cuda_launch = lambda: cpp.launch({}, descriptors({"sentinel": output}), {}, {}, stream)
+
+    def cuda_launch():
+        return cpp.launch({}, descriptors({"sentinel": output}), {}, {}, stream)
+
     launches = [("cuda", cuda_launch)]
     for name, launch in launches:
         output.zero_()
@@ -32,4 +38,5 @@ def main():
         print(name, "infrastructure sentinel OK", flush=True)
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()

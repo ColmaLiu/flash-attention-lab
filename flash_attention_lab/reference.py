@@ -4,6 +4,7 @@ Uses FP64 on the already-quantized inputs. Attention evaluates each row against
 all keys; independent rows are grouped to bound temporary memory. No online
 softmax, key-tile state, CUDA or DSL exercise implementations are provided.
 """
+
 import torch
 
 # At most 32 MiB per FP64 score tensor. Other temporaries and Q/K/V/O are additional.
@@ -35,9 +36,16 @@ def _attention_reference(inputs, config):
             for head in range(h):
                 for start in range(0, n, rows):
                     stop = min(start + rows, n)
-                    out[batch, head, start:stop], lse[batch, head, start:stop] = _attention_rows(
-                        q[batch, head, start:stop], k[batch, head], v[batch, head],
-                        config["scale"], config["causal"], start)
+                    out[batch, head, start:stop], lse[batch, head, start:stop] = (
+                        _attention_rows(
+                            q[batch, head, start:stop],
+                            k[batch, head],
+                            v[batch, head],
+                            config["scale"],
+                            config["causal"],
+                            start,
+                        )
+                    )
     return {"o": out.permute(0, 2, 1, 3).contiguous(), "lse": lse}
 
 

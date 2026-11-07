@@ -2,6 +2,8 @@
 
 [kernel.cu](kernel.cu) 选择 `Overlap=true, Numerics=false, Persistent=false`，设备实现见 [sm100_attention.cuh](../s40_attention/sm100_attention.cuh)。数据契约、128×64 query/key tile 和 FP32 状态与 [s40](../s40_attention/README.md) 相同，新增两套 KV 和 score 存储。
 
+特殊 scale 的 FP64 raw-score 差值与自然对数 LSE 路径同样来自该共享 header；host 分派条件、FP32 累加及 LSE 表示范围限制见 [s40 数值边界](../s40_attention/README.md#共享数值路径的边界)。执行交错不改变这些数值条件。
+
 ## 相邻迭代如何交接
 
 等待当前 score 完成之前，线程 0 发起下一块 KV 的 TMA，使搬运有机会与仍在进行的当前 QK 重叠；score 完成后，四个 warp 将其从 TMEM 读到寄存器。下一块 KV 完成后，发起下一块 QK，再执行当前块 softmax、历史 O 修正和 PV。score 的两个 TMEM 区域分别位于列 0 和 64，PV 使用列 128 起的 D 列。

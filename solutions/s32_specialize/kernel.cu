@@ -1,3 +1,2 @@
-// A producer warp pipelines three TMA buffers ahead of the MMA consumer.
-#define LAB_MULTISTAGE 1
-#include "../s31_tcgen/kernel_impl.cuh"
+// Occupancy-aware TMA/MMA pipeline and an explicit split-K reduction.
+#include "kernel_impl.cuh"

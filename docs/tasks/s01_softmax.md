@@ -23,6 +23,8 @@ m=max_j x_j；y_j=exp(x_j-m)/sum_k exp(x_k-m)。对有限常数 c，有 softmax(
 
 源码阅读：PyTorch ATen/native/cuda/SoftMax.cu 的 dispatch 与 persistent softmax；本地 solutions/s01_softmax/kernel.cu。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
+答案按行宽选择三条原生路径。宽度不超过 1024 时，一个 warp 处理一行，每个 CTA 包含四行；1025–16384 时，每行使用 256 线程，将输入和指数结果保存在寄存器中，每个元素只读一次、求一次指数。八个 warp 通过 shared memory 交换局部最大值与分母，复用这块 shared memory 前有完整 CTA 同步。更宽的行使用多次读取的通用路径，避免寄存器数量随行宽无界增长。这个取舍需要在短、中、宽三个性能案例上分别检查，不能把减少读取直接当作实测加速。
+
 ## 为什么选择这些测试
 
 | case ID | 组 | shape | dtype/mask | 要排查的问题 |

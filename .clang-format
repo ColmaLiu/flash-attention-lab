@@ -1,0 +1,11 @@
+BasedOnStyle: LLVM
+UseTab: Never
+IndentWidth: 2
+ColumnLimit: 80
+Language: Cpp
+Standard: c++17
+SortIncludes: Never
+StatementMacros: [CONFIG]
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false

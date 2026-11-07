@@ -14,6 +14,12 @@ Q 一次搬入并保留。key tile 从后向前遍历：搬 V 时执行当前 QK
 
 causal 的最早几轮可能整行无有效 key，代码显式处理 `maximum=-inf` 和零概率，避免 `-inf-(-inf)` 生成 NaN。尾部 copy 填零且使用分配范围内的源指针，fragment mask 排除无效 key，最终 O/LSE store 排除无效 query。结束后复用 Q 的 shared 空间，将分散 fragment 整理为连续 16 字节 O 写回。
 
+## Scale 与表示范围
+
+公共 scale 必须可表示为正且有限的 FP32。令 `scale2=scale*log2(e)`；仅当 scale、scale2 均为 normal、`scale2<=1` 且 `scale>=2^-119` 时选择普通 FP32 specialization。其余合法 scale 使用独立模板：最大值保留在原始 QK 单位，先把两个分数转为 FP64，再计算差值乘 scale 和 log2(e)；LSE 在自然对数单位计算 `raw_max*scale+log(denominator)` 后转回 FP32。课程默认 scale 仍走普通路径。
+
+下限保护“两个有限 FP32 raw score 相减先溢出”的情形：scale 不小于 `2^-119` 时，这种差值对应的自然指数已小于约 -512，其概率必然在 FP32 下溢；更小 scale 则可能保留显著权重，必须先在 FP64 中相减。`scale_raw_gap` 用精确 BF16 幂次构造有限 raw QK，单独验证这一边界。该处理不改变 Tensor Core 的 FP32 累加、低精度 P 或 FP32 LSE 输出；QK 累加本身或最终 LSE 超出表示范围时，不能仅靠有限输入保证全域精度。
+
 ## 验证与性能
 
 ```bash
@@ -29,4 +35,4 @@ causal 的最早几轮可能整行无有效 key，代码显式处理 `maximum=-i
 
 ## 来源
 
-分工和流式算法依据 [FA2 论文](https://arxiv.org/abs/2307.08691v1)。fragment 转换、反向 key 遍历及 staging 的设计对照为 [FlashAttention v2.7.4.post1](https://github.com/Dao-AILab/flash-attention/tree/5231d95fe13733fb534c01895f7ea88c6a6c7793) 的 `kernel_traits.h`、`utils.h`、`softmax.h`、`flash_fwd_kernel.h`，commit `5231d95fe13733fb534c01895f7ea88c6a6c7793`。沿用改编工作的 [BSD-3-Clause 许可证](LICENSE.flash-attention) 和 [作者署名](AUTHORS.flash-attention)。本地入口、地址计算、PTX 指令及同步均可直接阅读；固定上游源码另用于比较生产实现。
+分工和流式算法依据 [FA2 论文](https://arxiv.org/abs/2307.08691v1)。fragment 转换、反向 key 遍历及 staging 的设计对照为 [FlashAttention v2.7.4.post1](https://github.com/Dao-AILab/flash-attention/tree/5231d95fe13733fb534c01895f7ea88c6a6c7793) 的 `kernel_traits.h`、`utils.h`、`softmax.h`、`flash_fwd_kernel.h`，commit `5231d95fe13733fb534c01895f7ea88c6a6c7793`。沿用改编工作的 [BSD-3-Clause 许可证](../../third_party/flash-attention/LICENSE) 和 [作者署名](AUTHORS.flash-attention)。本地入口、地址计算、PTX 指令及同步均可直接阅读；固定上游源码另用于比较生产实现。

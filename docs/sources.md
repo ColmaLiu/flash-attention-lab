@@ -22,6 +22,6 @@ git ls-files --stage third_party/cutlass third_party/flash-attention
 git submodule update --init -- third_party/cutlass third_party/flash-attention
 ```
 
-[sources.lock.json](sources.lock.json) 记录资料来源，实际源码版本以 gitlinks 为准。许可证随 submodule 保存。本地 CUDA C++/PTX 答案中的直接改编部分另外保留来源与许可，不能用 submodule 的存在代替署名。
+[sources.lock.json](sources.lock.json) 记录资料来源，实际源码版本以 gitlinks 为准。许可证随 submodule 保存。本地 CUDA C++/PTX 答案中的直接改编部分保留来源与署名，许可统一链接到对应 submodule。
 
 `bootstrap` 统一安装完整课程环境。本地参考答案由 nvcc 编译，编译与输入准备都排除在 kernel 计时之外。在线手册会更新，指令和 API 使用应对照实际编译器及锁定源码。

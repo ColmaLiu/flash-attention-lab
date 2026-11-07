@@ -56,3 +56,6 @@ FP64 oracle 判断数学正确性，CUDA C++/PTX 答案提供可直接跟踪的�
 计时分别呈现 CUDA Graph 与 eager launch、采样分布和双方比值；排除编译、输入生成及预分配，说明布局转换和 host 成本。分析时分别列出算法 IO 模型、实际 DRAM 计数和待验证假设。测量结论绑定本机设备、输入与代码版本，方法见 [benchmarking](docs/benchmarking.md)。
 
 目录：`students/` 学生代码，`solutions/` CUDA C++/PTX 完整答案，`third_party/` 上游源码 submodules，`flash_attention_lab/` 公共设施，`docs/tasks/` 课程，`tests/` 基础设施测试与显式学生验收。个人记录、日志、编译缓存与结果写入被忽略的 `artifacts/`、`.cache/`、`progress/results/`；[experiments](experiments/README.md) 提供记录模板。
+
+维护代码时使用 [pre-commit 格式化与检查](docs/formatting.md)，统一 CUDA/C++ 与
+Python 排版。批量格式化默认不改学生练习和第三方源码。

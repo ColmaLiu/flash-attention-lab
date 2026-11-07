@@ -1,0 +1,36 @@
+minimum_pre_commit_version: "4.5.1"
+default_stages: [pre-commit, manual]
+exclude: '^(third_party|students|artifacts|\.cache|progress/results|build|dist)/'
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+        # Activation changes the caller's shell and is intentionally sourced.
+        exclude: '^scripts/activate\.sh$'
+      - id: detect-private-key
+      - id: check-yaml
+      - id: check-toml
+      - id: check-ast
+      - id: debug-statements
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v21.1.8
+    hooks:
+      - id: clang-format
+        # Explicitly include CUDA files, which may not have C/C++ type tags.
+        types: [file]
+        files: '\.(c|cc|cpp|cxx|h|hpp|cu|cuh)$'
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        args: [--exit-non-zero-on-format]

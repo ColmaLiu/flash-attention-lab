@@ -19,3 +19,20 @@ include = ["flash_attention_lab*", "benchmarks*"]
 testpaths = ["tests/infra"]
 addopts = "-ra"
 markers = ["gpu: requires the selected GPU", "student: explicit student acceptance, fails when unimplemented"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+extend-exclude = ["third_party", "students", "artifacts", ".cache", "progress/results"]
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E", "W", "F"]
+# Runtime setup precedes torch imports. The formatter handles line wrapping;
+# mathematical variables such as l retain their meaning.
+ignore = ["E402", "E501", "E741"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

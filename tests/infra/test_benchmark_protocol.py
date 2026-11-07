@@ -3,6 +3,7 @@
 These tests verify data/configuration isolation and reporting. They do not certify
 GPU kernels or substitute CPU work for a GPU performance measurement.
 """
+
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -14,26 +15,47 @@ from flash_attention_lab import runner, timing
 from flash_attention_lab.errors import CorrectnessFailure
 
 
+def test_runner_retains_original_artifact_entrypoint():
+    from flash_attention_lab.reporting import save_artifact
+
+    assert runner.save_artifact is save_artifact
+
+
 @pytest.fixture
 def comparison(monkeypatch):
     stream = SimpleNamespace(wait_stream=lambda other: None, synchronize=lambda: None)
     monkeypatch.setattr(torch.cuda, "Stream", lambda: stream)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
-    inputs = {"x": torch.tensor([[1., -2., 3.], [2., 4., -1.]])}
-    config = {"scale": 1., "causal": False}
-    exercise = {"id": "fixture", "kind": "softmax", "cases": [
-        {"shape": [2, 3], "dtype": "fp32", "pattern": "random"}]}
+    inputs = {"x": torch.tensor([[1.0, -2.0, 3.0], [2.0, 4.0, -1.0]])}
+    config = {"scale": 1.0, "causal": False}
+    exercise = {
+        "id": "fixture",
+        "kind": "softmax",
+        "cases": [{"shape": [2, 3], "dtype": "fp32", "pattern": "random"}],
+    }
     observed = {"prepared": [], "checks": [], "timed": [], "invalid": None}
     monkeypatch.setattr(runner, "make_inputs", lambda *args: (inputs, config))
-    monkeypatch.setattr(runner, "load_student", lambda e, *, solution=False:
-                        SimpleNamespace(CONFIG={"tile": 64 if solution else 32}))
+    monkeypatch.setattr(
+        runner,
+        "load_student",
+        lambda e, *, solution=False: SimpleNamespace(
+            CONFIG={"tile": 64 if solution else 32}
+        ),
+    )
     monkeypatch.setattr(runner, "fingerprint", lambda e: "fixture")
     monkeypatch.setattr(runner, "snapshot", lambda: {})
 
     def check(e, index, *, solution):
         observed["checks"].append(solution)
-        return {"state": "CORRECTNESS_PASSED", "implementation": "solution" if solution else "student"}
+        return {
+            "state": "CORRECTNESS_PASSED",
+            "implementation": "solution" if solution else "student",
+            "fingerprint": "fixture",
+            "exercise": e["id"],
+            "case_count": 1,
+            "cases": [{"case": index, "input": e["cases"][index], "state": "PASS"}],
+        }
 
     def prepare(name, values, cfg):
         observed["prepared"].append((name, values, dict(cfg)))
@@ -42,49 +64,87 @@ def comparison(monkeypatch):
         def launch():
             outputs["y"].copy_(values["x"].softmax(-1))
             if observed["invalid"] == name:
-                outputs["y"][0, 0] = 100.
+                outputs["y"][0, 0] = 100.0
 
         launch.name = name
-        return SimpleNamespace(launch=launch, outputs=outputs, workspace={},
-                               extra_workspace_bytes=0, provider="fixture " + name, scope="fixture")
+        return SimpleNamespace(
+            launch=launch,
+            outputs=outputs,
+            workspace={},
+            extra_workspace_bytes=0,
+            provider="fixture " + name,
+            scope="fixture",
+        )
 
     def measure(launch, *args):
         observed["timed"].append(("eager", launch.name))
         launch()
-        return {"gpu_stream_ms_median": {"student": 30., "answer": 20., "library": 10.}[launch.name]}
+        return {
+            "gpu_stream_ms_median": {"student": 30.0, "answer": 20.0, "library": 10.0}[
+                launch.name
+            ]
+        }
 
-    def graph_group(launches, *args):
+    def graph_group(launches, warmup, repeats, iterations):
         result = []
         for launch in launches:
             observed["timed"].append(("graph", launch.name))
             launch()
-            result.append({"gpu_stream_ms_median": {"student": 3., "answer": 2., "library": 1.}[launch.name]})
+            duration = {"student": 3.0, "answer": 2.0, "library": 1.0}[launch.name]
+            result.append(
+                {
+                    "mode": "cuda_graph",
+                    "iterations": iterations,
+                    "repeats": repeats,
+                    "sampling_order": "cyclic rotation of candidate indices",
+                    "candidate_count": len(launches),
+                    "gpu_stream_ms_median": duration,
+                    "gpu_stream_ms_samples": [duration] * repeats,
+                }
+            )
         return result
 
     monkeypatch.setattr(runner, "check", check)
-    monkeypatch.setattr(runner, "prepare", lambda identifier, values, cfg, *, solution:
-                        prepare("answer" if solution else "student", values, cfg))
-    monkeypatch.setattr(reference_backends, "prepare_reference", lambda e, values, cfg:
-                        prepare("library", values, cfg))
+    monkeypatch.setattr(
+        runner,
+        "prepare",
+        lambda identifier, values, cfg, *, solution: prepare(
+            "answer" if solution else "student", values, cfg
+        ),
+    )
+    monkeypatch.setattr(
+        reference_backends,
+        "prepare_reference",
+        lambda e, values, cfg: prepare("library", values, cfg),
+    )
     monkeypatch.setattr(runner, "measure", measure)
     monkeypatch.setattr(runner, "measure_graph_group", graph_group)
     return exercise, inputs, observed
 
 
-def test_student_benchmark_compares_three_independent_configs_and_graph_times(comparison):
+def test_student_benchmark_compares_three_independent_configs_and_graph_times(
+    comparison,
+):
     exercise, inputs, observed = comparison
     result = runner.benchmark(exercise, 0, 1, 3, 2)
     assert observed["checks"] == [False, True]
-    assert [name for name, _, _ in observed["prepared"]] == ["student", "answer", "library"]
+    assert [name for name, _, _ in observed["prepared"]] == [
+        "student",
+        "answer",
+        "library",
+    ]
     assert all(values is inputs for _, values, _ in observed["prepared"])
     assert [cfg.get("tile") for _, _, cfg in observed["prepared"]] == [32, 64, None]
-    assert all(cfg["scale"] == 1. and cfg["causal"] is False for _, _, cfg in observed["prepared"])
+    assert all(
+        cfg["scale"] == 1.0 and cfg["causal"] is False
+        for _, _, cfg in observed["prepared"]
+    )
     assert result["implementation"] == "student"
-    assert result["comparison"]["student_over_reference"] == 3.
+    assert result["comparison"]["student_over_reference"] == 3.0
     assert result["comparison"]["student_over_solution"] == 1.5
-    assert result["comparison"]["solution_over_reference"] == 2.
-    assert result["solution"]["eager_timing"]["gpu_stream_ms_median"] == 20.
-    assert result["solution"]["timing"]["gpu_stream_ms_median"] == 2.
+    assert result["comparison"]["solution_over_reference"] == 2.0
+    assert result["solution"]["eager_timing"]["gpu_stream_ms_median"] == 20.0
+    assert result["solution"]["timing"]["gpu_stream_ms_median"] == 2.0
 
 
 def test_solution_benchmark_does_not_prepare_or_validate_a_student(comparison):
@@ -93,7 +153,16 @@ def test_solution_benchmark_does_not_prepare_or_validate_a_student(comparison):
     assert observed["checks"] == [True]
     assert [name for name, _, _ in observed["prepared"]] == ["answer", "library"]
     assert result["implementation"] == "solution" and "solution" not in result
-    assert result["comparison"]["student_over_reference"] == 2.
+    assert result["comparison"]["student_over_reference"] == 2.0
+
+
+def test_benchmark_attaches_the_final_answer_gate(comparison):
+    exercise, _, _ = comparison
+    exercise["id"] = "s01_softmax"
+    exercise["cases"][0]["suite"] = "perf"
+    result = runner.benchmark(exercise, 0, 1, 3, 2)
+    assert result["solution_performance"]["state"] == "FAIL"
+    assert result["solution_performance"]["library_performance"] == 0.5
 
 
 @pytest.mark.parametrize("invalid", ["student", "answer", "library"])
@@ -108,7 +177,7 @@ def test_no_participant_is_timed_until_all_participants_pass(comparison, invalid
 def test_graph_samples_stay_with_their_candidate_when_order_rotates(monkeypatch):
     # Three candidates with distinct simulated durations expose accidental
     # cross-candidate sample assignment as well as per-operation scaling errors.
-    clock = {"value": 0., "capturing": None}
+    clock = {"value": 0.0, "capturing": None}
     replays = []
     stream = SimpleNamespace(synchronize=lambda: None)
 
@@ -122,7 +191,7 @@ def test_graph_samples_stay_with_their_candidate_when_order_rotates(monkeypatch)
             self.graph = graph
 
         def __enter__(self):
-            self.graph.duration = 0.
+            self.graph.duration = 0.0
             clock["capturing"] = self.graph
 
         def __exit__(self, *args):
@@ -147,6 +216,7 @@ def test_graph_samples_stay_with_their_candidate_when_order_rotates(monkeypatch)
             if graph is not None:
                 graph.name = name
                 graph.duration += duration
+
         return launch
 
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
@@ -154,8 +224,16 @@ def test_graph_samples_stay_with_their_candidate_when_order_rotates(monkeypatch)
     monkeypatch.setattr(torch.cuda, "CUDAGraph", Graph)
     monkeypatch.setattr(torch.cuda, "graph", Capture)
     monkeypatch.setattr(torch.cuda, "Event", Event)
-    results = timing.measure_graph_group([candidate("A", 2.), candidate("B", 3.), candidate("C", 5.)],
-                                         warmup=1, repeats=3, iterations=4)
+    results = timing.measure_graph_group(
+        [candidate("A", 2.0), candidate("B", 3.0), candidate("C", 5.0)],
+        warmup=1,
+        repeats=3,
+        iterations=4,
+    )
     assert replays == ["A", "B", "C", "A", "B", "C", "B", "C", "A", "C", "A", "B"]
-    assert [r["gpu_stream_ms_samples"] for r in results] == [[2.] * 3, [3.] * 3, [5.] * 3]
+    assert [r["gpu_stream_ms_samples"] for r in results] == [
+        [2.0] * 3,
+        [3.0] * 3,
+        [5.0] * 3,
+    ]
     assert all(r["mode"] == "cuda_graph" and r["iterations"] == 4 for r in results)

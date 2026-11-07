@@ -6,7 +6,7 @@
 
 TMA、矩阵引擎和普通线程执行单元可以并行工作，但它们对数据的就绪条件不同。warp specialization 将角色分开，让各自推进适合的任务；这同时使同步参与者、buffer 释放时机和寄存器需求更难推理。
 
-答案保持 s31 的 128×128×64 tile，增加三组 operand 缓冲和独立的 TMA producer warp。TMA 完成将 full barrier 推进，MMA 完成将 empty barrier 推进；producer 只有等到 empty 才能覆盖旧数据，MMA 只有等到 full 才能消费新数据。先把 s31 的依赖画成有向图，区分必要依赖与保守等待，再比较参考代码如何组织生产与消费。检查第一次使用、每次回绕及最后一次释放；最终 TMEM 读取还须以 `wait::ld` 和 before/after-thread-sync fence 包围的 CTA 交接，保证释放发生在所有读取之后。性能比较必须包含短 K 与长 K：稳态更快的实现也可能因准备开销或驻留 CTA 减少而输在短任务。
+答案使用独立设备实现，增加多组 operand 缓冲和独立的 TMA producer warp，并按短 K、宽 N 长 K、窄 N 长 K 选择 tile。宽 N 长 K 默认 128×64×128 四缓冲，满足面板对齐条件时使用 rank-3 TMA；窄 N 使用 64×32×256 四缓冲，以实际 32 列 B 布局增加 CTA 数并避免默认 split-K。详细布局与显式消融选项见 [答案说明](../../solutions/s32_specialize/README.md)。TMA 完成将 full barrier 推进，MMA 完成将 empty barrier 推进；producer 只有等到 empty 才能覆盖旧数据，MMA 只有等到 full 才能消费新数据。先把 s31 的依赖画成有向图，区分必要依赖与保守等待，再比较参考代码如何组织生产与消费。检查第一次使用、每次回绕及最后一次释放；最终 TMEM 读取还须以 `wait::ld` 和 before/after-thread-sync fence 包围的 CTA 交接，保证释放发生在所有读取之后。性能比较必须包含短 K 与长 K：稳态更快的实现也可能因准备开销或驻留 CTA 减少而输在短任务。
 
 ## 定义、代码与参考
 
@@ -19,7 +19,7 @@ TMA、矩阵引擎和普通线程执行单元可以并行工作，但它们对�
 - 独立数学 oracle：[reference.py](../../flash_attention_lab/reference.py) 的 `mathematical_reference`；对已经量化的相同输入执行 FP64 矩阵乘，输出按公共契约比较。
 - 快速库基线：cuBLAS GEMM；保持输入 dtype 与 FP32 输出一致。
 
-源码阅读：[kernel.cu](../../solutions/s32_specialize/kernel.cu) 与共享的 [kernel_impl.cuh](../../solutions/s31_tcgen/kernel_impl.cuh)；PTX tcgen05 commit/completion。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
+源码阅读：[kernel.cu](../../solutions/s32_specialize/kernel.cu) 与独立的 [kernel_impl.cuh](../../solutions/s32_specialize/kernel_impl.cuh)；PTX tcgen05 commit/completion。 固定版本与官方链接见 [sources](../sources.md)，本地答案的设备源码入口见 [参考实现与源码](../reference-implementations.md)。
 
 ## 为什么选择这些测试
 
@@ -38,7 +38,7 @@ TMA、矩阵引擎和普通线程执行单元可以并行工作，但它们对�
 
 ## 实验与完成标准
 
-与 s31 同一 GEMM 对比，多缓冲数量与资源占用作为变量，不预设越多越快。
+与 s31 同一 GEMM 对比，多缓冲数量与资源占用作为变量，不预设越多越快。总体阶段比较同时包含 tile 选择；消融时固定 tile 与 tensor-map 路线，再改变 stages 或 issuer 分工。参考答案的维护验收另要求全部三个 perf case 逐项满足同组 CUDA Graph median 的 `library_ms / solution_ms >= 0.9`，不得用平均值或遗漏案例代替；这不是学生通过本关的门槛。
 
 用状态图证明所有缓冲读写与复用有顺序，短 K/长 K 均能 drain。
 

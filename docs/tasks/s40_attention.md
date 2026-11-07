@@ -34,6 +34,8 @@ BF16 BNHD，D=64/128，N 是 128 的倍数，先只支持 noncausal。返回 O �
 | `few_heads` | perf | `(1, 1024, 2, 64)` | bf16/full | 少量 heads，观察 query 维并行度。 |
 | `many_heads` | perf | `(2, 1024, 16, 128)` | bf16/full | 较多独立 heads，比较吞吐与资源占用。 |
 | `long_sequence` | perf | `(1, 4096, 8, 128)` | bf16/full | 长 key 循环，观察融合和流水线的稳态作用。 |
+| `scale_overflow_uniform` | stress | `(1, 128, 2, 64)` | bf16/full | 正有限 scale=3e38、Q/K 为零而 V 非零；检查 base-2 缩放溢出不会产生 NaN，O 为 V 均值且 LSE=log(N)。 |
+| `scale_subnormal` | edge | `(1, 256, 2, 128)` | bf16/full | 最小正 FP32 次正规 scale 与非零 Q/K，检查 host/device 传递、FTZ 处理和多 key tile 的在线归一化。 |
 
 `debug` 用于缩小问题，`edge` 检验边界，`stress` 检验数值或生命周期，`perf` 选择代表性工作负载；所有声明案例都必须通过正确性验收。case 0 是第一行；用 `task -v` 查看序号。
 

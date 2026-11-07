@@ -1,4 +1,5 @@
 """Full local reports, separate from terminal summaries."""
+
 import json
 import time
 from .registry import ROOT
