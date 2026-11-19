@@ -1,5 +1,6 @@
 import torch
-from .build import build_cuda, descriptors
+from .build import build_cuda
+from .ffi import launch_arguments
 from .cases import make_inputs, output_spec, validate_inputs
 from .environment import require_environment
 from .reference import mathematical_reference
@@ -39,9 +40,10 @@ def infrastructure_smoke(stage=None):
     stream = torch.cuda.current_stream().cuda_stream
     if "cuda" in backends:
         lib = build_cuda("infra_smoke")
+        args = launch_arguments({}, {"sentinel": out}, {}, {}, stream)
 
         def launch():
-            return lib.launch({}, descriptors({"sentinel": out}), {}, {}, stream)
+            return lib.launch(*args)
 
         out.zero_()
         launch()

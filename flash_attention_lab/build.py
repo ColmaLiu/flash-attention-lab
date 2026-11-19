@@ -1,12 +1,12 @@
 """CUDA C++ extension build, selected after inspecting the active GPU."""
 
 import hashlib
+import importlib.metadata
 import os
 import re
 import shlex
 from functools import lru_cache
 from pathlib import Path
-import torch
 from .registry import ROOT, student_dir
 
 
@@ -39,8 +39,8 @@ def build_cuda(exercise_id, *, solution=False):
     binding = source.parent / "binding.cpp"
     if not binding.is_file():
         binding = ROOT / "flash_attention_lab/binding.cpp"
-    # Changes to local helpers invalidate the in-process
-    # module too. Ninja alone is insufficient: cpp_extension also caches loaded modules.
+    # Give changed helpers and FFI/toolchain versions a distinct shared library
+    # name; a loaded module must never conceal edits in the same process.
     digest = hashlib.sha256()
     sources = [binding, ROOT / "flash_attention_lab/cuda_api.h", source]
     sources += sorted(
@@ -76,6 +76,8 @@ def build_cuda(exercise_id, *, solution=False):
         flags,
         os.environ.get("CXX", "c++"),
         os.environ.get("CC", ""),
+        importlib.metadata.version("apache-tvm-ffi"),
+        Path(__file__).read_bytes(),
     )
     digest.update(repr(configuration).encode())
     tag = digest.hexdigest()[:16]
@@ -94,34 +96,44 @@ def build_cuda(exercise_id, *, solution=False):
 
 @lru_cache(None)
 def _build(exercise_id, source, binding, toolkit, cuda_library, includes, flags, tag):
-    from torch.utils import cpp_extension
+    from tvm_ffi import cpp
 
-    cpp_extension.CUDA_HOME = toolkit
     build_dir = ROOT / ".cache/build" / exercise_id / tag
     build_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MAX_JOBS", "2")
-    return cpp_extension.load(
-        name="falab_" + exercise_id + "_" + tag,
-        sources=[binding, source],
-        extra_include_paths=list(includes),
-        # Driver API is needed for host-side TMA tensor-map descriptors.
-        extra_ldflags=["-L" + shlex.quote(cuda_library), "-lcuda"],
-        extra_cflags=["-O2", "-std=c++17"],
-        extra_cuda_cflags=list(flags),
-        build_directory=str(build_dir),
-        verbose=bool(os.getenv("LAB_BUILD_VERBOSE")),
-    )
-
-
-def descriptors(tensors):
-    codes = {
-        torch.float32: 0,
-        torch.float16: 1,
-        torch.bfloat16: 2,
-        torch.int32: 3,
-        torch.uint8: 4,
-        torch.int64: 5,
+    name = "falab_" + exercise_id + "_" + tag
+    selected = {
+        "CUDA_HOME": toolkit,
+        # TVM FFI otherwise probes the first physical GPU, ignoring our mask.
+        "TVM_FFI_CUDA_ARCH_LIST": "10.0a",
     }
-    return {
-        n: (t.data_ptr(), list(t.shape), codes[t.dtype]) for n, t in tensors.items()
-    }
+    previous = {key: os.environ.get(key) for key in selected}
+    try:
+        os.environ.update(selected)
+        cuda_flags = list(flags)
+        cuda_flags.remove("-gencode=arch=compute_100a,code=sm_100a")
+        if os.environ.get("CC"):
+            cuda_flags += ["-ccbin", shlex.quote(os.environ["CC"])]
+        return cpp.load(
+            name=name,
+            sources=[binding, source],
+            extra_include_paths=list(includes),
+            extra_ldflags=["-L" + shlex.quote(cuda_library), "-lcuda"],
+            extra_cflags=[
+                "-O2",
+                "-std=c++20",
+                "-fvisibility=hidden",
+                f'-DLAB_FFI_MODULE=\\"{name}\\"',
+            ],
+            # Device sources retain C++17; only the FFI host binding uses C++20.
+            extra_cuda_cflags=cuda_flags,
+            build_directory=str(build_dir),
+            backend="cuda",
+            keep_module_alive=True,
+        )
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value

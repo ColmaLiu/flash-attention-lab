@@ -181,6 +181,15 @@ def test_shared_helper_edit_invalidates_solution_build(build_fixture):
     assert build.build_cuda("lesson", solution=True)[-1] != before[-1]
 
 
+def test_ffi_version_invalidates_loaded_module(build_fixture, monkeypatch):
+    _, build = build_fixture
+    before = build.build_cuda("lesson", solution=True)
+    monkeypatch.setattr(
+        build.importlib.metadata, "version", lambda name: "other-version"
+    )
+    assert build.build_cuda("lesson", solution=True)[-1] != before[-1]
+
+
 def test_build_flags_change_result_fingerprint(monkeypatch):
     from flash_attention_lab.registry import fingerprint, CATALOG
 

@@ -33,7 +33,7 @@ def torch_module():
 
 def snapshot():
     packages = {}
-    for name in ("torch", "pytest", "ninja"):
+    for name in ("torch", "pytest", "ninja", "apache-tvm-ffi"):
         try:
             packages[name] = metadata.version(name)
         except metadata.PackageNotFoundError:

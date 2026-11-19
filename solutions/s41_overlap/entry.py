@@ -1,6 +1,7 @@
 """Complete CUDA/PTX SM100 attention; host preparation excludes allocation and encoding."""
 
 from flash_attention_lab.build import build_cuda
+from flash_attention_lab.ffi import tensor_arguments
 
 IMPLEMENTED = True
 BACKEND = "python"
@@ -13,18 +14,14 @@ def workspace_spec(inputs, config):
 
 
 def prepare(inputs, outputs, workspace, config, stream):
-    import torch
-
     lib = build_cuda("s41_overlap", solution=True)
-    q, k, v = (inputs[key] for key in ("q", "k", "v"))
+    tensors = tensor_arguments({**inputs, **outputs}, stream)
     state = lib.prepare(
-        q.data_ptr(),
-        k.data_ptr(),
-        v.data_ptr(),
-        outputs["o"].data_ptr(),
-        outputs["lse"].data_ptr(),
-        *q.shape,
-        q.dtype == torch.float16,
+        tensors["q"],
+        tensors["k"],
+        tensors["v"],
+        tensors["o"],
+        tensors["lse"],
         config["scale"],
         config["causal"],
         stream,

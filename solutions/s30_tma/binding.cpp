@@ -1,29 +1,22 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include "cuda_api.h"
-namespace py = pybind11;
+#include "ffi_api.h"
 
-TensorMap unpack(const py::dict &tensors) {
-  TensorMap result;
-  for (auto item : tensors) {
-    auto desc = py::cast<py::tuple>(item.second);
-    result.emplace(
-        py::cast<std::string>(item.first),
-        TensorView{reinterpret_cast<void *>(desc[0].cast<uintptr_t>()),
-                   desc[1].cast<std::vector<int64_t>>(),
-                   static_cast<DType>(desc[2].cast<int>())});
-  }
-  return result;
-}
 void prepare_tma_descriptor(uintptr_t, uintptr_t, int64_t, int64_t, uintptr_t);
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("prepare_descriptor", &prepare_tma_descriptor);
-  m.def("launch", [](py::dict in, py::dict out, py::dict work, Options opts,
-                     uintptr_t stream) {
-    student_launch(unpack(in), unpack(out), unpack(work), opts,
-                   reinterpret_cast<cudaStream_t>(stream));
-    auto err = cudaGetLastError();
-    if (err != cudaSuccess)
-      throw std::runtime_error(cudaGetErrorString(err));
-  });
+
+void prepare_descriptor(tvm::ffi::TensorView input,
+                        tvm::ffi::TensorView descriptor, int64_t stream) {
+  int device = -1;
+  lab_ffi::check_tensor(input, device);
+  lab_ffi::check_tensor(descriptor, device);
+  if (input.ndim() != 2 || lab_ffi::dtype(input) != DType::F32 ||
+      input.size(1) % 4 || lab_ffi::address(input) % 16 ||
+      lab_ffi::dtype(descriptor) != DType::U8 ||
+      lab_ffi::address(descriptor) % 64)
+    throw std::runtime_error("invalid TMA input or descriptor buffer");
+  lab_ffi::check_shape(descriptor, {128});
+  tvm::ffi::CUDADeviceGuard guard(device);
+  prepare_tma_descriptor(lab_ffi::address(input), lab_ffi::address(descriptor),
+                         input.size(0), input.size(1), stream);
 }
+
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(prepare_descriptor, prepare_descriptor);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(launch, lab_ffi::launch);

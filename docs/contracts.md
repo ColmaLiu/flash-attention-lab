@@ -12,4 +12,10 @@ C++ 输入键是 `q/k/v`、`a/b` 或 `x`；输出键是 `o/lse`、`c` 或 `y`。
 
 学生、完整答案、快速库、数学 oracle 是独立入口。空学生必须失败；即使其他三者全部通过，也不能将学生记为完成。FP64 oracle 从已量化的同一输入计算，避免把输入量化误差混入 kernel 误差。
 
-需要计时外的描述符准备时，可在学生 `entry.py` 中声明 `BACKEND = "python"`，提供 `prepare(inputs, outputs, workspace, config, stream)` 并返回无参数 launcher。该 launcher 仍必须调用自己的设备实现，不能转交数学参考或库基线。`build_cuda(ID)` 可编译学生目录内的 `kernel.cu` 与可选 `binding.cpp`；完整答案使用独立的 `solution=True`。`IMPLEMENTED` 检查仍在分配和准备之前。
+需要计时外的描述符准备时，可在学生 `entry.py` 中声明 `BACKEND = "python"`，提供 `prepare(inputs, outputs, workspace, config, stream)` 并返回无参数 launcher。该 launcher 仍必须调用自己的设备实现，不能转交数学参考或库基线。`build_cuda(ID)` 通过 TVM FFI 编译学生目录内的 `kernel.cu` 与可选 `binding.cpp`；完整答案使用独立的 `solution=True`。`IMPLEMENTED` 检查仍在分配和准备之前。
+
+Python/C++ 边界统一使用固定版本的 TVM FFI。`tensor_arguments(tensors, stream)` 在 prepare 阶段通过 DLPack 零拷贝转换，并持有张量存储；`launch_arguments(...)` 同时准备通用张量映射与数值配置。公共绑定把这些张量转换成上述课程 `TensorView`，包括 DLPack 的 `byte_offset`；学生的 `student_launch` 签名不变。自定义绑定使用 `TVM_FFI_DLL_EXPORT_TYPED_FUNC` 导出函数，不再使用 Python 扩展模块宏。
+
+GEMM 和 attention 的参考答案返回 FFI 引用计数对象，其中持有本地准备状态及输入、输出张量。它的类型与当前构建绑定，不能传给其他实现的 `run`。launcher 始终使用 prepare 时给定的 CUDA stream；调用者需保持 plan 及该 stream 存活，直到异步工作和捕获的 Graph 使用结束。转换、TMA 描述符编码和分配仍在计时外，重复 launch 不进行 DLPack 转换。FFI 不提供设备算法，也不隐式调用库基线。
+
+维护绑定时可显式运行 `./lab python -m pytest -q tests/gpu/test_ffi_bindings.py`。这组 SM100 回归检查张量生命周期、不同调用 stream、Graph capture、状态类型与 split-K workspace；各关完整正确性和性能验收仍通过通常的 `check --solution` 与 `solution` 命令运行。

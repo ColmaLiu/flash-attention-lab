@@ -60,16 +60,11 @@ def prepare(exercise_id, inputs, config=None, *, solution=False):
         }
         stream = torch.cuda.current_stream(t.device).cuda_stream
         if e["backend"] == "cuda" and getattr(module, "BACKEND", None) != "python":
-            from .build import build_cuda, descriptors
+            from .build import build_cuda
+            from .ffi import launch_arguments
 
             lib = build_cuda(exercise_id, solution=solution)
-            args = (
-                descriptors(inputs),
-                descriptors(outputs),
-                descriptors(workspace),
-                cfg,
-                stream,
-            )
+            args = launch_arguments(inputs, outputs, workspace, cfg, stream)
 
             def launch():
                 return lib.launch(*args)

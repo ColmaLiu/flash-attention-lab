@@ -54,7 +54,7 @@ def fingerprint(e):
         )
     }
     packages = {}
-    for name in ("torch", "ninja"):
+    for name in ("torch", "ninja", "apache-tvm-ffi"):
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

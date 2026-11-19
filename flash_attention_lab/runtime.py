@@ -82,9 +82,7 @@ def configure_runtime():
     if toolkit:
         os.environ["CUDA_HOME"] = str(toolkit)
     os.environ.setdefault("MAX_JOBS", "2")
-    os.environ.setdefault(
-        "TORCH_EXTENSIONS_DIR", str(ROOT / ".cache" / "torch_extensions")
-    )
+    os.environ.setdefault("TVM_FFI_CACHE_DIR", str(ROOT / ".cache" / "tvm_ffi"))
     os.environ.setdefault("CUDA_CACHE_PATH", str(ROOT / ".cache" / "cuda"))
     paths = os.environ.get("PYTHONPATH", "").split(os.pathsep)
     os.environ["PYTHONPATH"] = os.pathsep.join(

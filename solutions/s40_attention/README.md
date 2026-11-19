@@ -1,6 +1,6 @@
 # CUDA/PTX：SM100 完整 attention 基线
 
-入口为 `entry.py → binding.cpp → kernel.cu → sm100_attention.cuh`，核心实现是本地 [sm100_attention.cuh](sm100_attention.cuh)。本课选择 `Overlap=false, Numerics=false, Persistent=false`；s41、s42 用同一设备实现研究执行交错与数值，s43 使用独立的两路实现。`entry.py` 只负责编译和传入预分配指针，数学计算由 CUDA/PTX 完成。
+入口为 `entry.py → binding.cpp → kernel.cu → sm100_attention.cuh`，核心实现是本地 [sm100_attention.cuh](sm100_attention.cuh)。本课选择 `Overlap=false, Numerics=false, Persistent=false`；s41、s42 用同一设备实现研究执行交错与数值，s43 使用独立的两路实现。`entry.py` 负责编译，并通过 TVM FFI 零拷贝传入预分配张量；准备状态保留张量引用，数学计算由 CUDA/PTX 完成。
 
 ## 从 GEMM 连接到 attention
 

@@ -9,6 +9,7 @@ The host validates supported tile combinations; see README.md for layouts.
 """
 
 from flash_attention_lab.build import build_cuda
+from flash_attention_lab.ffi import tensor_arguments
 
 IMPLEMENTED = True
 BACKEND = "python"
@@ -22,14 +23,11 @@ def workspace_spec(inputs, config):
 
 def prepare(inputs, outputs, workspace, config, stream):
     lib = build_cuda("s32_specialize", solution=True)
-    a, b, out = inputs["a"], inputs["b"], outputs["c"]
+    tensors = tensor_arguments({**inputs, **outputs}, stream)
     state = lib.prepare(
-        a.data_ptr(),
-        b.data_ptr(),
-        out.data_ptr(),
-        a.shape[0],
-        b.shape[1],
-        a.shape[1],
+        tensors["a"],
+        tensors["b"],
+        tensors["c"],
         stream,
         int(config.get("tile_m", 0)),
         int(config.get("tile_n", 0)),
