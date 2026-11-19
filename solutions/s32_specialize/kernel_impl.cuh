@@ -182,6 +182,9 @@ __global__ __launch_bounds__(Single ? 128 : 160) void gemm(
   __shared__ uint64_t full[Stages], empty[Stages];
   __shared__ unsigned accum;
   int tid = threadIdx.x, warp = tid / 32;
+  int m = blockIdx.y * BM, n = blockIdx.x * BN;
+  int first = blockIdx.z * tiles_per_split;
+  int steps = min(tiles_per_split, (K + BK - 1) / BK - first);
   if (tid == 0) {
 #pragma unroll
     for (int s = 0; s < Stages; ++s) {
@@ -189,6 +192,12 @@ __global__ __launch_bounds__(Single ? 128 : 160) void gemm(
       init(&empty[s]);
     }
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    if constexpr (!Single) {
+      // Start the first operand transfer before allocating TMEM. This
+      // prologue owns slot 0; the producer warp starts at iteration 1.
+      // The issuer still waits for full[0] after the allocation/CTA handoff.
+      load_tile<BM, BN, BK>(&a, &b, tiles, &full[0], m, n, first * BK, packed);
+    }
   }
   if (warp == 0) {
     asm volatile(
@@ -200,9 +209,6 @@ __global__ __launch_bounds__(Single ? 128 : 160) void gemm(
                      : "memory");
   }
   __syncthreads();
-  int m = blockIdx.y * BM, n = blockIdx.x * BN;
-  int first = blockIdx.z * tiles_per_split;
-  int steps = min(tiles_per_split, (K + BK - 1) / BK - first);
   if constexpr (Single) {
     // One issuer owns both asynchronous engines. Preload the ring, then refill
     // a retired slot while the most recently issued MMA is still executing.
@@ -231,7 +237,7 @@ __global__ __launch_bounds__(Single ? 128 : 160) void gemm(
     }
   } else {
     if (warp == 4 && ((BK >= 256 || Stages >= 4) ? elected() : tid == 128)) {
-      for (int i = 0; i < steps; ++i) {
+      for (int i = 1; i < steps; ++i) {
         int s = i % Stages, round = i / Stages;
         if (round)
           wait(&empty[s], (round - 1) & 1);

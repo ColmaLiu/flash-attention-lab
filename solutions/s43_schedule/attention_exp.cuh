@@ -40,7 +40,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cuda_runtime.h>
 
 namespace sm100_attention_exp {
-// Domain for this caller: x,y <= 4 (<=0 without delayed rescaling), with
+// Domain: x,y <= 4+2^-17 (<=2^-17 without delayed rescaling), with
 // -infinity permitted for masks. A clamp to -127 plus exponent reconstruction
 // yields exact +0 for -inf; final FTZ makes all x<-126 underflows explicit +0.
 // For normal outputs this uses the upstream degree-4 minimax coefficients,

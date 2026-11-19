@@ -34,9 +34,9 @@ causal attention 的不同 query 区域拥有不同有效 key 数，工作量呈
 
 paired 的 score/Pready/PV phase 为每个 WG 的 `t&1`，KV phase 为 `(t/2)&1`、empty count 为 2；single 的 score/Pready/PV 使用槽 `t%2`、phase `(t/2)&1`，KV 使用槽 `t%3`、phase `(t/3)&1`、empty count 为 1。producer 复用 KV 时等上一代 empty，consumer 发布 Pready 前完成 TMEM stores 与 WG fence/barrier 交接。PTX 8.7 的同 accumulator/shape MMA 顺序保证不覆盖这里不同 S/O 的复用关系，因此显式 PV 完成等待不能仅凭“同一线程发射”删除。
 
-默认启用混合四阶指数与 delayed rescale。公共 scale 必须可表示为正且有限的 FP32。令 `scale2=scale*log2(e)`；`isnormal(scale) && isnormal(scale2) && scale2<=1` 时使用原始 QK 最大值归约与 packed `f32x2` 独立乘法、减法，使 score 与最大值采用相同的乘法舍入，其余合法 scale 保留原始行参考值，在 FP64 中计算分数差乘 scale、correction 与 LSE 的参考值项，避免 scale2 溢出或次正规数被 flush-to-zero。原始 QK 的 FP32 累加与最终 FP32 LSE 仍受表示范围限制，不保证任意有限输入的全域精度。
+默认启用混合四阶指数与 delayed rescale。公共 scale 必须可表示为正且有限的 FP32。令 `scale2=scale*log2(e)`；`isnormal(scale) && isnormal(scale2) && scale2<=1` 时使用原始 QK 最大值归约与 packed `f32x2` 运算；paired 仅在 `abs(maximum)<128` 的安全范围内合并 FMA，其余行先独立舍入乘法再减参考值，single 始终使用独立乘减，其余合法 scale 保留原始行参考值，在 FP64 中计算分数差乘 scale、correction 与 LSE 的参考值项，避免 scale2 溢出或次正规数被 flush-to-zero。原始 QK 的 FP32 累加与最终 FP32 LSE 仍受表示范围限制，不保证任意有限输入的全域精度。
 
-`polynomial_exp=True` 在正常 scale 分支中将每行前 96 个 score 每四个中的第一对交给 packed 四阶多项式，最后 32 个全走 SFU，即 48 个四阶、80 个 SFU；关闭该开关后全走 SFU。极端 scale 分支与 correction 始终走 SFU。四阶 helper 用 round-down 偏置归约、四条 packed FMA 和指数位重建，末尾显式 FTZ 保证 masked `-inf` 严格变成零。先舍入 score 的缩放乘法再减参考值，才保留最大值指数为零的性质；对已舍入 maximum 使用 FMA 会让较大有限 QK 的乘法残差使 P 溢出或全零。delayed rescale 把有效指数输入限制到至多 4；关闭后至多为 0。系数来自固定 FA4 源码，helper 保留其 BSD-3-Clause 许可。本关不再使用 s42 的六阶实现；CPU 误差扫描也不替代原容差下的完整 CUDA 检查，尤其要验证近零 LSE、mask 和尺度切换。
+`polynomial_exp=True` 在正常 scale 分支中每行使用 48 个四阶指数、80 个 SFU 指数；paired 每 16 个 score 的前三对走多项式、后五对走 SFU，single 保留前 96 个每四个取第一对、最后 32 个全走 SFU。关闭该开关后全走 SFU。极端 scale 分支与 correction 始终走 SFU。四阶 helper 用 round-down 偏置归约、四条 packed FMA 和指数位重建，末尾显式 FTZ 保证 masked `-inf` 严格变成零。大参考值必须先舍入 score 的缩放乘法，防止 FMA 残差使 P 溢出或全零。paired 的小参考值分支利用稳定 softmax 允许近似参考值的性质；其乘法残差不超过 `2^-17`，delayed rescale 下最大指数输入不超过 `4+2^-17`，关闭后不超过 `2^-17`。安全范围推导与分支切换见答案说明。系数来自固定 FA4 源码，helper 保留其 BSD-3-Clause 许可。本关不再使用 s42 的六阶实现；CPU 误差扫描也不替代原容差下的完整 CUDA 检查，尤其要验证近零 LSE、mask 和尺度切换。
 
 同一 warp 的 correction 全为 1 时跳过 O 的读乘写，最终归一化用一次倒数和 `int4` shared 重排输出。descriptor 基址与增量按 16 bytes 编码，MMA warp 先 `elect.sync` 选出发射线程，减少逐条 descriptor/选举开销。混合指数与 delayed rescale 可以独立消融，性能对照也必须使用相同数值选项。
 
@@ -71,6 +71,8 @@ TMEM 在 CTA 内跨任务保留，每个任务重置统计与 barriers。paired 
 | `scaled_max_fp16_multi` | stress | `(1, 256, 128, 64)` | fp16/full | 相同数值反例，增加任务数及双 key tile。 |
 | `scaled_max_bf16` | stress | `(1, 128, 1, 64)` | bf16/full | 较大且精确的有限 QK，防止 FMA 残差使 P 全零；O=1。 |
 | `scaled_max_bf16_multi` | stress | `(1, 256, 128, 64)` | bf16/full | 相同数值反例，增加任务数及双 key tile。 |
+| `scaled_max_transition_fp16` | edge | `(1, 256, 128, 64)` | fp16/full | 同一 warp 内参考值跨越正负安全边界，第二块 key 触发部分行切换路径；两块 V 不同。 |
+| `scaled_max_transition_bf16` | edge | `(1, 256, 128, 64)` | bf16/full | BF16 下重复混合分支与跨 tile 参考值切换检查。 |
 
 `debug` 用于缩小问题，`edge` 检验边界，`stress` 检验数值或生命周期，`perf` 选择代表性工作负载；所有声明案例都必须通过正确性验收。case 0 是第一行；用 `task -v` 查看序号。
 

@@ -53,6 +53,19 @@ def make_inputs(e, case, device="cpu"):
             inputs["q"][..., 0] = value
             inputs["k"][..., 0] = value
             inputs["v"].fill_(1.0)
+        if pattern == "scaled_max_transition":
+            # Adjacent rows straddle +/-128 after log2 scaling; positive
+            # rows cross the guard when the second key tile doubles K.
+            # All dots are exact, and V differs between the two key tiles.
+            inputs["q"].zero_()
+            inputs["k"].zero_()
+            rows = torch.tensor([88, 89, -88, -89], dtype=dtype, device=device)
+            rows = rows[torch.arange(shape[1], device=device) % 4]
+            inputs["q"][..., 0] = rows[None, :, None]
+            inputs["k"][:, :128, :, 0] = 8
+            inputs["k"][:, 128:, :, 0] = 16
+            inputs["v"][:, :128].fill_(1.0)
+            inputs["v"][:, 128:].fill_(3.0)
         if pattern == "wide_raw_scores":
             # Exact BF16 powers: each QK dot has one product +/-2^127,
             # representable in FP32. Their raw difference can overflow even

@@ -81,32 +81,6 @@ __device__ __forceinline__ uint64_t descriptor(const void *p,
   return (uint64_t(shared(p)) >> 4) | (uint64_t(leading / 16) << 16) |
          (uint64_t(1024 / 16) << 32) | (1ull << 46) | (2ull << 61);
 }
-template <class T, int N, bool BTransposed = false>
-__device__ __forceinline__ void mma(unsigned output, uint64_t a, uint64_t b,
-                                    bool accumulate) {
-  constexpr unsigned type = std::is_same_v<T, __half> ? 0 : 1;
-  constexpr unsigned instruction = (1u << 4) | (type << 7) | (type << 10) |
-                                   (unsigned(BTransposed) << 16) |
-                                   ((N / 8) << 17) | ((BM / 16) << 24);
-  asm volatile("{ .reg .pred accumulate; setp.ne.b32 accumulate, %4, 0; "
-               "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
-               "{%5,%5,%5,%5}, accumulate; }" ::"r"(output),
-               "l"(a), "l"(b), "r"(instruction), "r"(int(accumulate)), "r"(0)
-               : "memory");
-}
-template <class T, int N>
-__device__ __forceinline__ void mma_ts(unsigned output, unsigned a, uint64_t b,
-                                       bool accumulate) {
-  constexpr unsigned type = std::is_same_v<T, __half> ? 0 : 1;
-  constexpr unsigned instruction = (1u << 4) | (type << 7) | (type << 10) |
-                                   (1u << 16) | ((N / 8) << 17) |
-                                   ((BM / 16) << 24);
-  asm volatile("{ .reg .pred accumulate; setp.ne.b32 accumulate, %4, 0; "
-               "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, "
-               "{%5,%5,%5,%5}, accumulate; }" ::"r"(output),
-               "r"(a), "l"(b), "r"(instruction), "r"(int(accumulate)), "r"(0)
-               : "memory");
-}
 __device__ __forceinline__ void commit_mma(uint64_t *bar) {
   asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
                "cluster.b64 [%0];" ::"r"(shared(bar))
@@ -146,6 +120,16 @@ __device__ __forceinline__ void mul2(float *p, float factor) {
       : "=l"(reinterpret_cast<uint64_t &>(y))
       : "l"(reinterpret_cast<const uint64_t &>(x)),
         "l"(reinterpret_cast<const uint64_t &>(f)));
+  p[0] = y.x;
+  p[1] = y.y;
+}
+__device__ __forceinline__ void fma2(float *p, float factor, float bias) {
+  float2 x{p[0], p[1]}, f{factor, factor}, b{bias, bias}, y;
+  asm("fma.rn.f32x2 %0, %1, %2, %3;"
+      : "=l"(reinterpret_cast<uint64_t &>(y))
+      : "l"(reinterpret_cast<const uint64_t &>(x)),
+        "l"(reinterpret_cast<const uint64_t &>(f)),
+        "l"(reinterpret_cast<const uint64_t &>(b)));
   p[0] = y.x;
   p[1] = y.y;
 }
@@ -193,30 +177,134 @@ load_kv(const CUtensorMap *kmap, const CUtensorMap *vmap, T *k, T *v,
     copy_tile(vmap, v + (d / 64) * BN * 64, bar, d, head, row, batch);
   }
 }
+// Keep each MMA sequence in one PTX block so the descriptor increments remain
+// in the issuing warp's uniform registers instead of materializing all eight
+// address pairs in ordinary registers. QK advances by two 16-byte units per
+// K16 step, then by 1018 units to the next 64-column swizzle panel. PV advances
+// its packed P address by eight TMEM columns and its V descriptor by 128 units.
+// The completion barrier and operand layouts are identical to the loop form.
 template <class T, int D>
 __device__ __forceinline__ void qk(T *q, T *k, unsigned out, uint64_t *bar) {
-  const uint64_t qa_base = descriptor(q), kb_base = descriptor(k);
-#pragma unroll
-  for (int d = 0; d < D; d += 16) {
-    constexpr int BytesPerElement = sizeof(T);
-    const uint64_t qa =
-        qa_base + ((d / 64) * BM * 64 + d % 64) * BytesPerElement / 16;
-    const uint64_t kb =
-        kb_base + ((d / 64) * BN * 64 + d % 64) * BytesPerElement / 16;
-    mma<T, BN>(out, qa, kb, d != 0);
+  constexpr unsigned type = std::is_same_v<T, __half> ? 0 : 1;
+  constexpr unsigned instruction = (1u << 4) | (type << 7) | (type << 10) |
+                                   ((BN / 8) << 17) | ((BM / 16) << 24);
+  if constexpr (D == 64) {
+    asm volatile("{ .reg .pred accumulate; .reg .b64 a,b;\n"
+                 "setp.ne.u32 accumulate, 0, 0;\n"
+                 "mov.b64 a, %1; mov.b64 b, %2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+                 "cluster.b64 [%4];\n"
+                 "}\n" ::"r"(out),
+                 "l"(descriptor(q)), "l"(descriptor(k)), "r"(instruction),
+                 "r"(shared(bar)), "r"(0)
+                 : "memory");
   }
-  commit_mma(bar);
+  if constexpr (D == 128) {
+    asm volatile("{ .reg .pred accumulate; .reg .b64 a,b;\n"
+                 "setp.ne.u32 accumulate, 0, 0;\n"
+                 "mov.b64 a, %1; mov.b64 b, %2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 1018; add.u64 b, b, 1018;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "add.u64 a, a, 2; add.u64 b, b, 2;\n"
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], a, b, %3, "
+                 "{%5,%5,%5,%5}, accumulate;\n"
+                 "setp.eq.u32 accumulate, 0, 0;\n"
+                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+                 "cluster.b64 [%4];\n"
+                 "}\n" ::"r"(out),
+                 "l"(descriptor(q)), "l"(descriptor(k)), "r"(instruction),
+                 "r"(shared(bar)), "r"(0)
+                 : "memory");
+  }
 }
+
 template <class T, int D>
 __device__ __forceinline__ void pv(unsigned p, T *v, unsigned out,
                                    uint64_t *bar, bool accumulate) {
-  const uint64_t vb_base = descriptor(v, BN * 128);
-#pragma unroll
-  for (int k = 0; k < BN; k += 16) {
-    mma_ts<T, D>(out, p + k / 2, vb_base + k * 64 * sizeof(T) / 16,
-                 k != 0 || accumulate);
-  }
-  commit_mma(bar);
+  constexpr unsigned type = std::is_same_v<T, __half> ? 0 : 1;
+  constexpr unsigned instruction = (1u << 4) | (type << 7) | (type << 10) |
+                                   (1u << 16) | ((D / 8) << 17) |
+                                   ((BM / 16) << 24);
+  asm volatile("{ .reg .pred add; .reg .b64 b; .reg .b32 a;\n"
+               "setp.ne.u32 add, %5, 0;\n"
+               "mov.u32 a, %1; mov.b64 b, %2;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "add.u32 a, a, 8; add.u64 b, b, 128;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "add.u32 a, a, 8; add.u64 b, b, 128;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "add.u32 a, a, 8; add.u64 b, b, 128;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "add.u32 a, a, 8; add.u64 b, b, 128;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "add.u32 a, a, 8; add.u64 b, b, 128;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "add.u32 a, a, 8; add.u64 b, b, 128;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "add.u32 a, a, 8; add.u64 b, b, 128;\n"
+               "tcgen05.mma.cta_group::1.kind::f16 [%0], [a], b, %3, "
+               "{%6,%6,%6,%6}, add;\n"
+               "setp.eq.u32 add, 0, 0;\n"
+               "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::"
+               "cluster.b64 [%4];\n"
+               "}\n" ::"r"(out),
+               "r"(p), "l"(descriptor(v, BN * 128)), "r"(instruction),
+               "r"(shared(bar)), "r"(int(accumulate)), "r"(0)
+               : "memory");
 }
 
 // Softmax WG0/WG1 each own one query tile and one S/P/O region. A separate
@@ -286,7 +374,7 @@ __global__ __launch_bounds__(Threads, 1) void attention(
     if (threadIdx.x >= QueryGroups * BM) {
       // All four control warps release registers. Separate elected lanes
       // run the TMA and MMA schedules; all 128 lanes join the task boundary.
-      asm volatile("setmaxnreg.dec.sync.aligned.u32 56;" ::: "memory");
+      asm volatile("setmaxnreg.dec.sync.aligned.u32 80;" ::: "memory");
       if (threadIdx.x == QueryGroups * BM) {
 #pragma unroll
         for (int i = 0; i < QueryGroups; ++i)
@@ -335,7 +423,7 @@ __global__ __launch_bounds__(Threads, 1) void attention(
       asm volatile("barrier.sync 0, 384;" ::: "memory");
       asm volatile("setmaxnreg.inc.sync.aligned.u32 168;" ::: "memory");
     } else {
-      asm volatile("setmaxnreg.inc.sync.aligned.u32 224;" ::: "memory");
+      asm volatile("setmaxnreg.inc.sync.aligned.u32 208;" ::: "memory");
       const int group = threadIdx.x / BM, local_row = threadIdx.x % BM;
       const int warp = (threadIdx.x / 32) % 4;
       T *q = q_all + group * BM * D;
@@ -400,23 +488,33 @@ __global__ __launch_bounds__(Threads, 1) void attention(
         maximum = next_max;
         float sums[4] = {};
         if constexpr (PositiveScale) {
+          // A stable softmax reference need not equal the exact scaled max.
+          // For |maximum| < 128, the largest exact scaled score is <132
+          // (delayed rescale adds <4). Its FP32 product-rounding residual
+          // is <=2^-17, so FMA keeps at least one initial probability near
+          // one and every probability below 2^(4+2^-17), safely in FP16.
+          // Larger references must first round the product. FMA with a
+          // multiplier of one is then exactly the original subtraction,
+          // retaining the finite-score overflow/underflow repair. This
+          // per-row branch contains no warp-collective operations.
+          float exponent_scale = scale2;
+          if (!(fabsf(maximum) < 128.f)) {
 #pragma unroll
-          for (int j = 0; j < BN; j += 2) {
-            // Match tile_max's rounded multiplication before subtracting.
-            // An FMA against an already rounded maximum leaves a large
-            // residual for large finite QK, overflowing/underflowing P.
-            mul2(scores + j, scale2);
-            float reference[2] = {-maximum, -maximum};
-            add2(scores + j, reference);
+            for (int j = 0; j < BN; j += 2)
+              mul2(scores + j, scale2);
+            exponent_scale = 1.f;
           }
+#pragma unroll
+          for (int j = 0; j < BN; j += 2)
+            fma2(scores + j, exponent_scale, -maximum);
         }
         if constexpr (Polynomial && PositiveScale) {
-// 48 of 128 exponents use the packed quartic: first pair in
-// each group of four, with the final 32 scores all on SFU.
+// 48 of 128 exponents use the packed quartic: three pairs in
+// each group of sixteen, interleaved with five SFU pairs.
 // Correction remains SFU; delayed rescaling is independent.
 #pragma unroll
           for (int j = 0; j < BN; j += 2) {
-            if (j < BN - 32 && j % 4 == 0)
+            if (j % 16 < 6)
               sm100_attention_exp::exp2_packed_quartic(scores + j);
             else {
               scores[j] = exp2_sfu(scores[j]);

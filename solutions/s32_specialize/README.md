@@ -4,7 +4,7 @@
 
 ## 从 s31 增加了哪些机制
 
-s31 每个 K tile 串行完成 TMA、MMA 和等待。这里第五个 warp 推进 TMA，第一 warp 的一个线程推进 MMA，前四个 warp 最终读取 TMEM。每个 slot 有独立的 full/empty barrier，producer 可提前填充尚未被 MMA 使用的 slot。短 K、长 K、窄 N 使用不同资源预算，减少流水线等待或不足的 CTA 并行度。
+s31 每个 K tile 串行完成 TMA、MMA 和等待。这里 thread 0 初始化 barriers 后先搬运第一个 K tile，让首块 TMA 与后续 TMEM 分配重叠；第五个 warp 从第二个 K tile 起推进 TMA，第一 warp 的一个线程推进 MMA，前四个 warp 最终读取 TMEM。每个 slot 有独立的 full/empty barrier，producer 可提前填充尚未被 MMA 使用的 slot。短 K、长 K、窄 N 使用不同资源预算，减少流水线等待或不足的 CTA 并行度。
 
 | 输入特征 | 默认 CTA tile `BM×BN×BK` | 缓冲数 | 数据搬运 |
 |---|---|---:|---|
@@ -29,6 +29,8 @@ A 在 shared memory 中按 64 个 BF16 元素的 K 面板排列，每个面板�
 - `full[s]` 跟踪 TMA。producer 先为完整 A/B stage 的字节数执行 `arrive.expect_tx`，再发出对应拷贝。MMA issuer 必须成功等待 full 后才能读取 operand。
 - `empty[s]` 跟踪 MMA。issuer 为当前 stage 的全部 K16 指令执行 commit；producer 必须成功等待其完成，才能覆盖同一 stage。
 - 迭代 i 使用 `slot=i%Stages` 和 `phase=(i/Stages)&1`。producer 首轮无需等待 empty，回绕时等待上一轮 phase；consumer 等待本轮 full phase。
+
+默认分工路径的首块由 thread 0 在初始化的 async proxy fence 后发布，MMA issuer 仍需经过 TMEM 分配后的 CTA 交接并等待 `full[0]`。第五个 warp 跳过已发布的第零轮，后续复用 slot 0 时照常等待 `empty[0]`。K 只有一块时，这个 producer warp 无需发出拷贝；split-K 的首块坐标为当前 split 的 `first*BK`。显式 `single_issuer` 消融保留其原有预填充流程。
 
 这里没有逐 K tile 的 CTA barrier。最后一条 MMA 的完成通知由同一 issuer 等待，之后通过 CTA 同步和 `after_thread_sync` fence 把结果交给四个 epilogue warp。各 warp 完成 TMEM load 的 `wait::ld`，再用 before/after-thread-sync fence 与 CTA barrier 保证所有读取结束，最后释放 TMEM。完成等待与跨线程交接是不同的要求。
 

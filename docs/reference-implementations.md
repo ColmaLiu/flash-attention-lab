@@ -32,7 +32,7 @@ s43 使用独立的 128-query × 128-key 设备实现，[attention_common.cuh](.
 
 s43 的手工角色同步使用无 `.aligned` 的 `barrier.sync`。paired 的 TMA 线程初始化 mbarrier 后经 CTA barrier 发布，thread 0 在任务末尾排空并 invalidate，再交给下一任务。公共 scale 为正且有限的 FP32；只有 scale 与 `scale2=scale*log2(e)` 均为 normal 且 `scale2<=1` 才走 packed FP32 快路径，其余合法 scale 用原始 QK 参考值与 FP64 差乘 scale，避免 scale2 溢出或 flush-to-zero。QK 累加和最终 LSE 的 FP32 表示范围仍是数值边界。
 
-s43 默认开启 `polynomial_exp` 和 delayed rescale。两条路径共用 [attention_exp.cuh](../solutions/s43_schedule/attention_exp.cuh)：正常 scale 下每行 128 个指数中 48 个用 packed 四阶、80 个用 SFU，最后 32 个全部用 SFU；关闭 `polynomial_exp`、极端 scale 分支及 correction 使用 SFU。helper 保留固定 FA4 系数的 BSD-3-Clause 来源，显式处理 masked 零与 FTZ。局部多项式误差和指令减少都需经过完整数值及性能验证，不沿用 s42 六阶消融的结论。
+s43 默认开启 `polynomial_exp` 和 delayed rescale。两条路径共用 [attention_exp.cuh](../solutions/s43_schedule/attention_exp.cuh)：正常 scale 下每行 128 个指数中 48 个用 packed 四阶、80 个用 SFU。paired 每 16 个元素的前三对用多项式、后五对用 SFU；single 保留前 96 个每四个取第一对、最后 32 个全用 SFU。关闭 `polynomial_exp`、极端 scale 分支及 correction 使用 SFU。helper 保留固定 FA4 系数的 BSD-3-Clause 来源，显式处理 masked 零与 FTZ。局部多项式误差和指令减少都需经过完整数值及性能验证，不沿用 s42 六阶消融的结论。
 
 ## 怎样判断答案能否帮助优化
 

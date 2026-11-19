@@ -16,7 +16,7 @@
 | KV 缓冲 | 两组完整 K/V pair，两个 query 共用 | 三组完整 K/V pair |
 | TMEM 列 | S0/S1 从 0/128 开始，P0/P1 从 64/192 开始，O0/O1 从 256/384 开始 | S0/S1 从 0/128 开始，P0/P1 从 64/192 开始，O 从 256 开始 |
 | 动态 shared 数据区，D64 / D128 | 96 / 192 KiB | 112 / 224 KiB |
-| 寄存器分配 | softmax 每线程 224、控制 WG 56；任务边界恢复 168 | 静态分配，不调用 setmaxnreg |
+| 寄存器分配 | softmax 每线程 208、控制 WG 80；任务边界恢复 168 | 静态分配，不调用 setmaxnreg |
 
 这里 WG 是 128 个线程。两条路径都申请 512 列 TMEM，另有 shared barriers 和 TMEM 指针；表中 shared 数量只包含 Q/K/V 数据。grid 上限不等于实际驻留数，shared、寄存器及 TMEM 共同限制 occupancy。
 
@@ -26,21 +26,26 @@ TMA 直接描述 BNHD，Q/K/V 的 shared tile 按 `[D/64,128,64]` 分 panel，�
 
 QK 的 128 个 FP32 score 先全部读入寄存器，再把 FP16/BF16 P 两个元素打包到一个 32-bit TMEM cell，写进同一 score 槽的后 64 列。PV 以 TMEM P 为 A、shared V 为 B，直接累加到 FP32 TMEM O。P 写入覆盖已经读完的 score；下一次 QK 覆盖此槽前必须等 PV 结束。行 maximum 和 denominator 留在寄存器，跨 key tile 的 O 分子留在 TMEM。
 
-默认 `polynomial_exp=True, delayed_rescale=True`。公共 API 要求 scale 可表示为正且有限的 FP32。令 `scale2=scale*log2(e)`；当 `isnormal(scale) && isnormal(scale2) && scale2<=1` 时，先归约原始 QK 的最大值，再缩放单个最大值；指数输入先用独立 packed 乘法舍入，再减去缩放后的参考值。score 和最大值必须采用相同的乘法舍入，不能合并成 FMA：`fma(score, scale2, -rounded_max)` 会留下乘法舍入残差，较大的有限 QK 可使本应为零的指数变成很大的正数或负数，进而让低精度 P 溢出或全零。求和与 O correction 也使用 packed FP32 运算。`scale2<=1` 避免有限的原始 QK 最大值在 log2 缩放时溢出。
+默认 `polynomial_exp=True, delayed_rescale=True`。公共 API 要求 scale 可表示为正且有限的 FP32。令 `scale2=scale*log2(e)`；当 `isnormal(scale) && isnormal(scale2) && scale2<=1` 时，先归约原始 QK 最大值，再缩放单个最大值。`scale2<=1` 避免有限原始最大值在 log2 缩放时溢出。single 路径始终先用独立 packed 乘法舍入，再减参考值；paired 路径按每行参考值选择等价安全范围内的计算方式：
+
+- `abs(maximum)<128` 时使用 packed FMA。softmax 的稳定参考值不必与精确缩放最大值完全相等：delayed rescale 允许当前 tile 的已舍入最大值比参考值高不到 4，因此最大精确乘积小于 132，乘法舍入残差不超过 `2^-17`。最大指数输入不会超过 `4+2^-17`（关闭 delayed rescale 时为 `2^-17`），FP16 概率不会溢出，第一块至少有一个接近 1 的概率，不会全部下溢。
+- 超出该范围时先独立计算并舍入 `score*scale2`，再使用乘数为 1 的 FMA 减去参考值。乘以 1 精确，所以结果与原来的独立乘法、减法相同；较大有限 QK 的 Inf/NaN 修复仍然成立。分支只含逐线程算术，同一 warp 中不同的行可以选择不同分支。
+
+范围检查以实际数值决定，不使用 shape 或 case ID。不能对任意大参考值直接使用 `fma(score,scale2,-rounded_max)`：其残差可能远超安全指数范围，使 P 溢出或全零。求和与 O correction 仍使用 packed FP32 运算。
 
 其他合法 scale 走较慢的数值分支：行参考值保留为原始 QK，在 FP64 中计算 `(score-reference)*scale*log2(e)`、correction 与 delayed-rescale 判据，再把指数输入转为 FP32；LSE 的参考值乘 scale 也在 FP64 中完成。这样避免先形成 FP32 scale2 的溢出或次正规数被 flush-to-zero。QK Tensor Core 累加本身仍为 FP32，最终 LSE 也存为 FP32，二者必须处于可表示范围；这个分支不提供任意有限 Q/K/V 的全域精度保证，也不能补救已经溢出的 QK。
 
-正常 scale 路径中，`polynomial_exp=True` 让每行 128 个 score 中的 48 个指数使用四阶 packed 多项式、其余 80 个使用 `ex2.approx.ftz.f32`：前 96 个元素每四个取第一对，最后 32 个全部使用 SFU。helper 用 round-down 加偏置求整数部分，在 `[0,1)` 上做四条 packed FMA，再重建指数位；最后显式 FTZ，使次正规输出归零，masked `-inf` 也严格得到正零。系数及范围归约改编自固定版本 FA4 `utils.py` 的 `POLY_EX2[4]`、`ex2_emulation_2`/`e2e_asm2`，完整 BSD-3-Clause 许可保留在 helper 中。
+正常 scale 路径中，`polynomial_exp=True` 让每行 128 个 score 中的 48 个指数使用四阶 packed 多项式、其余 80 个使用 `ex2.approx.ftz.f32`。paired 在每 16 个元素中把前三对交给多项式、后五对交给 SFU，将两类工作分散在整行；single 保留前 96 个元素每四个取第一对、最后 32 个全部使用 SFU 的安排。helper 用 round-down 加偏置求整数部分，在 `[0,1)` 上做四条 packed FMA，再重建指数位；最后显式 FTZ，使次正规输出归零，masked `-inf` 也严格得到正零。系数及范围归约改编自固定版本 FA4 `utils.py` 的 `POLY_EX2[4]`、`ex2_emulation_2`/`e2e_asm2`，完整 BSD-3-Clause 许可保留在 helper 中。
 
-关闭 `polynomial_exp` 后所有 score 指数走 SFU；极端 scale 的 FP64 差值分支与每块 correction 始终使用 SFU。混合四阶与 delayed rescale 独立：后者在新最大值相对旧参考值增加不足 4 个 log2 单位时保留旧尺度，所以有效指数输入至多为 4，概率可大于 1；关闭后每块更新最大值，有效指数输入至多为 0。只有一个 warp 中至少一行 correction 不为 1 时，才集体读写该 warp 的 O 并修正；其余行乘 1。
+关闭 `polynomial_exp` 后所有 score 指数走 SFU；极端 scale 的 FP64 差值分支与每块 correction 始终使用 SFU。混合四阶与 delayed rescale 独立：后者在新最大值相对旧参考值增加不足 4 个 log2 单位时保留旧尺度，所以概率可大于 1；paired 的有界 FMA 路径还需计入上述 `2^-17` 乘法残差。关闭后每块更新最大值。只有一个 warp 中至少一行 correction 不为 1 时，才集体读写该 warp 的 O 并修正；其余行乘 1。
 
-`scaled_max_fp16/bf16` 及其 `_multi` 案例使用有限且精确的较大 QK、普通 scale 和 `V=1`，其解析 O 为 1，LSE 有限；少任务与多任务、双 key tile 分别覆盖两类调度输入。这个边界与 scale2 自身溢出、次正规 scale、QK 累加溢出不同。独立乘法与减法的性能成本必须保留在默认参考答案计时中。
+`scaled_max_fp16/bf16` 及其 `_multi` 案例使用有限且精确的较大 QK、普通 scale 和 `V=1`，其解析 O 为 1，LSE 有限；少任务与多任务、双 key tile 分别覆盖两类调度输入。这个边界与 scale2 自身溢出、次正规 scale、QK 累加溢出不同。范围检查与大参考值预舍入属于默认答案的设备计算，计入完整延迟。`scaled_max_transition_fp16/bf16` 在同一 warp 中交错放置正负参考值，覆盖范围两侧与第二块 key 到来时的分支切换；两块 V 不同，避免常量输出掩盖在线归一化问题。
 
 混合指数减少 SFU 指令，也增加 packed FMA、整数范围归约和重建指令，是否加速必须逐例测量。多项式的局部近似误差会传播到分母、P 舍入及最终 O/LSE；CPU 区间扫描只能提供采样证据，不能替代完整 CUDA oracle 与近零 LSE、尾部/causal mask、参考值上升等边界验证。保持原有容差；本关四阶实现与 [s42](../s42_numerics/README.md) 的六阶教学消融是不同实现。
 
 最终只计算一次分母倒数，读取 O、归一化并打包成 `int4`，通过已结束 Q 使用的 swizzled shared 区重排，随后合并写出 O；LSE 转回自然对数。尾部由 TMA 零填充、score 的 key/causal mask 和 O/LSE 的 query store guard 共同处理，集体操作的线程不能提前 return。noncausal 且完整 128-key tile 的模板省去逐元素 mask；causal 内部完整块也避开对角线的逐元素判断。
 
-`descriptor()` 编码的 shared 起始地址和 leading offset 以 16 bytes 为单位。QK helper 先构造 descriptor 基址，再加常量偏移：16 个半精度元素对应 `+2`，跨到下一个 64-column panel 对应 `+1024`；PV 的 V 在 key 增加 16 时对应 `+128`。这是编码后的地址增量，不能直接加元素数。MMA 控制 warp 先执行一次 `elect.sync` 选出发射线程，保留统一的 descriptor 计算，避免每条 MMA 重建地址和选举控制流；仍需通过生成的 SASS 核对编译结果。
+`descriptor()` 编码的 shared 起始地址和 leading offset 以 16 bytes 为单位。QK helper 先构造 descriptor 基址，再加常量偏移：16 个半精度元素对应 `+2`，跨到下一个 64-column panel 对应 `+1024`；PV 的 V 在 key 增加 16 时对应 `+128`。这是编码后的地址增量，不能直接加元素数。MMA 控制 warp 先执行一次 `elect.sync` 选出发射线程。paired 的 QK/PV 分别在一个原生 PTX 块中推进 descriptor：QK 连续 K16 步增加 2 个地址单位，跨 panel 增加 1018；PV 的 P 增加 8 个 TMEM 列，V descriptor 增加 128 个单位。这让发射端直接复用 uniform 寄存器，减少为所有步骤同时保留地址对的需求。完成 barrier、累加谓词和布局不变，仍需通过生成的 SASS 核对编译结果。
 
 ## 两种流水线的完成条件
 
@@ -66,7 +71,7 @@ TMEM allocation 由第一个 warp 在 CTA 开始时执行一次，跨任务保�
 
 任务结束时，所有角色完成异步工作和 epilogue；每个访问 Q 的 consumer 执行 async proxy fence 并汇合，才允许下个任务 TMA 覆盖 Q。thread 0 按各 KV 槽最后一次实际使用的 generation **排空 KV-empty**，再 invalidate barriers，最后经全 CTA barrier 允许下一任务重新初始化。初始化与 invalidate 不必由同一线程执行，但整个生命周期必须有这些完成等待与 CTA 交接；观察 PV 完成不能替代等待稍后提交的 empty arrival。
 
-paired 的动态寄存器分配与上述 TMEM 分配是两件事。控制 WG 先释放到 56，两个 softmax WG 增至 224；结束时 softmax 降到 168 并进入 CTA barrier，控制 WG 汇合并通过同一 barrier 后才恢复 168，避免它提前申请寄存器而持续重试。single 的 256 线程使用静态寄存器分配，不能沿用 paired 的入口寄存器数量假设。
+paired 的动态寄存器分配与上述 TMEM 分配是两件事。控制 WG 先释放到 80，两个 softmax WG 增至 208；结束时 softmax 降到 168 并进入 CTA barrier，控制 WG 汇合并通过同一 barrier 后才恢复 168，避免它提前申请寄存器而持续重试。single 的 256 线程使用静态寄存器分配，不能沿用 paired 的入口寄存器数量假设。
 
 `persistent_waves` 的 512 个 128-query tile 对应 **256 个 paired tasks**。它检查长 causal 循环及任务排序，但是否跨任务复用，必须比较所选路径的 `total_tasks` 与 `2*SM`；不能只看 query tile 数。`persistent_reuse` 有 512 个短任务，N128 只访问一个 KV 槽，适合检查跨任务初始化、TMEM 和 Q 复用。两槽跨任务控制实验可另外构造 causal `[1,256,H,64]`、`H>2*SM`（例如满足该条件时取 H=384），让 paired 的两个 KV 槽都被使用并跨任务复用；该手工控制例不属于 curriculum 的固定案例。
 

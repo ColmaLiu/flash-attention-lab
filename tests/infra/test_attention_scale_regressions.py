@@ -133,3 +133,30 @@ def test_scaled_max_cases_expose_fma_residual_with_finite_exact_dots(case_id):
     broken = {"o": broken_o.expand_as(inputs["v"]), "lse": expected["lse"].float()}
     with pytest.raises(CorrectnessFailure):
         compare(exercise, broken, expected, inputs)
+
+
+@pytest.mark.parametrize("dtype", ("fp16", "bf16"))
+def test_scaled_max_transition_has_mixed_rows_and_finite_analytic_answers(dtype):
+    exercise = EXERCISES["s43_schedule"]
+    case = next(
+        c for c in exercise["cases"] if c["id"] == f"scaled_max_transition_{dtype}"
+    )
+    assert case["suite"] != "perf"
+    inputs, config = make_inputs(exercise, case)
+    q = inputs["q"][0, :, 0, 0].float()
+    scale2 = torch.tensor(config["scale"]) * torch.tensor(math.log2(math.e))
+    first_reference = q * 8 * scale2
+    safe_first = first_reference.abs() < 128
+    assert safe_first[:4].tolist() == [True, False, True, False]
+    next_reference = torch.maximum(first_reference, q * 16 * scale2)
+    assert (next_reference.abs() < 128)[:4].tolist() == [False, False, True, False]
+    expected = mathematical_reference("attention", inputs, config)
+    assert all(torch.isfinite(t).all() for t in expected.values())
+    positive = q > 0
+    answer = torch.where(positive, 3.0, 1.0)[None, :, None, None].expand_as(
+        expected["o"]
+    )
+    torch.testing.assert_close(expected["o"], answer.double())
+    logits = q.double() * torch.where(positive, 16.0, 8.0) * config["scale"]
+    lse = (logits + math.log(128))[None, None, :].expand_as(expected["lse"])
+    torch.testing.assert_close(expected["lse"], lse)
