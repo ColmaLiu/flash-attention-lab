@@ -31,7 +31,7 @@ NCU replay 会改变时间和缓存行为，正式 timing 用独立 benchmark；
 
 ## VS Code / clangd
 
-clangd 需要项目头文件、Python/PyTorch 头文件和正确的 CUDA Toolkit 路径。
+clangd 需要项目头文件、TVM FFI 头文件和正确的 CUDA Toolkit 路径。
 在仓库根目录激活独立环境，再生成本机的编辑器编译数据库：
 
 ```bash
@@ -40,13 +40,26 @@ source scripts/activate.sh
 python scripts/configure_clangd.py
 ```
 
-脚本遵循 `LAB_CUDA_HOME` / `CUDA_HOME` / PATH 和 `LAB_GPU` / `CUDA_VISIBLE_DEVICES`，
-检查所选 GPU 与构建环境后，为 CUDA 源文件、公共头文件和 C++ 绑定生成
-`compile_commands.json`。该文件含本机绝对路径，已被 Git 忽略；切换工具链、
-Conda 环境或新增 CUDA 文件后重新生成。脚本只配置解析，不编译或运行学生 kernel。
+脚本遵循 `LAB_CUDA_HOME` / `CUDA_HOME` / PATH，为 CUDA 源文件、头文件和 C++
+绑定生成 `compile_commands.json`，不要求可用 GPU，也不初始化 CUDA。它将 `.cu` /
+`.cuh` 按 C++17 / SM100a 解析，将 `.cpp` / `.h` / `.hpp` 按 host C++20 解析，
+并补齐 TVM FFI include 和 `LAB_FFI_MODULE`。包含设备函数的辅助头文件使用 `.cuh`。
+单独打开共享 `.cuh` 时，也会继承同目录 `kernel.cu` 在 include 前定义的 `LAB_*`
+整数选择宏，例如 s31 的 `LAB_MULTISTAGE`。
+NVIDIA Conda Toolkit 的 Clang CUDA 根目录会自动选择 `targets/x86_64-linux`，
+同时找到其中的 CUDA 头文件和 `nvvm/libdevice`；实际 nvcc 构建仍使用环境根目录。
+Clang 的 CUDA wrapper 还会隐式包含 cuRAND 头文件。若 Toolkit 未提供，脚本会从
+PyTorch 依赖的 `nvidia-curand-cu12` 包补齐路径；缺失时明确报错，避免后续出现
+`TensorMap` / `Options` 未定义等误导性诊断。
+
+数据库含本机绝对路径，已被 Git 忽略；移动 checkout、切换工具链、Conda 环境、
+迁移绑定或新增 CUDA/C++ 文件后重新生成。脚本只配置解析，不编译或运行学生 kernel。
 `.vscode/` 中的个人编辑器配置也被 Git 忽略。
 
 在 VS Code 命令面板执行 **clangd: Restart language server**。使用支持 SM100a 的
 clangd；可通过 `clangd --check=students/cuda/s01_softmax/kernel.cu` 独立检查解析诊断。
 编辑器使用 Clang CUDA 参数，实际构建仍使用 `build.py` 的 nvcc 参数；
 无编辑器诊断不代表 nvcc 构建成功或学生正确性通过。
+若日志中的 `Compile command` 仍包含旧目录、旧关卡名或 `TORCH_EXTENSION_NAME`，
+说明语言服务器仍使用旧数据库，应重新生成并重启。编译参数与头文件查找的机制见
+[clangd 编译数据库说明](https://clangd.llvm.org/design/compile-commands)。
