@@ -25,6 +25,7 @@ def _summary(samples):
 
 def graph(launches, warmup=3, repeats=15, iterations=20):
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     graphs = []
     with torch.cuda.stream(stream):
         for launch in launches:
@@ -56,6 +57,7 @@ def cold(launches, warmup=3, repeats=30):
     l2 = torch.cuda.get_device_properties(0).L2_cache_size
     flush = torch.empty(2 * l2 // 4, dtype=torch.float32, device="cuda")
     stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
     samples = [[] for _ in launches]
     with torch.cuda.stream(stream):
         for launch in launches:

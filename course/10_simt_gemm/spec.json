@@ -1,0 +1,49 @@
+{
+  "id": "10_simt_gemm",
+  "title": "分块 GEMM：数据复用与算术强度",
+  "part": 1,
+  "kind": "gemm",
+  "prerequisites": ["00_transpose"],
+  "steps": [
+    {"step": 1, "title": "朴素 GEMM：一个线程一个输出", "cases": "all"},
+    {"step": 2, "title": "shared memory 分块：32×32 tile", "cases": "all"},
+    {"step": 3, "title": "寄存器分块：每线程 8×8 micro-tile", "cases": "all"},
+    {"step": 4, "title": "转置暂存与向量化访存", "cases": "all"}
+  ],
+  "cases": [
+    {"name": "tiny", "shape": [7, 5, 3], "dtype": "fp32", "pattern": "int",
+     "purpose": "比任何 tile 都小，小整数输入、结果精确（容差 0）：检查下标、越界判断和累加是否从 0 开始。"},
+    {"name": "one_tile", "shape": [128, 128, 32], "dtype": "fp32", "pattern": "int",
+     "purpose": "恰好一个 128×128 block tile、4 个 BK=8 切片：排除尾部问题后，检查 micro-tile 坐标与 K 循环。"},
+    {"name": "tail", "shape": [129, 131, 37], "dtype": "fp32", "pattern": "int",
+     "purpose": "M、N、K 都不是 tile 的倍数，K 不是 4 的倍数：检查尾部清零和 float4 的标量回退路径。"},
+    {"name": "tail_vec", "shape": [200, 260, 68], "dtype": "fp32", "pattern": "int",
+     "purpose": "K、N 是 4 的倍数但 M、N 不是 128 的倍数：float4 路径上的尾部 tile。"},
+    {"name": "k1", "shape": [65, 70, 1], "dtype": "fp32", "pattern": "int",
+     "purpose": "K = 1：只有一个不完整的 K 切片，C 是外积。"},
+    {"name": "row", "shape": [1, 300, 64], "dtype": "fp32",
+     "purpose": "M = 1（矩阵乘向量）：grid 只有一行 block，大部分线程越界。"},
+    {"name": "col", "shape": [257, 1, 64], "dtype": "fp32",
+     "purpose": "N = 1：区分 A 与 B 的角色，B 只有一行。"},
+    {"name": "long_k", "shape": [96, 64, 4096], "dtype": "fp32",
+     "purpose": "长归约：K 循环跑 512 个切片，容差随 sqrt(K) 增大。"},
+    {"name": "square", "shape": [1024, 1024, 1024], "dtype": "fp32",
+     "purpose": "中等规模随机数据，逐元素全量检查。"},
+    {"name": "square4k", "shape": [4096, 4096, 4096], "dtype": "fp32", "perf": true,
+     "purpose": "137 GFLOP，算术强度约 683 FLOP/B：远在屋脊点右侧，测 FP32 计算吞吐。"},
+    {"name": "wide", "shape": [8192, 8192, 2048], "dtype": "fp32", "perf": true,
+     "purpose": "C 有 256 MB、超过 L2；K 较短，写回 C 的比重更大。"}
+  ],
+  "perf_target": {"baseline": "cublas", "ratio": 0.6},
+  "profile_metrics": [
+    "sm__inst_executed_pipe_fma.avg.pct_of_peak_sustained_active",
+    "smsp__inst_executed_op_shared_ld.sum",
+    "l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
+    "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum",
+    "dram__bytes_read.sum",
+    "launch__registers_per_thread",
+    "sm__warps_active.avg.pct_of_peak_sustained_active"
+  ]
+}

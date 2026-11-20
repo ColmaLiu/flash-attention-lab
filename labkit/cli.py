@@ -253,6 +253,10 @@ def _do_bench(lab, args):
         "cold" if args.cold else "graph",
         not args.no_solution,
     )
+    if os.environ.get("LAB_BENCH_REPORT"):  # selftest --perf reads this file
+        from pathlib import Path
+
+        Path(os.environ["LAB_BENCH_REPORT"]).write_text(json.dumps(report))
     rows = report["results"]
     work = report["work"]
     unit = "TFLOP/s" if work["flops"] else "GB/s"
@@ -326,12 +330,25 @@ def _perf_gate(lab, timeout):
         return []
     failures = []
     for case in lab.perf_cases():
-        before = set((ROOT / "artifacts" / "bench").glob("*.json"))
-        if _child(["_bench", lab.id, "--solution", "--case", case.name], timeout) != 0:
+        # The child writes its report to a path we choose, so concurrent
+        # benches by other processes cannot be mistaken for this one.
+        name = f"gate_{lab.id}_{case.name}_{os.getpid()}.json"
+        report_path = ROOT / "artifacts" / "bench" / name
+        command = [
+            sys.executable,
+            "-m",
+            "labkit",
+            "_bench",
+            lab.id,
+            "--solution",
+            "--case",
+            case.name,
+        ]
+        code = _child_raw(command, timeout, {"LAB_BENCH_REPORT": str(report_path)})
+        if code != 0 or not report_path.is_file():
             failures.append(f"{lab.id}/{case.name}: bench failed")
             continue
-        new = sorted(set((ROOT / "artifacts" / "bench").glob("*.json")) - before)
-        report = json.loads(new[-1].read_text())
+        report = json.loads(report_path.read_text())
         times = {r["name"]: r["median_ms"] for r in report["results"]}
         if target["baseline"] not in times:
             failures.append(

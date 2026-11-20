@@ -1,6 +1,7 @@
 """Run a kernel on one case: correctness checks and benchmarks."""
 
 import json
+import os
 import time
 import zlib
 
@@ -125,6 +126,8 @@ def check_case(lab, case, step, solution=False, full=True):
     for stream in (torch.cuda.Stream(), torch.cuda.default_stream()):
         for t in p.outputs.values():
             _poison(t)
+        # Inputs and poisoned outputs were written on the current stream.
+        stream.wait_stream(torch.cuda.current_stream())
         p.run_checked(stream)
         metrics = p.verify(inputs, options, full)
         for k, v in inputs.items():
@@ -197,7 +200,6 @@ def bench(lab, case, step, solution=False, mode="graph", compare_solution=True):
     out = ROOT / "artifacts" / "bench"
     out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    (out / f"{stamp}_{who}_{lab.id}_{case.name}.json").write_text(
-        json.dumps(report, indent=1)
-    )
+    path = out / f"{stamp}_{who}_{lab.id}_{case.name}_{os.getpid()}.json"
+    path.write_text(json.dumps(report, indent=1))
     return report
