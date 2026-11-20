@@ -225,7 +225,7 @@ r0 ┌──────────────────────┐     
 
 ## 9. 延伸阅读
 
-- CUDA C++ Programming Guide：[Device Memory Accesses](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses)，[Shared Memory](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory)
+- CUDA Programming Guide：[Coalesced Global Memory Access](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#coalesced-global-memory-access)，[Shared Memory Bank Conflicts](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory-bank-conflicts)，以及同页的 [Matrix Transpose Example Using Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#matrix-transpose-example-using-shared-memory)
 - CUDA C++ Best Practices Guide：[Coalesced Access to Global Memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory)
 - Mark Harris，[An Efficient Matrix Transpose in CUDA C/C++](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/)（经典文章，本关步骤 1–3 的来源）
 - Vasily Volkov，*Understanding Latency Hiding on GPUs*（博士论文，2016）：用 Little 定律分析 GPU 访存
