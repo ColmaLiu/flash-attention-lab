@@ -48,7 +48,7 @@ include/lab/<name>.cuh    （仅引入新原语的关卡）公共原语的参考
   - gemm：`random`、`int`；
   - attention：`random`、`large_logits`、`uniform`、`ones_v`、`position`。
 - **steps**：`"cases": "all"` 表示全部非 perf case。每个 step 运行时 `p.step` 等于该 step 的编号。不指定 `--step` 的 bench 和 check 都用最后一步，最后一步不能带 probe。
-- **probe**：该 step 不检查 O 等最终输出，而是检查 `p.probe`（FP32 缓冲）。oracle 由 `labkit/kinds/<kind>.py` 中的 `probe_<oracle>(inputs, options, case)` 定义，返回 `(期望张量, (atol, rtol))`。
+- **probe**：该 step 不检查 O 等最终输出，而是检查 `p.probe`（FP32 缓冲）。oracle 由 `labkit/kinds/<kind>.py` 中的 `probe_<oracle>(inputs, options, case)` 定义，返回 `(期望张量, (atol, rtol))`。可选 `"axes": ["b", "h", "i", "j"]` 给出错误信息中的维度名。
 - **case 设计**：
   - 每个 case 写清 `purpose`，即它针对哪一类错误；
   - 必须覆盖尾部（非 tile 倍数）、B 与 H 均大于 1、causal/非 causal、各 dtype 与 D；

@@ -225,3 +225,30 @@ def baselines(case=None):
     if case is not None and case.dtype == "fp32":
         return {"efficient": _efficient}
     return {"cudnn": _cudnn, "fa4": _fa4}
+
+
+def _scores11(inputs, options):
+    """FP64 S = scale * Q K^T as [B, H, N, N], without any mask."""
+    q, k = (inputs[x].to(torch.float64) for x in ("q", "k"))
+    return torch.einsum("bihd,bjhd->bhij", q, k) * options["scale"]
+
+
+def probe_scores11(inputs, options, case):
+    """Lab 11 step 1: the probe holds S = scale * Q K^T, [B, H, N, N].
+
+    The causal mask is applied later (step 2), so S covers every (i, j).
+    """
+    return _scores11(inputs, options), (1e-4, 1e-4)
+
+
+def probe_probs11(inputs, options, case):
+    """Lab 11 step 2: the probe holds P = softmax_j(S + mask), [B, H, N, N].
+
+    Masked entries (j > i when causal) must be 0.
+    """
+    s = _scores11(inputs, options)
+    if options["causal"]:
+        n = s.shape[-1]
+        mask = torch.ones(n, n, device=s.device, dtype=torch.bool).triu(1)
+        s = s.masked_fill(mask, float("-inf"))
+    return torch.softmax(s, dim=-1), (2e-6, 1e-4)

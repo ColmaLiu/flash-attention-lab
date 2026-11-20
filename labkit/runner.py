@@ -65,6 +65,23 @@ class Prepared:
         except Exception as exc:
             raise _translate(exc, self.lib, "make_plan") from None
 
+    def verify(self, inputs, options, full=True):
+        """Check the probe on probe steps, the real outputs otherwise."""
+        if self.probe_expected is None:
+            return self.kind.verify(inputs, self.outputs, options, self.case, full)
+        from .kinds import compare
+
+        axes = self.lab.step_info(self.step).probe.get("axes")
+        return {
+            "probe": compare(
+                "probe",
+                self.outputs["probe"],
+                self.probe_expected,
+                *self.probe_tol,
+                axes,
+            )
+        }
+
     def launch(self, stream=None):
         stream = stream or torch.cuda.current_stream()
         self.lib.run(self.plan, stream.cuda_stream)
@@ -109,16 +126,7 @@ def check_case(lab, case, step, solution=False, full=True):
         for t in p.outputs.values():
             _poison(t)
         p.run_checked(stream)
-        if p.probe_expected is not None:
-            from .kinds import compare
-
-            metrics = {
-                "probe": compare(
-                    "probe", p.outputs["probe"], p.probe_expected, *p.probe_tol
-                )
-            }
-        else:
-            metrics = p.kind.verify(inputs, p.outputs, options, case, full)
+        metrics = p.verify(inputs, options, full)
         for k, v in inputs.items():
             if not torch.equal(v.view(torch.uint8), saved[k].view(torch.uint8)):
                 raise CorrectnessError(
@@ -142,7 +150,7 @@ def bench(lab, case, step, solution=False, mode="graph", compare_solution=True):
     who = "solution" if solution else "student"
     main = Prepared(lab, case, inputs, options, step, solution)
     main.run_checked(torch.cuda.current_stream())
-    kind.verify(inputs, main.outputs, options, case, full=False)
+    main.verify(inputs, options, full=False)
     candidates = [(who, main.launch)]
     notes = {}
     if compare_solution and not solution:
