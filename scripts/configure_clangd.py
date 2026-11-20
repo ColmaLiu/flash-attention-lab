@@ -7,7 +7,6 @@ Run from the repository root after sourcing scripts/activate.sh:
 import json
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
-import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,7 +58,7 @@ def compilation_commands(root, toolkit, cuda_includes, ffi_include):
     common = [
         "clang++",
         "-fPIC",
-        "-I" + str(root / "flash_attention_lab"),
+        "-I" + str(root / "include"),
     ]
     for path in dict.fromkeys([*map(str, cuda_includes), str(ffi_include)]):
         common += ["-isystem", path]
@@ -68,7 +67,8 @@ def compilation_commands(root, toolkit, cuda_includes, ffi_include):
         "-std=c++20",
         "-x",
         "c++",
-        '-DLAB_FFI_MODULE="falab_editor"',
+        '-DLAB_FFI_MODULE="lab_editor"',
+        "-DLAB_KIND_ATTENTION",
     ]
     cuda_flags = [
         "-std=c++17",
@@ -78,37 +78,24 @@ def compilation_commands(root, toolkit, cuda_includes, ffi_include):
         "--cuda-gpu-arch=sm_100a",
     ]
     # Include explicit header entries so opening a header first cannot borrow
-    # the other language mode. Also cover learners' custom bindings/helpers.
+    # the other language mode.
     sources = sorted(
         p
-        for folder in ("students/cuda", "solutions", "flash_attention_lab")
+        for folder in ("students", "solutions", "include", "labkit/csrc")
         for p in (root / folder).rglob("*")
         if p.is_file() and p.suffix in (".cu", ".cuh", ".cpp", ".h", ".hpp")
     )
     entries = []
     for source in sources:
-        header_flags = []
-        owner = source.with_name("kernel.cu")
-        if source.suffix == ".cuh" and owner.is_file():
-            # s31 selects its shared implementation with LAB_MULTISTAGE before
-            # including it. Preserve that context when the header opens alone.
-            prefix, included, _ = owner.read_text().partition(
-                f'#include "{source.name}"'
-            )
-            if included:
-                header_flags = [
-                    f"-D{name}={value}"
-                    for name, value in re.findall(
-                        r"^#define\s+(LAB_\w+)\s+(\d+)[ \t]*$", prefix, re.MULTILINE
-                    )
-                ]
+        cuda = source.suffix in (".cu", ".cuh") or (
+            source.suffix == ".h" and source.parent.name == "lab"
+        )
         entries.append(
             {
                 "directory": str(root),
                 "file": str(source),
                 "arguments": common
-                + (cuda_flags if source.suffix in (".cu", ".cuh") else host_flags)
-                + header_flags
+                + (cuda_flags if cuda else host_flags)
                 + ["-c", str(source)],
             }
         )
@@ -116,15 +103,10 @@ def compilation_commands(root, toolkit, cuda_includes, ffi_include):
 
 
 def main():
-    from flash_attention_lab.environment import require_course_packages
-    from flash_attention_lab.runtime import cuda_home, cuda_development_paths
+    from labkit.env import cuda_paths
 
     # Editing only needs installed headers/toolchain, not an available GPU.
-    require_course_packages()
-    toolkit = cuda_home()
-    if toolkit is None:
-        raise RuntimeError("CUDA Toolkit not found; set LAB_CUDA_HOME to CUDA 12.8")
-    cuda_includes, _ = cuda_development_paths(toolkit)
+    toolkit, cuda_includes, _ = cuda_paths()
     cuda_includes = clang_cuda_includes(cuda_includes)
     # Importing tvm_ffi itself installs PyTorch hooks and probes CUDA. Resolve
     # the pinned wheel's headers from metadata without loading either runtime.

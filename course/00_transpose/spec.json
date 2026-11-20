@@ -1,0 +1,103 @@
+{
+  "id": "00_transpose",
+  "title": "访存与线程映射：矩阵转置",
+  "part": 0,
+  "kind": "transpose",
+  "prerequisites": [],
+  "steps": [
+    {
+      "step": 1,
+      "title": "朴素转置：一个线程一个元素",
+      "cases": "all"
+    },
+    {
+      "step": 2,
+      "title": "shared memory 分块转置",
+      "cases": "all"
+    },
+    {
+      "step": 3,
+      "title": "消除 bank conflict",
+      "cases": "all"
+    },
+    {
+      "step": 4,
+      "title": "提高在途访存：64×64 tile",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "tiny",
+      "shape": [
+        7,
+        11
+      ],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "比一个 tile 还小：检查行列下标与越界判断。值等于输入的线性地址，错了能看出来自哪里。"
+    },
+    {
+      "name": "tail",
+      "shape": [
+        33,
+        65
+      ],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "两个方向都比 32 的倍数多 1：检查尾部 tile。"
+    },
+    {
+      "name": "row",
+      "shape": [
+        1,
+        257
+      ],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "退化为一行：转置后是一列，区分 transpose 与 copy。"
+    },
+    {
+      "name": "tall",
+      "shape": [
+        1025,
+        17
+      ],
+      "dtype": "fp32",
+      "purpose": "细长矩阵：grid 在两个方向上的覆盖。"
+    },
+    {
+      "name": "square",
+      "shape": [
+        1024,
+        1024
+      ],
+      "dtype": "fp32",
+      "purpose": "中等规模随机数据。"
+    },
+    {
+      "name": "big",
+      "shape": [
+        8192,
+        8192
+      ],
+      "dtype": "fp32",
+      "perf": true,
+      "purpose": "256 MB 输入，远大于 126 MB L2：测 HBM 带宽利用率。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "torch",
+    "ratio": 0.9
+  },
+  "profile_metrics": [
+    "l1tex__t_requests_pipe_lsu_mem_global_op_st.sum",
+    "l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum",
+    "l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum",
+    "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum"
+  ]
+}

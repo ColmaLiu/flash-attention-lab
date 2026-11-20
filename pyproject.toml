@@ -4,21 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flash-attention-lab"
-version = "0.2.0"
-description = "B200 kernel exercises; student kernels intentionally unimplemented"
+version = "2.0.0"
+description = "FlashAttention 1-4 on B200: a CUDA/PTX kernel course"
 requires-python = ">=3.12,<3.13"
 dependencies = ["torch==2.10.0", "ninja==1.13.0", "pytest==9.0.2", "apache-tvm-ffi==0.1.16"]
 
 [project.scripts]
-fa-lab = "flash_attention_lab.cli:main"
+fa-lab = "labkit.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["flash_attention_lab*", "benchmarks*"]
+include = ["labkit*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/infra"]
+testpaths = ["tests"]
 addopts = "-ra"
-markers = ["gpu: requires the selected GPU", "student: explicit student acceptance, fails when unimplemented"]
+markers = ["gpu: needs the selected B200 GPU"]
 
 [tool.ruff]
 target-version = "py312"

@@ -58,4 +58,4 @@ fi
 git submodule update --init -- third_party/cutlass third_party/flash-attention
 "$CONDA_PREFIX/bin/python" -m pip install -r requirements.txt
 "$CONDA_PREFIX/bin/python" -m pip check
-echo 'Installed. Run ./lab doctor, ./lab smoke, then ./lab task s00_layout.'
+echo 'Installed. Run ./lab doctor, then read course/00_transpose/README.md.'

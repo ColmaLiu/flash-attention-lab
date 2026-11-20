@@ -21,7 +21,7 @@
 2. **小步可验证。** 每关拆成 2–5 个 step，每个 step 对应骨架里的 `TODO(n)`，可用 `./lab check ID --step n` 单独验证。学生不会面对“整关一次过或一次挂”的黑盒。
 3. **一关一个新机制。** 新硬件机制先在 GEMM（或更简单的算子）上单独练，再用进 attention。参考答案只包含本关引入的特性，不提前泄露后续关卡。
 4. **前面写过的，后面提供。** 学生在某关亲手写过的原语（如 mbarrier 封装、TMA 描述符编码），从下一关起由公共头文件 `include/lab/` 提供参考实现，避免前面的小错误拖垮后面的实验。
-5. **性能结论可复现。** 计时排除编译与准备；CUDA Graph 与 eager 不混算；每关给出答案在本机的实测区间作为学生目标；维护者验收与学生输出分开。
+5. **性能结论可复现。** 计时排除编译与准备；CUDA Graph 与 eager 不混算；每关以“相对库基线的比例”给出学生目标，仓库不提交本机实测数据；维护者验收与学生输出分开。
 6. **简单的基础设施。** 学生只需要理解 `kernel.cu` 里的 `make_plan` / `run` 两个函数；Python 侧只负责造数据、调用、对答案、计时。
 
 ## 3. 课程地图
@@ -71,7 +71,7 @@ course/<ID>/
   figures/      讲义用图（SVG/mermaid 源）
 students/<ID>/kernel.cu      学生骨架（含 TODO(n)），学生直接修改
 solutions/<ID>/kernel.cu     参考答案（可拆多个 .cuh）
-solutions/<ID>/NOTES.md      答案设计说明：为什么这样分工、实测数据、已知局限
+solutions/<ID>/NOTES.md      答案设计说明：为什么这样分工、如何验证、已知局限（不含本机实测数据）
 ```
 
 讲义模板：
@@ -82,7 +82,7 @@ solutions/<ID>/NOTES.md      答案设计说明：为什么这样分工、实测
 4. **硬件与指令**：本关新指令的语义、操作数布局、最小代码片段、常见误用；
 5. **调度设计**：线程/warp 分工、smem/TMEM/寄存器预算、时序图；
 6. **分步练习**：每个 step 写清要实现哪个 TODO、运行哪条命令、常见错误与排查；
-7. **性能**：测哪些 case、答案实测区间、用 SASS/NCU 看什么指标；
+7. **性能**：测哪些 case、相对库基线的目标比例、用 SASS/NCU 看什么指标；
 8. **自测问题**：3–6 个，答案在讲义末尾折叠；
 9. **延伸阅读**：论文章节、PTX 手册章节、上游源码位置（固定版本）。
 
@@ -181,7 +181,7 @@ GEMM 统一为 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 都是 K-major，与 QKᵀ
 1. 答案通过全部 case（含 `--cold`、非默认流），`compute-sanitizer` 的 memcheck、racecheck、synccheck 无报错；
 2. 骨架可编译，每个 step 在未实现时报 `LAB_TODO(n)`；
 3. 讲义包含模板全部九节，命令可直接运行，链接有效；
-4. 答案性能达到本关目标，实测数据写入 `NOTES.md`：部分 2 及以后相对库基线的比例；部分 4 的最终 attention 在代表性 case 上达到 cuDNN 的 90% 以上；
+4. 答案性能达到 `spec.json` 中声明的目标比例（相对库基线）；每类算子的最终答案（transpose：`30_tma_mbarrier`，softmax：`01_softmax`，GEMM：`33_2cta_gemm`，attention：`43_fa4_schedule`）在本关**全部** perf case 上逐项达到库基线的 90%（同次 CUDA Graph 中位数），不平均、不筛选；实测报告只写入 Git 忽略的 `artifacts/`；
 5. 有一次独立审查（未参与编写的 reviewer agent），结论记录在对应 issue 中。
 
 ## 8. 从 v1 迁移
