@@ -31,7 +31,7 @@ ID 采用 `<部分><序号>_<名字>`。部分 0 预备，1–4 分别对应 FA1
 | ID | 主题 | 新知识 | 练习（step 概要） | 对照基线 |
 |---|---|---|---|---|
 | **部分 0：预备** |||||
-| `00_transpose` | 访存与线程映射 | 线性地址、coalescing、shared memory、bank conflict、padding/swizzle | 朴素转置 → smem 分块 → 消除 bank conflict | torch copy |
+| `00_transpose` | 访存与线程映射 | 线性地址、coalescing、shared memory、bank conflict、padding/swizzle | 朴素转置 → smem 分块 → 消除 bank conflict → 增大 tile 提高在途访存 | torch copy |
 | `01_softmax` | 归约与数值稳定 | warp shuffle、block 归约、safe softmax、**online softmax** 推导 | 两遍 softmax → 单遍 online softmax | torch.softmax |
 | **部分 1：FA1 — IO 感知的分块** |||||
 | `10_simt_gemm` | 分块 GEMM | 数据复用、算术强度、smem tiling、寄存器分块、向量化 | 朴素 → smem tile → 寄存器 thread tile | cuBLAS（FP32） |
@@ -129,17 +129,17 @@ GEMM 统一为 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 都是 K-major，与 QKᵀ
 
 公共头文件 `include/lab/`：
 
-| 头文件 | 内容 | 首次提供给学生 |
+| 头文件 | 内容 | 学生自己实现于 → 从哪关起提供 |
 |---|---|---|
 | `problem.h`、`register.h`、`check.h` | Problem、注册宏、CUDA 错误检查、`LAB_TODO` | 00 |
 | `scratch.h` | 带垃圾值初始化的 scratch 分配 | 00 |
-| `mma_sync.cuh` | `ldmatrix`、`mma.sync` 封装、fragment 坐标函数 | 21 之后 |
-| `cp_async.cuh` | `cp.async` 与 wait_group | 22 之后 |
-| `tma.cuh`、`mbarrier.cuh` | tensor map 编码、TMA load/store、mbarrier | 31 之后 |
-| `tcgen05.cuh` | TMEM alloc/ld/st、descriptor、mma/commit | 32 之后 |
-| `cluster.cuh` | cluster、2-CTA 辅助 | 34 之后 |
+| `mma_sync.cuh` | `ldmatrix`、`mma.sync` 封装、fragment 坐标函数 | 20 → 21 |
+| `cp_async.cuh` | `cp.async` 与 wait_group | 21 → 22 |
+| `tma.cuh`、`mbarrier.cuh` | tensor map 编码、TMA load/store、mbarrier | 30 → 31 |
+| `tcgen05.cuh` | TMEM alloc/ld/st、descriptor、mma/commit | 31 → 32 |
+| `cluster.cuh` | cluster、2-CTA 辅助 | 33 → 34 |
 
-“首次提供”之前的关卡要求学生自己写这些原语。参考实现放在 `include/lab/`，但这些关卡的骨架与讲义不引用它；讲义说明这一安排。
+例如 `mma_sync.cuh`：学生在 20 关的骨架里自己实现这些函数（骨架给出签名与语义注释），20 关的参考答案 `#include` 它；从 21 关起骨架直接 `#include` 它。
 
 ## 6. Python 基础设施 `labkit`
 
