@@ -209,6 +209,10 @@ def _do_check(lab, args):
     require_gpu()
     who = "solution" if args.solution else "student"
     steps = [lab.step_info(args.step)] if args.step else list(lab.steps)
+    if args.case and not args.step:
+        # Only the steps that list this case (perf cases: the last step).
+        lab.case(args.case)
+        steps = [s for s in steps if args.case in s.cases] or [lab.steps[-1]]
     # Maintainer runs (selftest, tests) set LAB_NO_PROGRESS to keep progress clean.
     record = (
         not args.solution and not args.case and not os.environ.get("LAB_NO_PROGRESS")

@@ -1,0 +1,344 @@
+{
+  "id": "12_fa1",
+  "title": "FlashAttention-1：分块与 online softmax",
+  "part": 1,
+  "kind": "attention",
+  "prerequisites": [
+    "01_softmax",
+    "10_simt_gemm",
+    "11_naive_attention"
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "title": "单个 K/V 块：S、softmax、O 与 LSE",
+      "cases": [
+        "n1",
+        "one_block",
+        "short_tail",
+        "short_peaked"
+      ]
+    },
+    {
+      "step": 2,
+      "title": "完整外层 K/V 循环：O/l/m 驻留 HBM 并重新缩放",
+      "cases": [
+        "n1",
+        "one_block",
+        "short_tail",
+        "short_peaked",
+        "two_blocks",
+        "tail",
+        "rescale",
+        "uniform",
+        "ones_v",
+        "position",
+        "medium"
+      ]
+    },
+    {
+      "step": 3,
+      "title": "causal mask 与跳过全 mask 的块",
+      "cases": [
+        "n1",
+        "one_block",
+        "short_tail",
+        "short_peaked",
+        "two_blocks",
+        "tail",
+        "rescale",
+        "uniform",
+        "ones_v",
+        "position",
+        "medium",
+        "causal_n1",
+        "causal_two_blocks",
+        "causal_tail",
+        "causal_position",
+        "causal_peaked",
+        "causal_uniform",
+        "causal_ones_v",
+        "causal_medium"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "name": "n1",
+      "shape": [
+        1,
+        1,
+        1,
+        64
+      ],
+      "dtype": "fp32",
+      "purpose": "N=1：只有一个 key，P 必须恰好是 1，O = V，LSE = scale·q·k。检查尾部 mask 没有把唯一的 key 也屏蔽掉。"
+    },
+    {
+      "name": "one_block",
+      "shape": [
+        2,
+        64,
+        3,
+        64
+      ],
+      "dtype": "fp32",
+      "purpose": "N 恰好等于 Bc=64：一个完整块，B>1、H>1 检查 (b,h) 到 CTA 与行地址的映射。"
+    },
+    {
+      "name": "short_tail",
+      "shape": [
+        1,
+        37,
+        2,
+        128
+      ],
+      "dtype": "fp32",
+      "pattern": "position",
+      "purpose": "N=37 < 64 且 D=128：块内 27 个填充 key 必须被 mask；D=128 时每个线程负责两组 O 列。"
+    },
+    {
+      "name": "short_peaked",
+      "shape": [
+        1,
+        50,
+        2,
+        64
+      ],
+      "dtype": "fp32",
+      "pattern": "large_logits",
+      "purpose": "很尖的 softmax（logit 差几十）：不减 m~ 会溢出，m~ 或 l~ 算错会直接暴露。"
+    },
+    {
+      "name": "two_blocks",
+      "shape": [
+        1,
+        128,
+        1,
+        64
+      ],
+      "dtype": "fp32",
+      "pattern": "large_logits",
+      "purpose": "两个 K/V 块、logit 很大：第二块可能出现更大的最大值，必须按 e^(m_old-m_new) 重新缩放旧的 O 和 l。"
+    },
+    {
+      "name": "tail",
+      "shape": [
+        2,
+        300,
+        3,
+        64
+      ],
+      "dtype": "fp32",
+      "purpose": "N=300 不是 64 的倍数：最后一个 Q 块和 K/V 块都只有 44 行有效。"
+    },
+    {
+      "name": "rescale",
+      "shape": [
+        1,
+        777,
+        2,
+        128
+      ],
+      "dtype": "fp32",
+      "pattern": "large_logits",
+      "purpose": "多个块、logit 很大、D=128：最大值在后面的块里反复变化，检验每次合并的缩放。"
+    },
+    {
+      "name": "uniform",
+      "shape": [
+        2,
+        200,
+        2,
+        64
+      ],
+      "dtype": "fp32",
+      "pattern": "uniform",
+      "purpose": "Q=0：所有 key 权重相同，O 是 V 的均值，LSE = ln(N)。l 的初值或合并错了会偏离 ln(N)。"
+    },
+    {
+      "name": "ones_v",
+      "shape": [
+        1,
+        513,
+        4,
+        128
+      ],
+      "dtype": "fp32",
+      "pattern": "ones_v",
+      "purpose": "V=1：O 必须等于 1。检验 l_new 与 O 的归一化是否一致（多除或少除一次 l 都会偏离 1）。"
+    },
+    {
+      "name": "position",
+      "shape": [
+        2,
+        260,
+        3,
+        64
+      ],
+      "dtype": "fp32",
+      "pattern": "position",
+      "purpose": "V[j]=j/N：K/V 块偏移、行步长写错会得到明显错误的位置值。"
+    },
+    {
+      "name": "medium",
+      "shape": [
+        2,
+        1024,
+        4,
+        128
+      ],
+      "dtype": "fp32",
+      "purpose": "中等规模随机数据：16 个 K/V 块的完整外层循环。"
+    },
+    {
+      "name": "causal_n1",
+      "shape": [
+        1,
+        1,
+        1,
+        64
+      ],
+      "dtype": "fp32",
+      "causal": true,
+      "purpose": "causal 且 N=1：唯一的 query 只看到自己。"
+    },
+    {
+      "name": "causal_two_blocks",
+      "shape": [
+        1,
+        128,
+        1,
+        64
+      ],
+      "dtype": "fp32",
+      "pattern": "large_logits",
+      "causal": true,
+      "purpose": "causal、两块、logit 很大：对角块内的 mask 与跳过的块（Q 块 0 不看 K 块 1）。"
+    },
+    {
+      "name": "causal_tail",
+      "shape": [
+        2,
+        300,
+        3,
+        64
+      ],
+      "dtype": "fp32",
+      "causal": true,
+      "purpose": "causal 且 N 不是块的倍数：对角块 mask 与尾部 mask 同时生效。"
+    },
+    {
+      "name": "causal_position",
+      "shape": [
+        1,
+        333,
+        2,
+        128
+      ],
+      "dtype": "fp32",
+      "pattern": "position",
+      "causal": true,
+      "purpose": "causal、V[j]=j/N、D=128：query i 的 O 只能来自 j<=i，mask 偏一位就会读到未来的位置值。"
+    },
+    {
+      "name": "causal_peaked",
+      "shape": [
+        2,
+        517,
+        2,
+        64
+      ],
+      "dtype": "fp32",
+      "pattern": "large_logits",
+      "causal": true,
+      "purpose": "causal 且 logit 很大：被跳过的块不能留下错误的 m/l。"
+    },
+    {
+      "name": "causal_uniform",
+      "shape": [
+        1,
+        200,
+        2,
+        128
+      ],
+      "dtype": "fp32",
+      "pattern": "uniform",
+      "causal": true,
+      "purpose": "causal 且 Q=0：O[i] 是 V[0..i] 的均值，LSE[i] = ln(i+1)。"
+    },
+    {
+      "name": "causal_ones_v",
+      "shape": [
+        2,
+        190,
+        2,
+        64
+      ],
+      "dtype": "fp32",
+      "pattern": "ones_v",
+      "causal": true,
+      "purpose": "causal 且 V=1：O 必须等于 1，包括第 0 行（只有一个 key）。"
+    },
+    {
+      "name": "causal_medium",
+      "shape": [
+        1,
+        1024,
+        8,
+        64
+      ],
+      "dtype": "fp32",
+      "causal": true,
+      "purpose": "中等规模 causal：每个 K/V 块只处理对角线及以下的 Q 块。"
+    },
+    {
+      "name": "few_heads",
+      "shape": [
+        1,
+        4096,
+        16,
+        64
+      ],
+      "dtype": "fp32",
+      "purpose": "只有 B·H=16 个 CTA（148 个 SM）：不属于任何 step，用 ./lab bench 12 --case few_heads 观察“一个 head 一个 CTA”填不满 GPU。"
+    },
+    {
+      "name": "perf",
+      "shape": [
+        4,
+        4096,
+        64,
+        64
+      ],
+      "dtype": "fp32",
+      "perf": true,
+      "purpose": "B·H=256 个 CTA，N=4096：完整的 FA1 外层 K/V 循环，O/l/m 每块往返 HBM。"
+    },
+    {
+      "name": "perf_causal",
+      "shape": [
+        4,
+        4096,
+        64,
+        64
+      ],
+      "dtype": "fp32",
+      "perf": true,
+      "causal": true,
+      "purpose": "同上但 causal：跳过全被 mask 的块后，工作量约为一半。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "efficient",
+    "ratio": 0.4
+  },
+  "profile_metrics": [
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    "smsp__inst_executed_pipe_fma.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "sm__warps_active.avg.pct_of_peak_sustained_active"
+  ]
+}
