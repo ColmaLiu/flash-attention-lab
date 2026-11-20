@@ -61,6 +61,12 @@ def tolerance(case):
         return 0.0, 0.0
     # Rounding error of a length-K FP32 dot product grows ~ sqrt(K).
     atol = (2e-5 if case.dtype == "e4m3" else 1e-5) * math.sqrt(k)
+    if case.dtype in ("bf16", "fp16"):
+        # Tensor Cores (mma.sync, tcgen05, cuBLAS) align the products of a
+        # K-slice to the largest exponent and truncate, so the errors are
+        # biased and add up linearly over partial sums of size ~sqrt(K).
+        # cuBLAS BF16 -> FP32 on randn inputs reaches ~6.5e-9 * K^1.5.
+        atol = max(atol, 2e-8 * k**1.5)
     rtol = {"fp32": 1e-5, "bf16": 8e-3, "fp16": 1e-3}[_c_dtype(case)]
     if case.dtype == "e4m3":
         atol *= 50

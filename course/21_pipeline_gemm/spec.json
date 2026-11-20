@@ -1,0 +1,93 @@
+{
+  "id": "21_pipeline_gemm",
+  "title": "异步拷贝流水：cp.async 多级 buffer",
+  "part": 2,
+  "kind": "gemm",
+  "prerequisites": ["20_mma_gemm"],
+  "steps": [
+    {
+      "step": 1,
+      "title": "cp.async 双缓冲",
+      "cases": "all"
+    },
+    {
+      "step": 2,
+      "title": "3 级环形 buffer",
+      "cases": "all"
+    },
+    {
+      "step": 3,
+      "title": "调参：BK = 64、64×64 warp tile、分组光栅化",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "tiny",
+      "shape": [3, 5, 8],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "只有 1 个 K tile，少于流水级数：prologue 不能读越界，空的 commit group 也要正确计数。"
+    },
+    {
+      "name": "short_k",
+      "shape": [128, 256, 72],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "K = 72：BK = 32 时 3 个 K tile，BK = 64 时 2 个，最后一个只有 8 列有效：检查 prologue、流水尾部和 wait_group 的计数。"
+    },
+    {
+      "name": "aligned",
+      "shape": [256, 512, 512],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "tile 的整数倍、16 个 K tile：环形 buffer 绕好几圈，stage 下标或同步错了会读到旧数据，精确比较。"
+    },
+    {
+      "name": "tail",
+      "shape": [133, 77, 40],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "M、N 为奇数且不是 tile 倍数：越界 chunk 必须用 cp.async 的 zero-fill，写回要判断边界。"
+    },
+    {
+      "name": "raster",
+      "shape": [1300, 600, 264],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "11 行 × 5 列 CTA tile：分组光栅化（每组 8 行）的最后一组只有 3 行。"
+    },
+    {
+      "name": "random",
+      "shape": [640, 520, 1000],
+      "dtype": "bf16",
+      "purpose": "中等规模随机数据，K 不是 tile 的倍数。"
+    },
+    {
+      "name": "square",
+      "shape": [4096, 4096, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "Tensor Core 吞吐：137 GFLOP，输入 64 MB。"
+    },
+    {
+      "name": "wide",
+      "shape": [8192, 8192, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "A、B 共 128 MB，约等于 L2：CTA 的执行顺序决定 L2 命中率。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "cublas",
+    "ratio": 0.22
+  },
+  "profile_metrics": [
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ldgsts.sum",
+    "lts__t_sector_hit_rate.pct",
+    "dram__bytes_read.sum",
+    "sm__inst_executed_pipe_tensor_subpipe_hmma.sum",
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active"
+  ]
+}
