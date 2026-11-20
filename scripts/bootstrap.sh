@@ -3,16 +3,20 @@ set -eo pipefail
 # Conda activation hooks are not guaranteed to be nounset-safe.
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 lab_with_cuda=false
-case "${1:-}" in
-    '') ;;
-    --with-cuda) lab_with_cuda=true ;;
-    --help|-h)
-        echo 'Usage: bash scripts/bootstrap.sh [--with-cuda]'
-        echo 'Creates LAB_CONDA_ENV (default flash-attention-lab); --with-cuda adds CUDA 12.8 and GCC 13.'
-        exit 0 ;;
-    *) echo "Unknown option: $1" >&2; exit 6 ;;
-esac
-if (( $# > 1 )); then echo 'Expected at most one option' >&2; exit 6; fi
+lab_with_fa4=false
+for lab_arg in "$@"; do
+    case "$lab_arg" in
+        --with-cuda) lab_with_cuda=true ;;
+        --with-fa4) lab_with_fa4=true ;;
+        --help|-h)
+            echo 'Usage: bash scripts/bootstrap.sh [--with-cuda] [--with-fa4]'
+            echo 'Creates LAB_CONDA_ENV (default flash-attention-lab).'
+            echo '  --with-cuda  also install CUDA 12.8 and GCC 13 into the environment'
+            echo '  --with-fa4   also install FlashAttention-4 (pinned submodule) as a benchmark baseline'
+            exit 0 ;;
+        *) echo "Unknown option: $lab_arg" >&2; exit 6 ;;
+    esac
+done
 if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
     echo 'ENV_UNSUPPORTED: this installation recipe targets Linux x86_64' >&2; exit 4
 fi
@@ -57,5 +61,8 @@ if ! command -v git >/dev/null || ! git rev-parse --show-toplevel >/dev/null 2>&
 fi
 git submodule update --init -- third_party/cutlass third_party/flash-attention
 "$CONDA_PREFIX/bin/python" -m pip install -r requirements.txt
+if $lab_with_fa4; then
+    "$CONDA_PREFIX/bin/python" -m pip install third_party/flash-attention/flash_attn/cute
+fi
 "$CONDA_PREFIX/bin/python" -m pip check
 echo 'Installed. Run ./lab doctor, then read course/00_transpose/README.md.'

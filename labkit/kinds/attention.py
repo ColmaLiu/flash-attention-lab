@@ -92,6 +92,8 @@ def reference(inputs, options, rows=None):
 
 def tolerance(case):
     """(atol, rtol) for O and for LSE."""
+    if case.dtype == "fp32":
+        return {"o": (2e-5, 1e-4), "lse": (1e-4, 1e-5)}
     o = {"fp16": (2e-3, 5e-3), "bf16": (1e-2, 2e-2)}[_o_dtype(case)]
     if case.dtype == "e4m3":
         o = (5e-2, 1e-1)  # P is quantized to E4M3 (about 2 significant bits)
@@ -200,5 +202,26 @@ def _fa4(inputs, options, case):
     return launch, result
 
 
-def baselines():
+def _efficient(inputs, options, case):
+    """PyTorch memory-efficient attention: the library baseline for FP32."""
+    if case.dtype != "fp32":
+        raise EnvironmentError_("used as the FP32 baseline only")
+    q, k, v = (inputs[x].transpose(1, 2) for x in ("q", "k", "v"))  # BHND views
+    op = torch.ops.aten._scaled_dot_product_efficient_attention.default
+    o = torch.empty_like(inputs["q"])
+    lse = torch.empty(q.shape[0], q.shape[1], q.shape[2], device="cuda")
+
+    def launch():
+        out, l, *_ = op(
+            q, k, v, None, True, 0.0, bool(options["causal"]), scale=options["scale"]
+        )
+        o.copy_(out.transpose(1, 2))
+        lse.copy_(l[..., : lse.shape[-1]])
+
+    return launch, {"o": o, "lse": lse}
+
+
+def baselines(case=None):
+    if case is not None and case.dtype == "fp32":
+        return {"efficient": _efficient}
     return {"cudnn": _cudnn, "fa4": _fa4}

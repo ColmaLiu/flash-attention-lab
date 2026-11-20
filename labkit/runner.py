@@ -127,6 +127,14 @@ def check_case(lab, case, step, solution=False, full=True):
     return metrics
 
 
+def _baselines(kind, case):
+    import inspect
+
+    if inspect.signature(kind.baselines).parameters:
+        return kind.baselines(case)
+    return kind.baselines()
+
+
 def bench(lab, case, step, solution=False, mode="graph", compare_solution=True):
     """Time the kernel, the reference solution and the library baselines."""
     inputs, options = make_case(lab, case)
@@ -144,7 +152,7 @@ def bench(lab, case, step, solution=False, mode="graph", compare_solution=True):
             candidates.append(("solution", ref.launch))
         except LabError as exc:
             notes["solution"] = str(exc).splitlines()[0]
-    for name, factory in kind.baselines().items():
+    for name, factory in _baselines(kind, case).items():
         try:
             launch, _ = factory(inputs, options, case)
             launch()
