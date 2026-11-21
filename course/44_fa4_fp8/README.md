@@ -1,154 +1,154 @@
-# 44 · FP8 前向：E4M3 的 Q/K/V、descale、P 的 FP8 量化与误差
+# 44 · FP8 forward: E4M3 Q/K/V, descale, FP8 quantization of P, and error
 
-> 部分 4 · FA4 — Blackwell 上的完整优化　｜　前置：[40_fa4_pipeline](../40_fa4_pipeline/README.md)　｜　代码：[`students/44_fa4_fp8/kernel.cu`](../../students/44_fa4_fp8/kernel.cu)
+> Part 4 · FA4 — full optimization on Blackwell | Prerequisites: [40_fa4_pipeline](../40_fa4_pipeline/README.md) | Code: [`students/44_fa4_fp8/kernel.cu`](../../students/44_fa4_fp8/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-40 关搭好了 FA4 的流水结构：两个 Q tile ping-pong、P 写回 TMEM、correction warpgroup。本关把它的输入换成 **FP8**：
+Lab 40 built the FA4 pipeline structure: two Q tiles in ping-pong, P written back to TMEM, a correction warpgroup. This lab switches its inputs to **FP8**:
 
-| | 40 关 | 本关 |
+| | Lab 40 | This lab |
 |---|---|---|
-| Q、K、V | FP16/BF16，2 字节 | **E4M3**，1 字节，外加每个张量一个 FP32 的 descale |
-| 真实值 | 存的值 | `q_descale · Q₈`、`k_descale · K₈`、`v_descale · V₈` |
-| Q·Kᵀ、P·V | `tcgen05.mma .kind::f16`，一条 K = 16 | **`.kind::f8f6f4`，一条 K = 32** |
-| P | 16 位，TMEM 每列 2 个 | **E4M3，先乘 2⁸ 再量化**，TMEM 每列 4 个 |
-| O | 与输入同 dtype | **BF16** |
-| 误差 | 输出舍入为主 | **P 的量化为主**，本关要测量它 |
+| Q, K, V | FP16/BF16, 2 bytes | **E4M3**, 1 byte, plus one FP32 descale per tensor |
+| true value | the stored value | `q_descale · Q₈`, `k_descale · K₈`, `v_descale · V₈` |
+| Q·Kᵀ, P·V | `tcgen05.mma .kind::f16`, K = 16 per instruction | **`.kind::f8f6f4`, K = 32 per instruction** |
+| P | 16-bit, 2 per TMEM column | **E4M3, multiplied by 2⁸ before quantizing**, 4 per TMEM column |
+| O | same dtype as the input | **BF16** |
+| error | mostly output rounding | **mostly the quantization of P**; this lab measures it |
 
-流水结构（warp 分工、barrier、TMEM 列）与 40 关步骤 3 **完全相同**，骨架里已经写好。本关三步：
+The pipeline structure (warp roles, barriers, TMEM columns) is **exactly the same** as lab 40 step 3 and is already in the skeleton. The three steps of this lab:
 
-1. **FP8 的 Q·Kᵀ**：8 位操作数的描述符与 instruction descriptor，两个 descale 折进 softmax 的 scale；S 写入 probe 检查；
-2. **FP8 的 P·V**：P 乘 2⁸ 量化为 E4M3、四个一列写回 TMEM，TS 形式的 8 位 MMA，epilogue 撤销缩放；
-3. **误差分析**：测量各误差来源，把 O 的归一化改为“实际参与 P·V 的量化值之和”。
+1. **FP8 Q·Kᵀ**: descriptors and the instruction descriptor for 8-bit operands, both descales folded into the softmax scale; S is written to the probe for checking;
+2. **FP8 P·V**: P is multiplied by 2⁸, quantized to E4M3 and written back to TMEM four per column; the 8-bit MMA in TS form; the epilogue undoes the scaling;
+3. **Error analysis**: measure each source of error, and change the normalization of O to "the sum of the quantized values that actually enter P·V".
 
-做完后你应该能：
+After this lab you should be able to:
 
-- 写出 E4M3 的位布局、最大值、最小正规数和单位舍入误差，解释为什么 P 要乘 2⁸ 而不是直接量化；
-- 说清 `kind::f8f6f4` 的 instruction descriptor 与 16 位版本差在哪里，8 位 tile 的 swizzle 为什么是“一行 D 字节”；
-- 推导 FP8 attention 的误差界，用 `./lab check` 的 `max|err|` 对上它；
-- 解释为什么 Tensor Core 快了一倍，整个 kernel 只快约 1.2 倍。
+- write down the bit layout, maximum, smallest normal number and unit roundoff of E4M3, and explain why P is multiplied by 2⁸ instead of being quantized directly;
+- explain how the instruction descriptor of `kind::f8f6f4` differs from the 16-bit version, and why the swizzle of an 8-bit tile is "one row = D bytes";
+- derive the error bound of FP8 attention and match it against the `max|err|` from `./lab check`;
+- explain why the Tensor Core gets 2× faster but the whole kernel only about 1.2× faster.
 
-## 2. 动机：FP8 能带来什么
+## 2. Motivation: what FP8 can bring
 
-B200 的 Tensor Core 做 FP8 乘法的吞吐是 BF16 的 **2 倍**（标称稠密约 4.5 PFLOP/s 对 2.25 PFLOP/s）：同样约 64 个周期，一条 `kind::f16` MMA 做 128×128×16，一条 `kind::f8f6f4` MMA 做 128×128×32。数据也只有一半大：Q、K、V 各 1 字节/元素，shared memory 的 K/V 环、TMA 的流量都减半。
+On B200 the Tensor Core's FP8 multiply throughput is **2×** that of BF16 (nominal dense about 4.5 PFLOP/s vs 2.25 PFLOP/s): in the same roughly 64 cycles, one `kind::f16` MMA computes 128×128×16, and one `kind::f8f6f4` MMA computes 128×128×32. The data is also half as large: Q, K, V are 1 byte/element each, so the K/V ring in shared memory and the TMA traffic are both halved.
 
-FlashAttention-3 论文 §3.3 第一次在 Hopper 上把 attention 做成 FP8，并指出两个难点：
+The FlashAttention-3 paper, §3.3, was the first to do attention in FP8 on Hopper, and it points out two difficulties:
 
-1. **布局**：Hopper 的 FP8 `wgmma` 要求两个操作数都是 K-major，而 P·V 中的 V 是 MN-major（D 连续），FA3 在 kernel 里用 `ldmatrix`/`stmatrix` 把 V tile 转置；
-2. **精度**：E4M3 只有 3 位尾数。FA3 用 **block quantization**（每块一个 scale）和 **incoherent processing**（Q、K 先乘同一个随机正交矩阵，打散离群值）降低 Q、K 的量化误差。
+1. **Layout**: Hopper's FP8 `wgmma` requires both operands to be K-major, but V in P·V is MN-major (D contiguous); FA3 transposes the V tile inside the kernel with `ldmatrix`/`stmatrix`;
+2. **Precision**: E4M3 has only 3 mantissa bits. FA3 uses **block quantization** (one scale per block) and **incoherent processing** (Q and K are first multiplied by the same random orthogonal matrix to spread out outliers) to reduce the quantization error of Q and K.
 
-在 B200 上第 1 点不存在了：`tcgen05.mma` 对 E4M3 允许 MN-major 的操作数（§4.6），V 可以照 40 关的方式直接用。第 2 点中的 Q/K/V 量化发生在**输入**里，本关的 harness 已经给了量化好的张量和 per-tensor descale；kernel 自己引入的量化只有 **P**。FA4（`flash_fwd_sm100.py`）的做法是把 P 乘 2⁸ 后量化成 E4M3，本关照做，并测量它的误差。
+On B200 point 1 no longer exists: `tcgen05.mma` allows MN-major operands for E4M3 (§4.6), so V can be used directly the way lab 40 does. The Q/K/V quantization in point 2 happens in the **inputs**: this lab's harness already provides quantized tensors and per-tensor descales; the only quantization the kernel itself introduces is on **P**. FA4 (`flash_fwd_sm100.py`) multiplies P by 2⁸ and then quantizes it to E4M3. This lab does the same and measures its error.
 
-一个提醒：40 关 §7.2 的结论是**瓶颈在 softmax（MUFU）**，Tensor Core 只忙约 57%。FP8 只让 GEMM 变快，所以不要期待 2 倍——§3.6 会先算出预期，§7 再用实测对上。
+A reminder: the conclusion of lab 40 §7.2 is that **the bottleneck is softmax (MUFU)**; the Tensor Core is busy only about 57% of the time. FP8 only makes the GEMMs faster, so do not expect 2×. §7.2 estimates the expected speedup and checks it against the measurements.
 
-## 3. 数学
+## 3. Math
 
 ### 3.1 E4M3
 
-8 位：1 位符号、4 位指数（偏置 7）、3 位尾数，**没有无穷大**，只有 `S.1111.111` 是 NaN（PyTorch 的 `float8_e4m3fn`）。
+8 bits: 1 sign bit, 4 exponent bits (bias 7), 3 mantissa bits, **no infinity**; only `S.1111.111` is NaN (PyTorch's `float8_e4m3fn`).
 
-| | 位模式 | 值 |
+| | Bit pattern | Value |
 |---|---|---|
-| 最大值 | `0.1111.110` | 1.75 × 2⁸ = **448** |
+| maximum | `0.1111.110` | 1.75 × 2⁸ = **448** |
 | 1 | `0.0111.000` | 1 |
-| 最小正规数 | `0.0001.000` | 2⁻⁶ = 0.015625 |
-| 最小次正规数 | `0.0000.001` | 2⁻⁹ ≈ 0.00195 |
+| smallest normal | `0.0001.000` | 2⁻⁶ = 0.015625 |
+| smallest subnormal | `0.0000.001` | 2⁻⁹ ≈ 0.00195 |
 
-- 每个 2 的幂区间 [2ᵉ, 2ᵉ⁺¹) 里只有 8 个值，间距 2ᵉ⁻³。就近舍入的**相对误差至多 u = 2⁻⁴ = 6.25%**（u 叫单位舍入误差；BF16 是 2⁻⁸，FP16 是 2⁻¹¹）；
-- 次正规区（< 2⁻⁶）间距固定为 2⁻⁹，越小的数相对误差越大：0.003 只能变成 0.00195 或 0.0039；
-- 转换成 E4M3 的 `cvt.rn.satfinite.e4m3x2.f32` 中 `.satfinite` 是**必须的**（ptxas 不接受没有它的 `.e4m3x2` 目标）：超出范围的值饱和到 ±448，而不是变成 NaN。
+- Each power-of-two interval [2ᵉ, 2ᵉ⁺¹) holds only 8 values, spaced 2ᵉ⁻³ apart. Round-to-nearest has **relative error at most u = 2⁻⁴ = 6.25%** (u is called the unit roundoff; BF16 has 2⁻⁸, FP16 has 2⁻¹¹);
+- in the subnormal range (< 2⁻⁶) the spacing is fixed at 2⁻⁹, so smaller numbers have larger relative error: 0.003 can only become 0.00195 or 0.0039;
+- in `cvt.rn.satfinite.e4m3x2.f32`, which converts to E4M3, `.satfinite` is **required** (ptxas does not accept an `.e4m3x2` destination without it): out-of-range values saturate to ±448 instead of becoming NaN.
 
-E5M2（2 位尾数，最大 57344）范围大、精度更低，常用于梯度；前向用 E4M3。
+E5M2 (2 mantissa bits, maximum 57344) has a larger range and lower precision and is commonly used for gradients; the forward pass uses E4M3.
 
-输入怎么来的：`make_inputs` 先生成 FP32 的随机数（真实值），Q、K、V 分别乘 2、8、4 后转成 E4M3 存储，对应 `q_descale = 0.5`、`k_descale = 0.125`、`v_descale = 0.25`。真实值 = descale × 存储值。三个 descale 故意取不同的 2 的幂：既让存储值落在 E4M3 的正规区（标准正态乘 8 后最大约 40，远小于 448），又让“用错 descale”的错误（例如 `q_descale·q_descale`）一定被检查出来。
+Where the inputs come from: `make_inputs` first generates random FP32 numbers (the true values); Q, K, V are multiplied by 2, 8, 4 respectively and then stored as E4M3, which corresponds to `q_descale = 0.5`, `k_descale = 0.125`, `v_descale = 0.25`. True value = descale × stored value. The three descales are deliberately different powers of two: this keeps the stored values in the E4M3 normal range (a standard normal times 8 peaks at about 40, far below 448), and it guarantees that a "wrong descale" bug (for example `q_descale·q_descale`) gets caught.
 
-### 3.2 descale 折进 scale
+### 3.2 Folding descale into scale
 
-真实分数是
+The true score is
 
 ```
 s_real = scale · (q_descale · Q₈) · (k_descale · K₈)ᵀ = (scale · q_descale · k_descale) · (Q₈ · K₈ᵀ)
                                                         └──────── qk_scale ────────┘
 ```
 
-Tensor Core 算的是 `Q₈·K₈ᵀ`：两个 E4M3 的乘积有效位不超过 8 位，在 FP32 中**精确**，累加用 FP32。所以只要把 40 关的 `scale` 换成 `qk_scale`（`scale_log2 = qk_scale · log₂e`），online softmax 的代码一个字都不用改，m 仍然存原始分数。每个元素没有任何额外乘法。
+The Tensor Core computes `Q₈·K₈ᵀ`: the product of two E4M3 values has at most 8 significant bits, which is **exact** in FP32, and accumulation is in FP32. So replacing lab 40's `scale` with `qk_scale` (`scale_log2 = qk_scale · log₂e`) is enough; the online softmax code does not change at all, and m still holds raw scores. There is no extra multiply per element.
 
-步骤 1 的 probe 写的是 `qk_scale · s`（真实单位），对照 FP64 的 `scale · (q_descale·Q₈)(k_descale·K₈)ᵀ`，容差 1e-3。实测误差约 1e-7–1e-5（只有 FP32 累加的舍入）。
+The probe in step 1 writes `qk_scale · s` (true units) and compares it with the FP64 `scale · (q_descale·Q₈)(k_descale·K₈)ᵀ`, tolerance 1e-3. The measured error is about 1e-7–1e-5 (only FP32 accumulation rounding).
 
-`v_descale` 不能这样折：它乘在 V 上，而 O = Σ P·V 是线性的，所以**在 epilogue 每个输出元素乘一次**即可。
+`v_descale` cannot be folded this way: it multiplies V, and O = Σ P·V is linear, so **one multiply per output element in the epilogue** is enough.
 
-### 3.3 P 乘 2⁸ 再量化
+### 3.3 Multiply P by 2⁸, then quantize
 
-40 关中 `p = 2^(s·scale_log2 − m·scale_log2) ∈ (0, 1]`。本关写回 TMEM 的是
+In lab 40, `p = 2^(s·scale_log2 − m·scale_log2) ∈ (0, 1]`. In this lab, what is written back to TMEM is
 
 ```
-p̂ = E4M3(2⁸ · p)            即 exp2 的参数多减 8：2^(s·scale_log2 − (m·scale_log2 − 8))
+p̂ = E4M3(2⁸ · p)            i.e. subtract 8 more in the exp2 argument: 2^(s·scale_log2 − (m·scale_log2 − 8))
 ```
 
-为什么乘 2⁸：
+Why multiply by 2⁸:
 
-- **最大值 256 < 448**，不会饱和；
-- 原来 p < 2⁻⁶ 就掉进次正规区，乘 2⁸ 后要到 p < 2⁻¹⁴ 才会；
-- **2 的幂只改指数，不改尾数**：正规区内 E4M3(2⁸·p) = 2⁸·E4M3(p)，不多引入任何舍入。所以 2⁸ 优于 448（448 = 1.75 × 2⁸ 会改变每个值在区间里的位置，误差只是“换了一组随机数”，§3.5 实测还略差）。
+- **the maximum 256 < 448**, so nothing saturates;
+- before, p < 2⁻⁶ already fell into the subnormal range; after multiplying by 2⁸ that happens only for p < 2⁻¹⁴;
+- **a power of two changes only the exponent, not the mantissa**: in the normal range E4M3(2⁸·p) = 2⁸·E4M3(p), so no extra rounding is introduced. That is why 2⁸ beats 448 (448 = 1.75 × 2⁸ changes where each value sits inside its interval; the error just becomes "a different set of random numbers", and §3.5 measures it as slightly worse).
 
-怎样撤销 2⁸：ℓ 用同样乘过 2⁸ 的 p 累加（同一次 `exp2` 的结果），`O / ℓ` 中两个 2⁸ 正好约掉。LSE 要减掉它：
+How to undo the 2⁸: ℓ accumulates the same p that was multiplied by 2⁸ (the result of the same `exp2`), so the two 2⁸ factors cancel in `O / ℓ`. LSE has to subtract it:
 
 ```
 O_real[i] = v_descale · O[i] / ℓ
 LSE[i]    = qk_scale · m + ln ℓ − 8·ln 2
 ```
 
-FA4 的同一做法见 `flash_fwd_sm100.py` 的 Note [Low Precision Scaling]：`max_offset = 8`，epilogue 中 `scale = rcp(row_sum) * v_descale`，LSE 中 `log2(row_sum) − max_offset`。
+FA4 does the same; see Note [Low Precision Scaling] in `flash_fwd_sm100.py`: `max_offset = 8`, `scale = rcp(row_sum) * v_descale` in the epilogue, and `log2(row_sum) − max_offset` in LSE.
 
-### 3.4 手算：什么时候 2⁸ 有用
+### 3.4 Worked example: when 2⁸ helps
 
-一行有 1 个 key 的 p = 1，另外 1000 个 key 的 p = e⁻⁶ ≈ 0.00248（“长尾”）。
+One row has 1 key with p = 1, and 1000 other keys with p = e⁻⁶ ≈ 0.00248 (the "long tail").
 
-| | 尾部一个 p 量化后 | 相对误差 | 尾部总和（真值 2.48） | 最大 key 的权重（真值 1/3.48 = 0.287） |
+| | One tail p after quantization | Relative error | Tail sum (true value 2.48) | Weight of the largest key (true value 1/3.48 = 0.287) |
 |---|---|---|---|---|
-| 直接量化 | 0.00248 落在次正规区，间距 2⁻⁹：→ 0.00195 | −21% | 1.95 | 1/2.95 = 0.339 |
-| 乘 2⁸ | 0.635 落在 [0.5, 1)，间距 2⁻⁴：→ 0.625 | −1.5% | 2.44 | 1/3.44 = 0.291 |
+| direct quantization | 0.00248 falls in the subnormal range, spacing 2⁻⁹: → 0.00195 | −21% | 1.95 | 1/2.95 = 0.339 |
+| multiply by 2⁸ | 0.635 falls in [0.5, 1), spacing 2⁻⁴: → 0.625 | −1.5% | 2.44 | 1/3.44 = 0.291 |
 
-直接量化时 O 偏离约 0.05 × |v_top − v̄_tail|，乘 2⁸ 后约 0.003 ×。
+With direct quantization O is off by about 0.05 × |v_top − v̄_tail|; with 2⁸ by about 0.003 ×.
 
-`long_tail` case 把这个例子推到极端：每个 head 一个热 key（logit ≈ 8），其余 4095 个 key 的 logit ≈ 0，即 p ≈ e⁻⁸ ≈ 3.4e-4，尾部总和约 1.4，比热 key 还重；V 的均值是 1。
+The `long_tail` case pushes this example to the extreme: each head has one hot key (logit ≈ 8), and the other 4095 keys have logit ≈ 0, i.e. p ≈ e⁻⁸ ≈ 3.4e-4. The tail sum is about 1.4, heavier than the hot key; the mean of V is 1.
 
-| `long_tail` [1,4096,2,128] | 尾部一个 p | `max|err|`（步骤 2 / 步骤 3） |
+| `long_tail` [1,4096,2,128] | One tail p | `max|err|` (step 2 / step 3) |
 |---|---|---|
-| 直接量化 | 3.4e-4 < 2⁻¹⁰（最小次正规数的一半）→ **0**：整个尾部消失 | 0.61 / 2.0 |
-| 乘 2⁸ | 0.086，正规数 → 相对误差 ≤ 2⁻⁴ | 5.7e-3 / 5.7e-3 |
+| direct quantization | 3.4e-4 < 2⁻¹⁰ (half the smallest subnormal) → **0**: the whole tail vanishes | 0.61 / 2.0 |
+| multiply by 2⁸ | 0.086, normal → relative error ≤ 2⁻⁴ | 5.7e-3 / 5.7e-3 |
 
-（步骤 3 更糟：它用 Σp̂ 归一化，尾部为 0 时 O 就等于热 key 的 V。）
+(Step 3 is worse: it normalizes by Σp̂, so when the tail is 0, O equals the hot key's V.)
 
-对其余随机数据的 case，p < 2⁻⁶ 的 key 对 ℓ 的贡献很小：把 `kPLog2` 改成 0，它们的误差和乘 2⁸ 相同。2⁸ 几乎没有代价（多一次减法）。
+For the other cases with random data, keys with p < 2⁻⁶ contribute very little to ℓ: with `kPLog2` set to 0, their error is the same as with 2⁸. The 2⁸ costs almost nothing (one extra subtraction).
 
-### 3.5 误差分析
+### 3.5 Error analysis
 
-O 的误差有这些来源（括号里是本关测得的量级）：
+The error in O has these sources (measured magnitudes in this lab in parentheses):
 
-| 来源 | 大小 | 是否计入本关的检查 |
+| Source | Size | Counted by this lab's check? |
 |---|---|---|
-| Q、K、V 量化成 E4M3 | 每个元素相对 ≤ 2⁻⁴ | 否：oracle 用的就是反量化后的输入（`descale × 存储值`）。它属于输入；减小它要靠 FA3 的 block quantization / incoherent processing |
-| Q₈·K₈ᵀ 的 FP32 累加 | 相对约 1e-7 | 是（步骤 1 的 probe） |
-| `ex2.approx` | 相对约 2⁻²² | 是，可忽略 |
-| **P 量化成 E4M3** | 每个 p 相对 ≤ u = 2⁻⁴ | **是：主要来源** |
-| O 舍入成 BF16 | 相对 ≤ 2⁻⁹ | 是 |
+| Q, K, V quantized to E4M3 | relative ≤ 2⁻⁴ per element | no: the oracle uses the dequantized inputs (`descale × stored value`). This error belongs to the input; reducing it needs FA3's block quantization / incoherent processing |
+| FP32 accumulation of Q₈·K₈ᵀ | relative about 1e-7 | yes (step 1 probe) |
+| `ex2.approx` | relative about 2⁻²² | yes, negligible |
+| **P quantized to E4M3** | relative ≤ u = 2⁻⁴ per p | **yes: the main source** |
+| O rounded to BF16 | relative ≤ 2⁻⁹ | yes |
 
-**P 量化的误差界。** 记 p̂_j = p_j(1 + δ_j)，|δ_j| ≤ u。若归一化也用 p̂（步骤 3），O 是 V 行的**凸组合**，权重 ŵ_j = p̂_j / Σp̂：
+**Error bound for quantizing P.** Write p̂_j = p_j(1 + δ_j), |δ_j| ≤ u. If the normalization also uses p̂ (step 3), O is a **convex combination** of the rows of V with weights ŵ_j = p̂_j / Σp̂:
 
 ```
-Ô − O = Σ_j (ŵ_j − w_j) v_j = Σ_j (ŵ_j − w_j)(v_j − O)        （因为 Σŵ = Σw = 1）
+Ô − O = Σ_j (ŵ_j − w_j) v_j = Σ_j (ŵ_j − w_j)(v_j − O)        (because Σŵ = Σw = 1)
 |ŵ_j − w_j| ≤ w_j · 2u/(1 − u)   ⇒   |Ô − O| ≤ 2u/(1−u) · Σ_j w_j |v_j − O|
 ```
 
-- 权重分散在很多 key 上时（随机数据），δ_j 正负抵消，误差约 u·√(Σw_j²)·σ_V，很小（`medium` 约 7e-3，主要是输出的 BF16 舍入）；
-- 权重集中在一两个 key 上时（`large_logits`、causal 的前几行），抵消不了，误差约 u·|v_a − v_b| 量级——`peaked`、`causal_peaked` 的 5e-2–7.5e-2 就是这样来的。
+- When the weight is spread over many keys (random data), the δ_j cancel out, and the error is about u·√(Σw_j²)·σ_V, which is small (`medium`: about 7e-3, against 1e-3 when P stays in BF16; see the table below);
+- when the weight is concentrated on one or two keys (`large_logits`, the first few rows under causal), nothing cancels, and the error is on the order of u·|v_a − v_b|. This is where the 5e-2–7.5e-2 of `peaked` and `causal_peaked` comes from.
 
-**ℓ 用 FP32 的 p 还是量化后的 p̂？** 步骤 2（与 FA4 相同）用 FP32 的 p 求 ℓ，分子却是 Σp̂·v，两者不一致：V = 1 时 O = Σp̂/Σp ≠ 1。步骤 3 改用 Σp̂ 归一化，O 重新成为凸组合，`ones_v` 精确为 1。**但 LSE 必须仍用 FP32 的 ℓ**：LSE 描述的是真实的 softmax，Σp̂ 带着最大约 1% 的偏差（LSE 的容差是 1e-3）。所以 softmax 线程维护两个和：`l`（FP32，给 LSE）和 `lo`（给 O）。
+**Should ℓ use the FP32 p or the quantized p̂?** Step 2 (same as FA4) computes ℓ from the FP32 p, but the numerator is Σp̂·v, and the two disagree: for V = 1, O = Σp̂/Σp ≠ 1. Step 3 normalizes by Σp̂ instead, so O is again a convex combination and `ones_v` is exactly 1. **But LSE must still use the FP32 ℓ**: LSE describes the true softmax, and Σp̂ carries a bias of up to about 1% (the LSE tolerance is 1e-3). So the softmax threads keep two sums: `l` (FP32, for LSE) and `lo` (for O).
 
-**实测**（`max|err|`，与 FP64 oracle 比；“BF16 P”是 PyTorch 中按同样分块逐块把 P 舍入为 BF16 的模拟，不是 kernel；其余是 kernel 实测）：
+**Measured** (`max|err|`, compared with the FP64 oracle; "BF16 P" is a PyTorch simulation that rounds P to BF16 block by block with the same tiling, not a kernel; the others are kernel measurements):
 
-| case | BF16 P（模拟） | 步骤 2：E4M3 P，ℓ = Σp | 步骤 3：E4M3 P，O 用 Σp̂ | FA4 FP8 |
+| case | BF16 P (simulated) | step 2: E4M3 P, ℓ = Σp | step 3: E4M3 P, O uses Σp̂ | FA4 FP8 |
 |---|---|---|---|---|
 | `medium` | 9.8e-4 | 7.1e-3 | 7.1e-3 | 6.6e-3 |
 | `position` | 2.0e-3 | 4.5e-3 | 3.7e-3 | 4.6e-3 |
@@ -158,15 +158,15 @@ O 的误差有这些来源（括号里是本关测得的量级）：
 | `peaked` | 1.2e-2 | 4.7e-2 | 4.5e-2 | 6.6e-2 |
 | `causal_peaked` | 1.4e-2 | 7.5e-2 | 5.1e-2 | 7.5e-2 |
 
-- E4M3 的 P 让误差比 BF16 P 大约 4–7 倍，正是 u 从 2⁻⁸ 变成 2⁻⁴ 的结果（集中权重的行）；
-- 步骤 3 消除了 Σp̂/Σp 的偏差，`ones_v` 从 7.8e-3 变成 ≈ 0；但最坏的行（`peaked`）几乎不变，因为那里误差来自权重本身的相对误差，不来自归一化；
-- `kPLog2` 改为 0（不缩放）：随机数据的 case 误差与 2⁸ 相同，`long_tail`、`causal_long_tail` 失败（§3.4）；改为 log₂448：`peaked` 变成 6.1e-2（更差）。
+- An E4M3 P makes the error about 4–7× larger than a BF16 P, exactly the effect of u going from 2⁻⁸ to 2⁻⁴ (for rows with concentrated weight);
+- step 3 removes the Σp̂/Σp bias, and `ones_v` goes from 7.8e-3 to ≈ 0; but the worst rows (`peaked`) barely change, because there the error comes from the relative error of the weights themselves, not from the normalization;
+- `kPLog2` set to 0 (no scaling): the random-data cases have the same error as with 2⁸, and `long_tail` and `causal_long_tail` fail (§3.4); set to log₂448: `peaked` becomes 6.1e-2 (worse).
 
-**容差。** 本关 O 的默认容差是 `|err| ≤ u + 2u·|expected|`，即 (0.0625, 0.125)。它按 u 取量级、用实测校准，**不是**推导出的上界（上面的界要宽得多；两个 key 平分权重的行误差也可能超过 u·|v_a − v_b|/2）：本关的答案和 FA4 用掉这个预算的约 75%，P scale 取 448 的变体约 95%。
+**Tolerance.** The default O tolerance in this lab is `|err| ≤ u + 2u·|expected|`, i.e. (0.0625, 0.125). It takes its magnitude from u and is calibrated by measurement; it is **not** a derived upper bound (the bound above is much looser; a row whose weight is split evenly between two keys can also exceed u·|v_a − v_b|/2). The solution of this lab and FA4 use about 75% of this budget; the variant with P scale 448 uses about 95%.
 
-答案已知的结构化 case 用 `o_tol` 收紧（取实测误差的约 2–3 倍）：`uniform`、`causal_uniform`（P 全为 256，精确）为 (1e-3, 4e-3)，只剩 BF16 输出的舍入；`position` 类 case 为 1.5e-2；`ones_v` 为 2e-2、`causal_ones_v` 为 4e-2（步骤 2 的 Σp̂/Σp 偏差）；只在步骤 3 检查的 `ones_v_exact`、`causal_ones_v_exact` 为 1e-5。这样“截断而不是就近舍入 P”这类错误在步骤 2 的十几个 case 上都会失败。
+Structured cases with known answers tighten it with `o_tol` (about 2–3× the measured error): `uniform` and `causal_uniform` (P all 256, exact) use (1e-3, 4e-3), leaving only the rounding of the BF16 output; `position`-type cases 1.5e-2; `ones_v` 2e-2 and `causal_ones_v` 4e-2 (the Σp̂/Σp bias of step 2); `ones_v_exact` and `causal_ones_v_exact`, checked only in step 3, 1e-5. This way a bug such as "truncating P instead of rounding to nearest" fails on a dozen or more cases in step 2.
 
-## 4. 硬件与指令
+## 4. Hardware and instructions
 
 ### 4.1 `tcgen05.mma .kind::f8f6f4`
 
@@ -175,155 +175,155 @@ tcgen05.mma.cta_group::1.kind::f8f6f4 [d_tmem], a_desc, b_desc, idesc, enable_in
 tcgen05.mma.cta_group::1.kind::f8f6f4 [d_tmem], [a_tmem], b_desc, idesc, enable_input_d;   // TS
 ```
 
-| | `kind::f16` | `kind::f8f6f4`（E4M3） |
+| | `kind::f16` | `kind::f8f6f4` (E4M3) |
 |---|---|---|
-| 一条的 K | 16 个元素 = **32 字节** | 32 个元素 = **32 字节** |
-| M × N | 128 × 8..256 | 相同 |
-| 累加 | FP32（或 FP16） | FP32 |
-| 一条约多少周期（128×128） | 约 64 | 约 64：每周期 FLOP 翻倍 |
+| K per instruction | 16 elements = **32 bytes** | 32 elements = **32 bytes** |
+| M × N | 128 × 8..256 | same |
+| accumulation | FP32 (or FP16) | FP32 |
+| approx. cycles per instruction (128×128) | about 64 | about 64: FLOP per cycle doubles |
 
-头文件新增 `lab::mma_f8f6f4_ss`、`lab::mma_f8f6f4_ts`。注意 K 片的步长：**按字节算和 16 位完全一样**，都是 32 字节；按元素算是 32 个。D = 128 时一行 Q 只要 4 条 MMA（40 关是 8 条）。
+The header adds `lab::mma_f8f6f4_ss` and `lab::mma_f8f6f4_ts`. Watch the K-slice stride: **in bytes it is exactly the same as 16-bit**, 32 bytes in both cases; in elements it is 32. At D = 128, one row of Q needs only 4 MMAs (8 in lab 40).
 
-### 4.2 instruction descriptor
+### 4.2 Instruction descriptor
 
-位的位置与 `kind::f16` 相同（31 关），只有 A/B format 字段的含义变了：
+The bit positions are the same as for `kind::f16` (lab 31); only the meaning of the A/B format fields changes:
 
-| 位 | 含义 | 本关 |
+| Bits | Meaning | This lab |
 |---|---|---|
-| 4–5 | D 格式：1 = F32 | 1 |
-| 7–9 / 10–12 | A / B 格式：**0 = E4M3**、1 = E5M2、3 = E2M3、4 = E3M2、5 = E2M1 | 0 / 0 |
-| 15 / 16 | A / B 为 MN-major | QKᵀ：0 / 0；PV：0 / 1 |
+| 4–5 | D format: 1 = F32 | 1 |
+| 7–9 / 10–12 | A / B format: **0 = E4M3**, 1 = E5M2, 3 = E2M3, 4 = E3M2, 5 = E2M1 | 0 / 0 |
+| 15 / 16 | A / B is MN-major | QKᵀ: 0 / 0; PV: 0 / 1 |
 | 17–22 | N >> 3 | |
 | 24–28 | M >> 4 | |
 
-`lab::make_idesc_f8f6f4(m, n, a_fmt, b_fmt, a_mn, b_mn)`。一个容易出错的巧合：E4M3 的格式码 0 和 F16 的格式码 0 相同，所以 `make_idesc_f16(128, 128, /*bf16=*/false)` 的位和 E4M3 的 idesc **一模一样**——但它配 `kind::f16` 用就是把字节当 FP16 读，结果全错。决定数据类型的是 **kind 加格式码**，不是格式码本身。
+`lab::make_idesc_f8f6f4(m, n, a_fmt, b_fmt, a_mn, b_mn)`. A coincidence that is easy to get wrong: the E4M3 format code 0 is the same as the F16 format code 0, so the bits of `make_idesc_f16(128, 128, /*bf16=*/false)` are **identical** to the E4M3 idesc. But paired with `kind::f16` it reads the bytes as FP16, and the result is completely wrong. What decides the data type is **kind plus format code**, not the format code alone.
 
-### 4.3 8 位 tile 的 shared memory 布局
+### 4.3 Shared memory layout of 8-bit tiles
 
-40 关的 tile 是 `[D/64 个 panel][行][64 个 16 位元素]`，一个 panel 的一行正好 128 字节 = 一个 128B swizzle 行。8 位时 **一行 D 个元素就是 D 字节**：
+A lab 40 tile is `[D/64 panels][rows][64 16-bit elements]`; one row of a panel is exactly 128 bytes = one 128B swizzle row. In 8 bits, **one row of D elements is D bytes**:
 
-| D | 一行 | swizzle | tile 布局 | 一个 atom（8 行） | K-major 描述符 |
+| D | One row | swizzle | Tile layout | One atom (8 rows) | K-major descriptor |
 |---|---|---|---|---|---|
-| 128 | 128 字节 | 128B | `[128 行][128]`，一个 panel | 1024 字节 | `make_smem_desc_kmajor_sw128`，SBO = 1024 |
-| 64 | 64 字节 | **64B** | `[128 行][64]`，一个 panel | 512 字节 | `make_smem_desc_kmajor_sw64`，SBO = 512 |
+| 128 | 128 bytes | 128B | `[128 rows][128]`, one panel | 1024 bytes | `make_smem_desc_kmajor_sw128`, SBO = 1024 |
+| 64 | 64 bytes | **64B** | `[128 rows][64]`, one panel | 512 bytes | `make_smem_desc_kmajor_sw64`, SBO = 512 |
 
-TMA 的 tensor map 用 `CU_TENSOR_MAP_DATA_TYPE_UINT8`（TMA 只搬字节，不关心 E4M3），box `[1][行][1][D]`，swizzle 与上表一致（骨架的 `fp8_map` 已写好）。64B swizzle 的 XOR 模式每 512 字节重复一次，所以 atom 要 512 字节对齐；本关所有 tile 的偏移都是 1024 的倍数。
+The TMA tensor map uses `CU_TENSOR_MAP_DATA_TYPE_UINT8` (TMA only moves bytes and does not care about E4M3), box `[1][rows][1][D]`, with the swizzle from the table above (the skeleton's `fp8_map` already does this). The XOR pattern of the 64B swizzle repeats every 512 bytes, so an atom must be 512-byte aligned; in this lab all tile offsets are multiples of 1024.
 
-K 片 kk 的起始地址 = tile 起点 + 32·kk 字节，描述符的 start address 字段以 16 字节为单位，所以是 `desc + 2·kk`。D = 64 时一行只有两片：0 和 32 字节。
+The start address of K slice kk = tile start + 32·kk bytes. The descriptor's start address field is in units of 16 bytes, so it is `desc + 2·kk`. At D = 64 a row has only two slices: 0 and 32 bytes.
 
-### 4.4 P 写成 E4M3、每列 4 个
-
-```
-cvt.rn.satfinite.e4m3x2.f32 d16, a, b;     // a → d 的高字节，b → 低字节
-```
-
-**操作数顺序是反的**：第一个源操作数进高字节。四个 key 打包成一个 32 位字，key 4c 在最低字节：
+### 4.4 Writing P as E4M3, 4 per column
 
 ```
-TMEM 列 p_addr + c（c = 0..31）的 32 位 = { 字节0: p̂[4c], 字节1: p̂[4c+1], 字节2: p̂[4c+2], 字节3: p̂[4c+3] }
+cvt.rn.satfinite.e4m3x2.f32 d16, a, b;     // a → high byte of d, b → low byte
 ```
 
-一行 128 个 key 只占 **32 列**（40 关的 16 位 P 占 64 列），仍放在 S 的第 64 列起（与 FA4 的 `tmem_s_to_p_offset = n_block_size // 2` 相同），用两次 `tcgen05.st.32x32b.x16`。
-
-### 4.5 TS 形式的 8 位 MMA
-
-A（P）从 TMEM 读：第 i 行在 lane i，一条 MMA 的 K = 32 个 key = **8 列**。所以 key 片 kk 从 `p_tmem + 8·kk` 开始（40 关是 16 位、每列 2 个，同样是 8 列）。
-
-### 4.6 V 不用转置
-
-P·V 的 B 操作数是 V_j `[key][D]`，D 连续，即 **MN-major**。CUTLASS `mma_sm100_desc.hpp` 中 `InstrDescriptor` 的注释：“Major value of 1 is only valid for E4M3, E5M2, INT8 (signed and unsigned), F16, BF16 and TF32 source formats”——E4M3 可以 MN-major，只有 6 位、4 位格式不行。FA4 对 FP8 的 V 也用 `OperandMajorMode.MN`。
-
-8 位 MN-major 的 swizzle 行是“一个 key 的 D 个字节”：D = 128 时一行 128 字节（N = D = 128 正好一行，LBO 用不到），8 个 key 一个 1024 字节的 atom，SBO = 1024；D = 64 用 64B swizzle，SBO = 512。key 片 kk 前进 32 个 key = 32·D 字节。
-
-所以本关**没有转置**，也就没有“转置算不算进计时”的问题：V 由 TMA 原样装入，计时边界与 40 关相同。Hopper 上的 FA3 必须在 kernel 里转置 V（计时内）。
-
-### 4.7 步骤 3：把量化后的 P 加起来
+**The operand order is reversed**: the first source operand goes to the high byte. Four keys are packed into one 32-bit word, with key 4c in the lowest byte:
 
 ```
-cvt.rn.f16x2.e4m3x2 h01, w16;          // 两个 E4M3 → 两个 FP16（精确）
-add.rn.f32.f16 acc, h, acc;            // FP32 += FP16（PTX ISA 8.6，sm_100），SASS 中一条 FHADD
+32 bits of TMEM column p_addr + c (c = 0..31) = { byte0: p̂[4c], byte1: p̂[4c+1], byte2: p̂[4c+2], byte3: p̂[4c+3] }
 ```
 
-E4M3 → FP16 精确，混合精度加法只做一次 FP32 舍入，结果与“先转 FP32 再加”相同，但每个元素只要一条 FHADD，而不是 `HADD2.F32` + `FADD` 两条。骨架已提供 `add_e4m3x4(acc, w)`。用几个独立的部分和，避免 128 条加法串成一条依赖链。
+A row of 128 keys takes only **32 columns** (lab 40's 16-bit P takes 64 columns). It still starts at column 64 of S (same as FA4's `tmem_s_to_p_offset = n_block_size // 2`), written with two `tcgen05.st.32x32b.x16`.
 
-注意这样 O 的分母是 Σp̂，而 LSE 用的是 FP32 的 Σp，所以 exp(LSE) 并不是 O 实际用的归一化常数（相差约 1%）。对前向输出这没有问题；若反向传播用 LSE 重算 P，要知道它与前向的 P̂ 不完全一致。
+### 4.5 The 8-bit MMA in TS form
 
-### 4.8 常见误用
+A (P) is read from TMEM: row i is in lane i, and the K = 32 keys of one MMA are **8 columns**. So key slice kk starts at `p_tmem + 8·kk` (lab 40 is 16-bit with 2 per column, also 8 columns).
 
-| 误用 | 后果 |
+### 4.6 V needs no transpose
+
+The B operand of P·V is V_j `[key][D]` with D contiguous, i.e. **MN-major**. The comment on `InstrDescriptor` in CUTLASS `mma_sm100_desc.hpp`: "Major value of 1 is only valid for E4M3, E5M2, INT8 (signed and unsigned), F16, BF16 and TF32 source formats". E4M3 may be MN-major; only the 6-bit and 4-bit formats may not. FA4 also uses `OperandMajorMode.MN` for FP8 V.
+
+The swizzle row of 8-bit MN-major is "the D bytes of one key": at D = 128 a row is 128 bytes (N = D = 128 is exactly one row, so LBO is unused), 8 keys form one 1024-byte atom, SBO = 1024; D = 64 uses the 64B swizzle, SBO = 512. Key slice kk advances 32 keys = 32·D bytes.
+
+So this lab has **no transpose**, and therefore no question of "whether the transpose counts toward the timing": TMA loads V as is, and the timing boundary is the same as in lab 40. FA3 on Hopper must transpose V inside the kernel (within the timing).
+
+### 4.7 Step 3: summing the quantized P
+
+```
+cvt.rn.f16x2.e4m3x2 h01, w16;          // two E4M3 → two FP16 (exact)
+add.rn.f32.f16 acc, h, acc;            // FP32 += FP16 (PTX ISA 8.6, sm_100), one FHADD in SASS
+```
+
+E4M3 → FP16 is exact, and the mixed-precision add rounds to FP32 only once, so the result is the same as "convert to FP32 first, then add", but each element needs only one FHADD instead of the two instructions `HADD2.F32` + `FADD`. The skeleton already provides `add_e4m3x4(acc, w)`. Use several independent partial sums so that the 128 adds do not form one long dependency chain.
+
+Note that this way the denominator of O is Σp̂, while LSE uses the FP32 Σp, so exp(LSE) is not the normalization constant O actually uses (they differ by about 1%). This is fine for the forward outputs; if a backward pass recomputes P from LSE, be aware that it does not exactly match the forward P̂.
+
+### 4.8 Common misuses
+
+| Misuse | Consequence |
 |---|---|
-| 用 `kind::f16` 加 E4M3 的 idesc（位相同！） | 把字节对当 FP16 读：S 全错 |
-| K 片步长写成 16 个元素（照抄 40 关的元素数） | 只用了一半的 D，另一半读到下一片：S 错 |
-| D = 64 仍用 128B swizzle 描述符 | 与 TMA 写入的 64B swizzle 不一致：D = 64 的 case 错 |
-| `cvt.e4m3x2` 的两个源操作数顺序反了 | 相邻 key 的 P 交换：`n1`、`peaked*` 错 |
-| P 的缩放超过 448（如乘 2¹⁰） | `.satfinite`（`.e4m3x2` 必须带）把大的 p 饱和到 448，O 偏小 |
-| P 乘了 2⁸，LSE 没减 8·ln2 | LSE 全部大 5.545 |
-| 步骤 3 把 LSE 也改用 Σp̂ | LSE 误差约 1e-2，超过 1e-3 的容差 |
-| 忘了乘 `v_descale` | O 大 4 倍 |
+| `kind::f16` with the E4M3 idesc (same bits!) | byte pairs are read as FP16: S is completely wrong |
+| K-slice stride of 16 elements (copying lab 40's element count) | only half of D is used, the other half reads the next slice: S is wrong |
+| D = 64 still uses the 128B swizzle descriptor | does not match the 64B swizzle that TMA writes: D = 64 cases fail |
+| the two source operands of `cvt.e4m3x2` in the wrong order | P of adjacent keys swapped: `n1` and `peaked*` fail |
+| P scale above 448 (for example × 2¹⁰) | `.satfinite` (required with `.e4m3x2`) saturates large p to 448, O is too small |
+| P multiplied by 2⁸ but LSE does not subtract 8·ln2 | every LSE is 5.545 too large |
+| step 3 also switches LSE to Σp̂ | LSE error about 1e-2, above the 1e-3 tolerance |
+| forgot to multiply by `v_descale` | O is 4× too large |
 
-## 5. 调度设计
+## 5. Schedule design
 
-角色、barrier、MMA 发射顺序与 40 关步骤 3 相同（40 关 §5，16 个 warp，`setmaxnreg` 192 / 80 / 48）。变化只在存储预算：
+Roles, barriers and the MMA issue order are the same as lab 40 step 3 (lab 40 §5, 16 warps, `setmaxnreg` 192 / 80 / 48). Only the storage budget changes:
 
-**shared memory**（D = 128 / D = 64）：
+**shared memory** (D = 128 / D = 64):
 
-| | 40 关步骤 3（BF16） | 本关（E4M3） |
+| | Lab 40 step 3 (BF16) | This lab (E4M3) |
 |---|---|---|
-| Q⁰、Q¹ | 64 KB / 32 KB | 32 KB / 16 KB |
-| O 暂存区（BF16，128 × D × 2 字节） | 复用 Q^t（大小相同） | **复用 Q⁰ + Q¹ 两块合起来**，两个 tile 先后使用 |
-| K/V 环 | 4 × 32 KB / 8 × 16 KB | 8 × 16 KB / 12 × 8 KB |
-| 统计量 | 3 KB | 4 KB（多了 O 的归一化和 `fin_lo`） |
-| 合计 | ≈ 195 KB / ≈ 163 KB | ≈ 165 KB / ≈ 117 KB |
+| Q⁰, Q¹ | 64 KB / 32 KB | 32 KB / 16 KB |
+| O staging (BF16, 128 × D × 2 bytes) | reuses Q^t (same size) | **reuses Q⁰ + Q¹ together**, used by the two tiles one after the other |
+| K/V ring | 4 × 32 KB / 8 × 16 KB | 8 × 16 KB / 12 × 8 KB |
+| statistics | 3 KB | 4 KB (adds the O normalization and `fin_lo`) |
+| total | ≈ 195 KB / ≈ 163 KB | ≈ 165 KB / ≈ 117 KB |
 
-O 暂存为什么可以覆盖两块 Q：`o_full[0]` 由最后一个 PV⁰ 之后的 commit 完成，而全部 QK¹ 都在它之前发出，commit 跟踪同一线程此前的全部 MMA（40 关 §4.3），所以那时 Q⁰、Q¹ 都不再被读。correction warpgroup 先写 tile 0 的 O，每个 warp 的 lane 0 `bulk_wait_group_read<0>` 之后 `__syncwarp`，再写 tile 1 的同一行（每个 warp 只碰自己的 32 行）。
+Why O staging may overwrite both Q buffers: `o_full[0]` is completed by the commit after the last PV⁰, all QK¹ are issued before it, and a commit tracks all earlier MMAs of the same thread (lab 40 §4.3), so by then neither Q⁰ nor Q¹ is read anymore. The correction warpgroup first writes tile 0's O; in each warp, lane 0 does `bulk_wait_group_read<0>`, then `__syncwarp`, and then the warp writes the same rows of tile 1 (each warp touches only its own 32 rows).
 
-K/V 环的级数：一块只有 16 KB，同样的字节能放 8 级。实测 4 级与 8 级的耗时差别在噪声内（数据只占 HBM 带宽的约 2%）。
+Number of K/V ring stages: one block is only 16 KB, so the same bytes hold 8 stages. Measured, 4 stages and 8 stages differ only within noise (the data uses only about 2% of HBM bandwidth).
 
-**TMEM**：列号与 40 关相同，只是 P^t 只用 S^t 第 64–95 列。
+**TMEM**: the column numbers are the same as lab 40, except that P^t uses only columns 64–95 of S^t.
 
-| 列 | D = 128 | D = 64 |
+| Columns | D = 128 | D = 64 |
 |---|---|---|
-| S⁰（P⁰ 在 64–95） | 0–127 | 0–127 |
-| S¹（P¹ 在 192–223） | 128–255 | 128–255 |
+| S⁰ (P⁰ at 64–95) | 0–127 | 0–127 |
+| S¹ (P¹ at 192–223) | 128–255 | 128–255 |
 | O⁰ / O¹ | 256–383 / 384–511 | 256–319 / 320–383 |
 
-**softmax 线程每块多做的事**（相对 40 关）：64 条 `F2FP`（E4M3 打包，两个一条），步骤 3 再加 64 条 `F2FP`（解包）和 128 条 `FHADD`。都不在 MUFU 上。
+**Extra work per block for the softmax threads** (compared with lab 40): 64 `F2FP` (E4M3 packing, two per instruction); step 3 adds another 64 `F2FP` (unpacking) and 128 `FHADD`. None of these run on MUFU.
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-骨架中 40 关的全部流水（TMA、MMA 调度、softmax、correction、barrier）、8 位 tensor map、O 暂存、`add_e4m3x4` 都已写好。`p.step` 选择三个配置之一（`Config<D, 1|2|3>`），三步是同一个 kernel 逐步补全。
+The skeleton already contains the whole lab 40 pipeline (TMA, MMA scheduling, softmax, correction, barriers), the 8-bit tensor maps, O staging, and `add_e4m3x4`. `p.step` selects one of three configurations (`Config<D, 1|2|3>`); the three steps complete the same kernel bit by bit.
 
-### 步骤 1 · TODO(1a)–(1c)：FP8 的 Q·Kᵀ
+### Step 1 · TODO(1a)–(1c): FP8 Q·Kᵀ
 
-- 1a（host，`launch`）：`qk_scale`、`scale_log2`（§3.2）；
-- 1b：`desc_kmajor` 与 `mma_qk`（§4.1–4.3）；
-- 1c：`write_probe`：真实单位的 S 写进 probe（§3.2）。
+- 1a (host, `launch`): `qk_scale`, `scale_log2` (§3.2);
+- 1b: `desc_kmajor` and `mma_qk` (§4.1–4.3);
+- 1c: `write_probe`: write S in true units to the probe (§3.2).
 
-本步 MMA warp 不发 P·V，epilogue 不写 O，只检查 probe（非 causal 的小 case）。
+In this step the MMA warp does not issue P·V and the epilogue does not write O; only the probe is checked (small non-causal cases).
 
 ```bash
 ./lab check 44 --step 1 --case n1
 ./lab check 44 --step 1
 ```
 
-### 步骤 2 · TODO(2a)–(2c)：FP8 的 P·V
+### Step 2 · TODO(2a)–(2c): FP8 P·V
 
-- 2a：`pack4_e4m3` 与 `write_p_tmem`（§4.4）。`exp2` 参数中的 −8 已经写好（`base - kPLog2`）；
-- 2b：`mma_pv_ts`（§4.5–4.6）；
-- 2c：`store_o_and_lse` 中的 `f` 和 LSE（§3.3）。
+- 2a: `pack4_e4m3` and `write_p_tmem` (§4.4). The −8 in the `exp2` argument is already written (`base - kPLog2`);
+- 2b: `mma_pv_ts` (§4.5–4.6);
+- 2c: `f` and LSE in `store_o_and_lse` (§3.3).
 
 ```bash
 ./lab check 44 --step 2 --case tile1_position
 ./lab check 44 --step 2
-./lab sass 44             # UTCQMMA：A 操作数为 tmem[...] 的就是 TS 形式的 P·V
+./lab sass 44             # UTCQMMA: the one whose A operand is tmem[...] is the TS-form P·V
 ./lab bench 44 --step 2 --case perf
 ```
 
-### 步骤 3 · TODO(3)：误差分析
+### Step 3 · TODO(3): error analysis
 
-1. 先记下步骤 2 的 `max|err|`：`./lab check 44 --step 2`，特别是 `ones_v`、`causal_ones_v`、`position`、`peaked`；
-2. 在 `write_p_tmem` 的 `kQuantL` 分支里返回量化值之和（§4.7）。kernel 中 `lo` 的更新和 epilogue 的 `lo`/`l` 分工已经写好——读懂它们（§3.5）；
-3. 对比误差，并用 §3.5 的误差界解释：哪些 case 变好了、哪些没变、为什么。
+1. First record the `max|err|` of step 2: `./lab check 44 --step 2`, especially `ones_v`, `causal_ones_v`, `position`, `peaked`;
+2. in the `kQuantL` branch of `write_p_tmem`, return the sum of the quantized values (§4.7). The update of `lo` in the kernel and the split of roles between `lo`/`l` in the epilogue are already written; read and understand them (§3.5);
+3. compare the errors and explain them with the error bound from §3.5: which cases improved, which did not change, and why.
 
 ```bash
 ./lab check 44 --step 3
@@ -331,94 +331,94 @@ K/V 环的级数：一块只有 16 KB，同样的字节能放 8 级。实测 4 �
 ./lab bench 44 --case perf_d64
 ```
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| Symptom | Likely cause |
 |---|---|
-| 步骤 1 所有 probe 都差一个常数倍（如 4 倍或 1/4） | `qk_scale` 用错了 descale（三个 descale 各不相同：0.5、0.125、0.25），或多乘了 log₂e |
-| 步骤 1 只有 D = 64 的 case 错（`one_block`、`scale`、`peaked_d64`） | D = 64 用了 128B swizzle 的描述符；SBO 不是 512 |
-| 步骤 1 D = 128 错、`n1` 也错 | K 片的字节偏移；idesc 的 N/M；用了 `mma_f16_ss` |
-| 步骤 2 `n1` 的 O 错、LSE 对 | P 的字节顺序（`n1` 只有 key 0，它必须在字节 0） |
-| 步骤 2 O 对、LSE 全部差 5.545 | LSE 没减 8·ln 2 |
-| 步骤 2 O 全部差 4 倍 | 忘了 `v_descale` |
-| 步骤 2 D = 64 的 O 错、D = 128 对 | V 的描述符：64B swizzle、SBO = 512、key 片步长 32·D 字节 |
-| 步骤 3 LSE 错约 1e-2 | 把 LSE 也改成了 Σp̂（§3.5） |
-| 步骤 3 `ones_v_exact` 失败（O 不是精确的 1） | `lo` 仍累加 FP32 的 p；或部分和漏了一个 |
-| 步骤 2 `position` 类、`ones_v` 误差约 2.5e-2–6e-2 | P 被截断而不是就近舍入（例如自己拼位而不用 `cvt.rn`） |
-| 步骤 2 `long_tail` 误差约 0.6 | P 没有乘 2⁸（`base - kPLog2` 被改掉） |
+| step 1: every probe is off by a constant factor (such as 4× or 1/4) | `qk_scale` uses the wrong descale (the three descales all differ: 0.5, 0.125, 0.25), or multiplies by log₂e once too often |
+| step 1: only the D = 64 cases fail (`one_block`, `scale`, `peaked_d64`) | D = 64 uses the 128B swizzle descriptor; SBO is not 512 |
+| step 1: D = 128 fails and `n1` also fails | byte offset of the K slice; N/M in the idesc; used `mma_f16_ss` |
+| step 2: O of `n1` is wrong, LSE is right | byte order of P (`n1` has only key 0, and it must be in byte 0) |
+| step 2: O is right, every LSE is off by 5.545 | LSE does not subtract 8·ln 2 |
+| step 2: every O is off by 4× | forgot `v_descale` |
+| step 2: O is wrong at D = 64, right at D = 128 | V descriptor: 64B swizzle, SBO = 512, key-slice stride 32·D bytes |
+| step 3: LSE off by about 1e-2 | LSE was also switched to Σp̂ (§3.5) |
+| step 3: `ones_v_exact` fails (O is not exactly 1) | `lo` still accumulates the FP32 p; or a partial sum is missing |
+| step 2: `position`-type cases and `ones_v` have errors of about 2.5e-2–6e-2 | P is truncated instead of rounded to nearest (for example by assembling bits by hand instead of using `cvt.rn`) |
+| step 2: `long_tail` error about 0.6 | P is not multiplied by 2⁸ (`base - kPLog2` was changed) |
 
-## 7. 性能
+## 7. Performance
 
-### 7.1 相对 FA4 FP8 与 40 关
+### 7.1 Against FA4 FP8 and lab 40
 
-本机实测（4 号卡，CUDA Graph，中位数；`vs FA4 FP8` = FA4 FP8 耗时 / 本版本耗时；范围来自 2–3 次运行，单次之间约有 ±3% 的波动）：
+Measured on this machine (GPU 4, CUDA Graph, median; `vs FA4 FP8` = FA4 FP8 time / time of this version; ranges come from 2–3 runs, with about ±3% variation between single runs):
 
-| 版本 | `perf` [4,4096,16,128] | `perf_causal` | `perf_d64` [4,4096,32,64] | `perf_8k` [2,8192,16,128] |
+| Version | `perf` [4,4096,16,128] | `perf_causal` | `perf_d64` [4,4096,32,64] | `perf_8k` [2,8192,16,128] |
 |---|---|---|---|---|
-| 步骤 2（E4M3 P，ℓ = Σp） | ≈ 0.68–0.69× | ≈ 0.71× | ≈ 0.73× | ≈ 0.68× |
-| 步骤 3（答案） | ≈ 0.69–0.73× | ≈ 0.73× | ≈ 0.74× | ≈ 0.70–0.72× |
-| FA4 FP8（`flash_attn.cute`） | 1× | 1× | 1× | 1× |
-| 本关步骤 3 相对 40 关步骤 3（BF16/FP16） | ≈ 1.23× | ≈ 1.15× | ≈ 1.12× | ≈ 1.24× |
-| FA4 FP8 相对 FA4 BF16/FP16 | ≈ 1.27× | ≈ 1.12× | ≈ 1.05× | ≈ 1.37× |
+| step 2 (E4M3 P, ℓ = Σp) | ≈ 0.68–0.69× | ≈ 0.71× | ≈ 0.73× | ≈ 0.68× |
+| step 3 (solution) | ≈ 0.69–0.73× | ≈ 0.73× | ≈ 0.74× | ≈ 0.70–0.72× |
+| FA4 FP8 (`flash_attn.cute`) | 1× | 1× | 1× | 1× |
+| this lab's step 3 relative to lab 40 step 3 (BF16/FP16) | ≈ 1.23× | ≈ 1.15× | ≈ 1.12× | ≈ 1.24× |
+| FA4 FP8 relative to FA4 BF16/FP16 | ≈ 1.27× | ≈ 1.12× | ≈ 1.05× | ≈ 1.37× |
 
-- 你的步骤 3 在四个 perf case 上都达到 FA4 FP8 的约 0.63 倍以上，就说明本关的机制成立；cuDNN 没有 FP8 的 SDPA 基线（`bench` 显示“unavailable”）；
-- 步骤 3 多了解包和 128 条 FHADD，却和步骤 2 一样快甚至略快（约 1–4%，可重复）。我们没有查明原因（可能是指令调度的变化）；结论是“一致的归一化”几乎不花时间；
-- FA4 比我们快约 1.4 倍，因为它已经用上 41–43 关的优化（多项式 exp2、条件 rescale、persistent 调度等），这些不属于本关。
+- If your step 3 reaches about 0.63× of FA4 FP8 or better on all four perf cases, the mechanisms of this lab work. cuDNN has no FP8 SDPA baseline (`bench` shows "unavailable");
+- step 3 adds unpacking and 128 FHADD, yet it is as fast as step 2 or slightly faster (about 1–4%, reproducible). We have not found the cause (possibly a change in instruction scheduling); the conclusion is that "consistent normalization" costs almost no time;
+- FA4 is about 1.4× faster than us because it already uses the optimizations of labs 41–43 (polynomial exp2, conditional rescale, persistent scheduling, and so on), which are not part of this lab.
 
-### 7.2 为什么只快约 1.2 倍
+### 7.2 Why only about 1.2× faster
 
-40 关 §3.1 的链模型：一个 tile 每块的周期 `T ≈ SM + PV + QK + 交接`。40 关（D = 128）实测 SM ≈ 1900–2200 周期，PV + QK ≈ 1100 周期，T ≈ 3450。FP8 让 PV + QK 减半到约 550 周期，softmax 不变：
+The chain model from lab 40 §3.1: the cycles per block of one tile are `T ≈ SM + PV + QK + handover`. Lab 40 (D = 128) measured SM ≈ 1900–2200 cycles, PV + QK ≈ 1100 cycles, T ≈ 3450. FP8 halves PV + QK to about 550 cycles, and softmax does not change:
 
 ```
-T_fp8 ≈ 3450 − 550 ≈ 2900 周期    →   3450 / 2900 ≈ 1.19×
+T_fp8 ≈ 3450 − 550 ≈ 2900 cycles    →   3450 / 2900 ≈ 1.19×
 ```
 
-与 `perf`、`perf_8k` 实测的约 1.23× 一致。D = 64 时 GEMM 在链中占得更少，所以只快约 1.12×。
+This matches the roughly 1.23× measured on `perf` and `perf_8k`. At D = 64 the GEMMs take a smaller share of the chain, so the speedup is only about 1.12×.
 
-Nsight Compute（`./lab profile 44 --solution --case perf`）：
+Nsight Compute (`./lab profile 44 --solution --case perf`):
 
-| 指标 | 40 关步骤 3 | 本关 |
+| Metric | Lab 40 step 3 | This lab |
 |---|---|---|
 | `sm__pipe_tensor_cycles_active` | ≈ 57% | **≈ 29%** |
-| `sm__inst_executed_pipe_xu`（MUFU） | ≈ 57% | ≈ 58% |
+| `sm__inst_executed_pipe_xu` (MUFU) | ≈ 57% | ≈ 58% |
 | `dram__throughput` | — | ≈ 2% |
 
-Tensor Core 的忙碌比例正好减半，MUFU 的比例不变：瓶颈仍然是 softmax 的 `exp2`。HBM 几乎闲着，所以“字节减半”对本 kernel 的耗时没有直接作用（它的作用是让 shared memory 能放更多级、为更大的 tile 留空间）。FP8 attention 是 **MUFU-bound** 的，FA4 源码中 `_FP8_TUNING_CONFIG` 的注释也这样说（“FP8 fwd is MUFU/ex2-bound”），因此 41 关的多项式 `exp2` 对 FP8 更重要。
+The Tensor Core busy fraction is exactly halved, and the MUFU fraction does not change: the bottleneck is still softmax's `exp2`. HBM is almost idle, so "half the bytes" has no direct effect on this kernel's time (its effect is that shared memory can hold more stages and leaves room for larger tiles). FP8 attention is **MUFU-bound**, as the comment on `_FP8_TUNING_CONFIG` in the FA4 source also says ("FP8 fwd is MUFU/ex2-bound"), so lab 41's polynomial `exp2` matters even more for FP8.
 
 ```bash
 ./lab profile 44 --case perf
 ```
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. E4M3 能表示 300 吗？0.004 呢？它们分别会被舍入成什么？
-2. D = 64 时，Q tile 的第 r 行第 40 个元素在 shared memory 中的字节偏移是多少（相对 tile 起点，考虑 64B swizzle：16 字节块 q 存在 q ^ ((r / 2) % 4)）？为什么不能用 128B swizzle？
-3. PV 的第 kk = 3 条 MMA：A 的 TMEM 列（相对 base，t = 1）是多少？V 的描述符 start address 前进了多少字节（D = 128）？
-4. 如果 P 改成乘 2¹⁰，会发生什么？乘 2⁸ 时 p̂ 最大是多少、离 448 还有多远？FA4 允许 softmax 的最大值“滞后”（41 关的条件 rescale）时，为什么要把这段余量算进去？
-5. 为什么步骤 3 中 O 用 Σp̂ 归一化、LSE 却要用 FP32 的 Σp？如果反过来会怎样？
-6. FP8 让 Tensor Core 的工作时间减半，为什么 `perf` 只快约 1.2 倍？如果 softmax 也快一倍（41 关的目标之一），按 §7.2 的模型会快多少？
+1. Can E4M3 represent 300? What about 0.004? What does each get rounded to?
+2. At D = 64, what is the byte offset in shared memory of element 40 of row r of the Q tile (relative to the tile start, with the 64B swizzle: 16-byte chunk q is stored at q ^ ((r / 2) % 4))? Why can the 128B swizzle not be used?
+3. For PV MMA number kk = 3: what is A's TMEM column (relative to base, t = 1)? How many bytes does V's descriptor start address advance (D = 128)?
+4. What happens if P is multiplied by 2¹⁰ instead? With 2⁸, what is the largest p̂, and how far is it from 448? When FA4 lets the softmax max "lag" (lab 41's conditional rescale), why must this margin be accounted for?
+5. Why does step 3 normalize O by Σp̂ but compute LSE with the FP32 Σp? What happens the other way round?
+6. FP8 halves the Tensor Core work time; why is `perf` only about 1.2× faster? If softmax also became 2× faster (one of lab 41's goals), how much faster would it be under the §7.2 model?
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. 300 在 [256, 448] 区间，间距 32：300 → 288（离 288 差 12，离 320 差 20）。0.004 在次正规区，间距 2⁻⁹ ≈ 0.00195：0.004 ≈ 2.05 × 2⁻⁹ → 2 × 2⁻⁹ = 0.0039。
-2. 第 40 字节在 16 字节块 q = 2（字节 32–47）中，块内偏移 8；64B swizzle 把块 q 放到 q ^ ((r / 2) % 4)，所以偏移 = 64·r + 16·(2 ^ ((r/2) % 4)) + 8，例如 r = 5 时 = 320 + 16·0 + 8 = 328。`tcgen05` 的 128B swizzle K-major 布局假定每行 128 字节、8 行一个 1024 字节的 atom；D = 64 的一行只有 64 字节，按 128B 布局去读就会把两行当成一行。描述符的 swizzle 必须与 TMA 写入时的 swizzle 一致。
-3. P¹ 从 S¹ 的第 64 列开始：`128 + 64 + 8·3 = 216`（lane 字段 0），对应 key 96–127。V 前进 3 × 32 个 key × 128 字节 = 12288 字节（描述符加 768）。
-4. 2¹⁰ = 1024 > 448：p 接近 1 的值饱和到 448（`satfinite`），P·V 中最大的权重被压小，而 FP32 的 ℓ 仍按 1024 计，O 偏小（FA4 #2716 的问题）。乘 2⁸ 时最大 256，余量 448/256 = 1.75，即 log₂ 约 0.8。若允许最大值滞后 τ 个 log₂ 单位，p 可以到 2^τ，乘 2⁸ 后到 2^(8+τ)，必须 < 448，所以 FA4 断言 `max_offset + rescale_threshold < log2(448)`，FP8 时 rescale_threshold 取 0。
-5. O = Σp̂v / Σp̂ 是精确的凸组合：权重之和为 1，`ones_v` 精确为 1，偏差不会以 v 的均值的形式进入 O。LSE 是真实 softmax 的归一化常数，应该是 ln Σexp(s)，Σp̂ 带着每项最多 6.25% 的相对误差，平均下来约 1e-2 量级，超过 LSE 的容差。反过来（O 用 Σp、LSE 用 Σp̂）两者都变差。
-6. 链 T ≈ SM + PV + QK + 交接，只有 PV + QK 减半（约 1100 → 550 周期），SM ≈ 2000 不变：3450 / 2900 ≈ 1.19。若 SM 减半到约 1000，链只剩约 1000 + 550 + 交接 ≈ 1700 周期；但两个 tile 共用一个 MUFU：每块 2 × 128 × 128 个 `exp2`、每周期 16 个，至少 2048 周期。所以只要 `exp2` 全在 MUFU 上，T 不会低于约 2048，相对本关最多约 2900 / 2048 ≈ 1.4 倍——FA4 FP8 正好快约 1.4 倍。要突破这个下限，必须把一部分 `exp2` 搬到 FMA 上（41 关）。
+1. 300 lies in the interval [256, 448], spacing 32: 300 → 288 (12 away from 288, 20 away from 320). 0.004 is in the subnormal range, spacing 2⁻⁹ ≈ 0.00195: 0.004 ≈ 2.05 × 2⁻⁹ → 2 × 2⁻⁹ = 0.0039.
+2. Byte 40 is in 16-byte chunk q = 2 (bytes 32–47), at offset 8 within the chunk; the 64B swizzle puts chunk q at q ^ ((r / 2) % 4), so offset = 64·r + 16·(2 ^ ((r/2) % 4)) + 8; for example, for r = 5 it is 320 + 16·0 + 8 = 328. The `tcgen05` 128B-swizzle K-major layout assumes 128 bytes per row and 8 rows per 1024-byte atom; a D = 64 row has only 64 bytes, so reading it with the 128B layout treats two rows as one. The descriptor's swizzle must match the swizzle TMA used when writing.
+3. P¹ starts at column 64 of S¹: `128 + 64 + 8·3 = 216` (lane field 0), which holds keys 96–127. V advances 3 × 32 keys × 128 bytes = 12288 bytes (descriptor + 768).
+4. 2¹⁰ = 1024 > 448: values with p close to 1 saturate to 448 (`satfinite`), so the largest weights in P·V get squashed, while the FP32 ℓ still counts them at 1024, and O comes out too small (the problem in FA4 #2716). With 2⁸ the maximum is 256, and the margin is 448/256 = 1.75, i.e. about 0.8 in log₂. If the max may lag by τ log₂ units, p can reach 2^τ, which becomes 2^(8+τ) after multiplying by 2⁸ and must be < 448. So FA4 asserts `max_offset + rescale_threshold < log2(448)`, and for FP8 rescale_threshold is set to 0.
+5. O = Σp̂v / Σp̂ is an exact convex combination: the weights sum to 1, `ones_v` is exactly 1, and the bias cannot enter O in the form of the mean of v. LSE is the normalization constant of the true softmax and should be ln Σexp(s); Σp̂ carries up to 6.25% relative error per term, which averages to an error on the order of 1e-2, above the LSE tolerance. The other way round (O uses Σp, LSE uses Σp̂), both get worse.
+6. Chain T ≈ SM + PV + QK + handover; only PV + QK is halved (about 1100 → 550 cycles), while SM ≈ 2000 does not change: 3450 / 2900 ≈ 1.19. If SM were halved to about 1000, the chain would be only about 1000 + 550 + handover ≈ 1700 cycles; but the two tiles share one MUFU: each block has 2 × 128 × 128 `exp2`, at 16 per cycle, so at least 2048 cycles. So as long as every `exp2` runs on MUFU, T cannot drop below about 2048, which is at most about 2900 / 2048 ≈ 1.4× faster than this lab; FA4 FP8 is indeed about 1.4× faster. To get below this floor, part of the `exp2` work must move to the FMA units (lab 41).
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- Jay Shah 等，*FlashAttention-3*（2024）§3.3：FP8 的布局要求（V 转置、P 的寄存器排列）、block quantization、incoherent processing 及其误差实验。
-- Tri Dao 等，FlashAttention-4（2025）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
-  - Note [Low Precision Scaling] 与 `_LOG2_DTYPE_MAX`：P 乘 2^max_offset、与 rescale_threshold 的约束；
-  - `_load_effective_descales`：`qk_descale = q_descale · k_descale` 折进 `softmax_scale_log2`；
-  - `correction_epilogue` 附近：`scale = rcp(row_sum) * v_descale`，LSE 中的 `− max_offset`；
-  - `_FP8_TUNING_CONFIG`：“FP8 fwd is MUFU/ex2-bound”；
-  - `flash_attn/cute/interface.py` 的 `_flash_attn_fwd`（`q_descale` 等参数，形状 `[B, H_kv]`；公开的 `flash_attn_func` 不接受 descale）。
-- CUTLASS：`third_party/cutlass/include/cute/arch/mma_sm100_desc.hpp`（`MXF8F6F4Format`、`InstrDescriptor` 中 MN-major 的适用格式）；`third_party/cutlass/include/cute/arch/mma_sm100_umma.hpp`（`SM100_MMA_F8F6F4_SS`、`SM100_MMA_F8F6F4_TS`：“A from TMEM can't be transposed”）。
-- PTX ISA 8.7：[tcgen05.mma](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma)（`.kind::f8f6f4`、instruction descriptor 表）、[cvt](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt)（`.e4m3x2`、`.satfinite`）、[add](https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-add)（混合精度 `add.f32.f16`）。
-- OCP 8-bit Floating Point Specification (OFP8)：E4M3/E5M2 的定义。
-- 后续：41 关（softmax 吞吐，FP8 更受益）、42、43 关。
+- Jay Shah et al., *FlashAttention-3* (2024) §3.3: the FP8 layout requirements (V transpose, register arrangement of P), block quantization, incoherent processing, and their error experiments.
+- Zadouri et al., [FlashAttention-4](https://arxiv.org/abs/2603.05451v1) (2026); upstream implementation `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`:
+  - Note [Low Precision Scaling] and `_LOG2_DTYPE_MAX`: multiplying P by 2^max_offset, and the constraint with rescale_threshold;
+  - `_load_effective_descales`: `qk_descale = q_descale · k_descale` folded into `softmax_scale_log2`;
+  - around `correction_epilogue`: `scale = rcp(row_sum) * v_descale`, and `− max_offset` in LSE;
+  - `_FP8_TUNING_CONFIG`: "FP8 fwd is MUFU/ex2-bound";
+  - `_flash_attn_fwd` in `flash_attn/cute/interface.py` (`q_descale` and other parameters, shape `[B, H_kv]`; the public `flash_attn_func` does not accept descales).
+- CUTLASS: `third_party/cutlass/include/cute/arch/mma_sm100_desc.hpp` (`MXF8F6F4Format`, the formats for which MN-major applies in `InstrDescriptor`); `third_party/cutlass/include/cute/arch/mma_sm100_umma.hpp` (`SM100_MMA_F8F6F4_SS`, `SM100_MMA_F8F6F4_TS`: "A from TMEM can't be transposed").
+- PTX ISA 8.7: [tcgen05.mma](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma) (`.kind::f8f6f4`, instruction descriptor table), [cvt](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt) (`.e4m3x2`, `.satfinite`), [add](https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-add) (mixed-precision `add.f32.f16`).
+- OCP 8-bit Floating Point Specification (OFP8): definition of E4M3/E5M2.
+- Next: lab 41 (softmax throughput, which FP8 benefits from even more), labs 42 and 43.

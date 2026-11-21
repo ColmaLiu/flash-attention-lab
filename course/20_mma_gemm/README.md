@@ -1,270 +1,270 @@
-# 20 · warp 级 Tensor Core：mma.sync GEMM
+# 20 · Warp-level Tensor Cores: mma.sync GEMM
 
-> 部分 2 · FA2　｜　前置：[10_simt_gemm](../10_simt_gemm/README.md)　｜　代码：[`students/20_mma_gemm/kernel.cu`](../../students/20_mma_gemm/kernel.cu)
+> Part 2 · FA2 | Prerequisites: [10_simt_gemm](../10_simt_gemm/README.md) | Code: [`students/20_mma_gemm/kernel.cu`](../../students/20_mma_gemm/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-用 Tensor Core 计算 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 为 BF16，C 为 FP32。A 和 B 都按 K 连续存放（K-major），形状和 attention 里的 `Q·Kᵀ` 一样。
+Compute `C[M,N] = A[M,K] · B[N,K]ᵀ` with Tensor Cores: A and B are BF16, C is FP32. Both A and B are stored contiguous along K (K-major), the same shape as `Q·Kᵀ` in attention.
 
-本关分三步，把同一个 GEMM 从 cuBLAS 的约 2% 提到约 17%：
+This lab has three steps, which take the same GEMM from about 2% of cuBLAS to about 17%:
 
-1. 一个 warp 算一个 16×8 的输出块，直接从 global memory 按 **fragment 坐标**装操作数；
-2. 一个 CTA 算 128×128 的输出块，操作数先进 shared memory，再用 **`ldmatrix`** 装进寄存器；
-3. 用 **XOR swizzle** 重新排列 shared memory，消除 `ldmatrix` 的 bank conflict。
+1. one warp computes one 16×8 output block, loading operands directly from global memory by **fragment coordinates**;
+2. one CTA computes a 128×128 output block; operands first go to shared memory, then **`ldmatrix`** loads them into registers;
+3. an **XOR swizzle** rearranges shared memory to remove the bank conflicts of `ldmatrix`.
 
-做完后你应该能：
+After this lab you should be able to:
 
-- 说出 `mma.sync.m16n8k16` 中每个 lane 持有 A、B、C 的哪些元素；
-- 写出 `ldmatrix` 每个 lane 应该提供的行地址；
-- 算出一种 shared memory 布局下 `ldmatrix` 的 bank conflict，并设计 swizzle 消除它；
-- 解释为什么 B200 上 `mma.sync` 最多只能跑到 cuBLAS 的约 0.37 倍。
+- state which elements of A, B, C each lane holds in `mma.sync.m16n8k16`;
+- write the row address each lane must supply to `ldmatrix`;
+- compute the `ldmatrix` bank conflicts of a shared memory layout, and design a swizzle that removes them;
+- explain why `mma.sync` on B200 can reach at most about 0.37 times cuBLAS.
 
-本关写的 `ldmatrix`、`mma`、fragment 坐标和 swizzle 函数，从 21 关起由 [`include/lab/mma_sync.cuh`](../../include/lab/mma_sync.cuh) 提供。
+The `ldmatrix`, `mma`, fragment coordinate and swizzle functions you write in this lab are provided by [`include/lab/mma_sync.cuh`](../../include/lab/mma_sync.cuh) from lab 21 on.
 
-## 2. 动机：GEMM 要用 Tensor Core
+## 2. Motivation: GEMM needs Tensor Cores
 
-[10_simt_gemm](../10_simt_gemm/README.md) 用 FP32 FMA 指令（CUDA core）做 GEMM，B200 上 FP32 的标称峰值是 75 TFLOP/s。同一块 GPU 上，BF16 Tensor Core 的标称峰值是 2250 TFLOP/s，高出 30 倍。attention 里的两次矩阵乘 `S = Q·Kᵀ` 和 `O = P·V` 占了绝大部分浮点运算，必须交给 Tensor Core。
+[10_simt_gemm](../10_simt_gemm/README.md) does GEMM with FP32 FMA instructions (CUDA cores); the FP32 nominal peak of B200 is 75 TFLOP/s. On the same GPU, the BF16 Tensor Core nominal peak is 2250 TFLOP/s, 30 times higher. The two matrix multiplications in attention, `S = Q·Kᵀ` and `O = P·V`, account for most of the floating-point operations and must go to Tensor Cores.
 
-FlashAttention-2 论文第 3.1 节专门讨论了这件事：在 A100 上，矩阵乘的吞吐是非矩阵乘 FP32 运算的 16 倍，所以要尽量减少 softmax 等非矩阵乘运算，让时间花在 Tensor Core 上。FA2 的 kernel 用的就是本关的 `mma.sync` 和 `ldmatrix`（通过 CUTLASS/CuTe 封装）。22 关的 FA2 会直接用本关的 fragment 布局：`Q·Kᵀ` 的累加器 fragment 经过 softmax 后，原地变成 `P·V` 的 A 操作数。
+Section 3.1 of the FlashAttention-2 paper discusses exactly this: on A100, matmul throughput is 16 times that of non-matmul FP32 operations, so non-matmul operations such as the softmax should be minimized and the time should go to Tensor Cores. The FA2 kernel uses exactly this lab's `mma.sync` and `ldmatrix` (wrapped by CUTLASS/CuTe). The FA2 of lab 22 uses this lab's fragment layout directly: after the softmax, the accumulator fragment of `Q·Kᵀ` becomes the A operand of `P·V` in place.
 
-## 3. 数学
+## 3. Math
 
-### 3.1 分块
+### 3.1 Tiling
 
-`C[m][n] = Σ_k A[m][k] · B[n][k]`。把三个维度都切块：
-
-```
-C 的 tile (BM × BN)  =  Σ over K tiles  A 的 tile (BM × BK) · B 的 tile (BN × BK)ᵀ
-```
-
-Tensor Core 指令一次算一个固定形状的小块。本关用 **m16n8k16**：
+`C[m][n] = Σ_k A[m][k] · B[n][k]`. Tile all three dimensions:
 
 ```
-D[16×8] += A[16×16] · B[16×8]          （B 在这里按 k×n 理解）
+tile of C (BM × BN)  =  Σ over K tiles  tile of A (BM × BK) · tile of B (BN × BK)ᵀ
 ```
 
-一条指令做 16·8·16 = 2048 次乘加，即 4096 FLOP。一个 warp 的 32 个线程**一起**执行这条指令，每个线程只持有操作数的一小部分，叫做 **fragment**。
-
-### 3.2 K-major 的 B
-
-我们的 B 存为 `[N][K]`。`mma` 的 `.col` 表示 B 操作数“按列存放”：B 作为 k×n 矩阵，同一列（固定 n）的 k 个元素连续。`B[n][k]` 正是这样的布局。所以 **K-major 的 B 不需要转置**就是 `mma` 要的操作数，这和 attention 里的 K 矩阵一样。（`P·V` 中 V 是 `[N][D]`，作为 B 操作数时 n 维连续，需要转置，见 §4.4 的 `.trans`。）
-
-### 3.3 数据复用
-
-一个 CTA 计算 BM×BN 的 C tile，每个 K tile 从 global 读 `(BM + BN) · BK` 个元素，做 `2 · BM · BN · BK` 次浮点运算。BM = BN = 128、BK = 32 时：
+A Tensor Core instruction computes a small block of fixed shape at a time. This lab uses **m16n8k16**:
 
 ```
-读入 (128 + 128) · 32 · 2 B = 16 KB，   计算 2 · 128 · 128 · 32 = 1 MFLOP，   64 FLOP/B
+D[16×8] += A[16×16] · B[16×8]          (B here is viewed as k×n)
 ```
 
-4096³ 的 GEMM 一共 137 GFLOP，按 64 FLOP/B 需要从 L2 读约 2.1 GB。和 10 关一样，tile 越大复用越多。
+One instruction does 16·8·16 = 2048 multiply-adds, that is, 4096 FLOP. The 32 threads of a warp execute this instruction **together**, and each thread holds only a small part of the operands, called a **fragment**.
 
-## 4. 硬件与指令
+### 3.2 K-major B
 
-### 4.1 三代 Tensor Core 指令
+Our B is stored as `[N][K]`. The `.col` of `mma` means the B operand is "stored by column": viewing B as a k×n matrix, the k elements of one column (fixed n) are contiguous. `B[n][k]` has exactly this layout. So **K-major B needs no transpose** to be the operand `mma` wants, just like the K matrix in attention. (In `P·V`, V is `[N][D]`; as the B operand its n dimension is contiguous, so it needs a transpose; see `.trans` in §4.4.)
 
-| 指令 | 架构 | 谁发起 | 操作数从哪来 | 累加器在哪 |
+### 3.3 Data reuse
+
+A CTA computes a BM×BN tile of C. For each K tile it reads `(BM + BN) · BK` elements from global and does `2 · BM · BN · BK` floating-point operations. With BM = BN = 128 and BK = 32:
+
+```
+read (128 + 128) · 32 · 2 B = 16 KB,   compute 2 · 128 · 128 · 32 = 1 MFLOP,   64 FLOP/B
+```
+
+A 4096³ GEMM is 137 GFLOP in total, and at 64 FLOP/B it needs to read about 2.1 GB from L2. As in lab 10, larger tiles give more reuse.
+
+## 4. Hardware and instructions
+
+### 4.1 Three generations of Tensor Core instructions
+
+| instruction | architecture | issued by | operands from | accumulator in |
 |---|---|---|---|---|
-| `mma.sync` | Ampere 起（含 SM100） | 一个 warp | 寄存器 | 寄存器 |
-| `wgmma.mma_async` | 仅 Hopper（SM90） | 4 个 warp | shared memory / 寄存器 | 寄存器 |
-| `tcgen05.mma` | Blackwell（SM100） | 一个线程 | shared memory / TMEM | TMEM |
+| `mma.sync` | Ampere and later (including SM100) | one warp | registers | registers |
+| `wgmma.mma_async` | Hopper only (SM90) | 4 warps | shared memory / registers | registers |
+| `tcgen05.mma` | Blackwell (SM100) | one thread | shared memory / TMEM | TMEM |
 
-B200 仍然支持 `mma.sync`，但它是“旧路径”。在本机上用一个只发 `mma.sync` 的微基准测得：
+B200 still supports `mma.sync`, but it is the "old path". A microbenchmark on this machine that issues only `mma.sync` measures:
 
-| | BF16 吞吐 | 相对标称 2250 TFLOP/s |
+| | BF16 throughput | relative to nominal 2250 TFLOP/s |
 |---|---|---|
-| `mma.sync` 上限（微基准，无访存） | ≈ 560 TFLOP/s | ≈ 25% |
-| cuBLAS（`tcgen05`），4096³ | ≈ 1440 TFLOP/s | ≈ 64% |
-| cuBLAS（`tcgen05`），8192×8192×4096 | ≈ 1550 TFLOP/s | ≈ 69% |
+| `mma.sync` upper bound (microbenchmark, no memory access) | ≈ 560 TFLOP/s | ≈ 25% |
+| cuBLAS (`tcgen05`), 4096³ | ≈ 1440 TFLOP/s | ≈ 64% |
+| cuBLAS (`tcgen05`), 8192×8192×4096 | ≈ 1550 TFLOP/s | ≈ 69% |
 
-也就是说，**一个完美的 `mma.sync` kernel 也只能跑到 cuBLAS 的约 0.36–0.39 倍**。本关和 21 关的性能都应该对照这条“`mma.sync` roofline”来看。部分 3 学 `tcgen05` 就是为了跨过这条线。那为什么还要学 `mma.sync`？因为 fragment 布局、`ldmatrix`、swizzle、`cp.async` 流水这些概念是后面所有内容的基础，而且 `mma.sync` 的同步模型最简单：指令返回时结果就在寄存器里。
+In other words, **even a perfect `mma.sync` kernel can reach only about 0.36–0.39 times cuBLAS**. Read the performance of this lab and of lab 21 against this "`mma.sync` roofline". Part 3 teaches `tcgen05` precisely to get past this line. Then why learn `mma.sync` at all? Because fragment layouts, `ldmatrix`, swizzle and `cp.async` pipelines are the foundation of everything that follows, and `mma.sync` has the simplest synchronization model: when the instruction returns, the result is in registers.
 
-换算到每个 SM：560 TFLOP/s ÷ 148 SM ÷ 1.965 GHz ≈ 1920 FLOP/周期/SM。每个 SM 有 4 个 warp 调度器（SMSP），所以**每个 SMSP 大约每 8 个周期完成一条 m16n8k16**。
+Per SM: 560 TFLOP/s ÷ 148 SM ÷ 1.965 GHz ≈ 1920 FLOP/cycle/SM. Each SM has 4 warp schedulers (SMSPs), so **each SMSP completes roughly one m16n8k16 every 8 cycles**.
 
-### 4.2 `mma.sync` 的语法
+### 4.2 `mma.sync` syntax
 
 ```cpp
 asm volatile(
     "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
     "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
-    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])   // D = C，读写
-    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),        // A：4 个 32 位寄存器
-      "r"(b[0]), "r"(b[1]));                              // B：2 个 32 位寄存器
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])   // D = C, read-write
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),        // A: 4 32-bit registers
+      "r"(b[0]), "r"(b[1]));                              // B: 2 32-bit registers
 ```
 
-| 部分 | 含义 |
+| part | meaning |
 |---|---|
-| `.sync.aligned` | warp 内 32 个 lane 必须一起执行同一条指令（不能在分支里只让部分 lane 执行） |
-| `.m16n8k16` | 形状 |
-| `.row.col` | A 按行（k 连续），B 按列（k 连续）。BF16 只支持 `.row.col` |
-| `.f32.bf16.bf16.f32` | D、A、B、C 的类型 |
+| `.sync.aligned` | all 32 lanes of the warp must execute the same instruction together (it cannot run on only some lanes inside a branch) |
+| `.m16n8k16` | shape |
+| `.row.col` | A by row (k contiguous), B by column (k contiguous). BF16 supports only `.row.col` |
+| `.f32.bf16.bf16.f32` | types of D, A, B, C |
 
-每个 32 位寄存器装两个 BF16：**k（或列）较小的元素在低 16 位**。这正好是内存中两个相邻 BF16 的顺序，所以从内存读一个 `uint32_t` 就得到一个合法的操作数寄存器。
+Each 32-bit register holds two BF16 values: **the element with the smaller k (or column) is in the low 16 bits**. This is exactly the order of two adjacent BF16 values in memory, so reading one `uint32_t` from memory gives a valid operand register.
 
-### 4.3 fragment 布局
+### 4.3 Fragment layout
 
-记 `lane = threadIdx.x % 32`，`group = lane / 4`（0..7），`quad = lane % 4`（0..3）。
+Let `lane = threadIdx.x % 32`, `group = lane / 4` (0..7), `quad = lane % 4` (0..3).
 
-**A（16×16，行主序）**：每个 lane 4 个寄存器，寄存器 i 装 `A[row][col]` 和 `A[row][col+1]`：
+**A (16×16, row-major)**: 4 registers per lane; register i holds `A[row][col]` and `A[row][col+1]`:
 
-| 寄存器 | a0 | a1 | a2 | a3 |
+| register | a0 | a1 | a2 | a3 |
 |---|---|---|---|---|
 | row | group | group + 8 | group | group + 8 |
 | col | 2·quad | 2·quad | 2·quad + 8 | 2·quad + 8 |
 
 ```
-           col 0..7                col 8..15
-         ┌───────────────────┬───────────────────┐
-row 0..7 │ a0: lane 4r+q 拿   │ a2                │
-         │     (r, 2q..2q+1)  │                   │
-row 8..15│ a1                │ a3                │
-         └───────────────────┴───────────────────┘
+           col 0..7              col 8..15
+         ┌─────────────────────┬─────────────────────┐
+row 0..7 │ a0: lane 4r+q holds │ a2                  │
+         │     (r, 2q..2q+1)   │                     │
+row 8..15│ a1                  │ a3                  │
+         └─────────────────────┴─────────────────────┘
 ```
 
-**B（16×8，按 k×n 看）**：每个 lane 2 个寄存器，寄存器 i 装 `B[k][n]` 和 `B[k+1][n]`：`k = 2·quad + 8i`，`n = group`。换成我们的存储 `B[n][k]`：lane 读的是第 `group` 行、第 `2·quad + 8i` 列开始的两个元素。
+**B (16×8, viewed as k×n)**: 2 registers per lane; register i holds `B[k][n]` and `B[k+1][n]`: `k = 2·quad + 8i`, `n = group`. In our storage `B[n][k]`: the lane reads the two elements starting at row `group`, column `2·quad + 8i`.
 
-**C/D（16×8）**：每个 lane 4 个 float，第 i 个是 `D[row][col]`：
+**C/D (16×8)**: 4 floats per lane; the i-th is `D[row][col]`:
 
 | float | d0 | d1 | d2 | d3 |
 |---|---|---|---|---|
 | row | group | group | group + 8 | group + 8 |
 | col | 2·quad | 2·quad + 1 | 2·quad | 2·quad + 1 |
 
-**手算一个 lane**：lane 5，group = 1，quad = 1。
+**One lane by hand**: lane 5, group = 1, quad = 1.
 
-| 操作数 | lane 5 持有的元素 |
+| operand | elements held by lane 5 |
 |---|---|
-| a0, a1, a2, a3 | `A[1][2..3]`，`A[9][2..3]`，`A[1][10..11]`，`A[9][10..11]` |
-| b0, b1 | `B[n=1][k=2..3]`，`B[n=1][k=10..11]`（按 `[N][K]` 存储） |
-| d0..d3 | `D[1][2]`，`D[1][3]`，`D[9][2]`，`D[9][3]` |
+| a0, a1, a2, a3 | `A[1][2..3]`, `A[9][2..3]`, `A[1][10..11]`, `A[9][10..11]` |
+| b0, b1 | `B[n=1][k=2..3]`, `B[n=1][k=10..11]` (stored as `[N][K]`) |
+| d0..d3 | `D[1][2]`, `D[1][3]`, `D[9][2]`, `D[9][3]` |
 
-注意 A 和 C 的“行 = group、group+8”是同一个规律：一个 lane 在 A 中负责的行就是它在 C 中负责的行。22 关会利用这一点让 softmax 在寄存器里按行进行。
+The "rows = group, group+8" of A and of C follow the same rule: the rows a lane is responsible for in A are the rows it is responsible for in C. Lab 22 uses this to run the softmax row by row in registers.
 
-`one_atom` case（16×8×16，小整数输入）只有一条 mma。任何一个坐标写错，结果都不会精确相等，报告会给出第一个错的 `[m, n]`。
+The `one_atom` case (16×8×16, small integer inputs) has only one mma. If any coordinate is wrong, the result is not exactly equal, and the report gives the first wrong `[m, n]`.
 
 ### 4.4 `ldmatrix`
 
-step 1 里每个 lane 自己从 global 读 fragment：一个 lane 的 4 个 A 寄存器来自 4 个不同位置，每次只读 4 字节，访存非常零碎。`ldmatrix` 让 warp 一起从 shared memory 装 fragment：
+In step 1 each lane reads its fragment from global on its own: the 4 A registers of a lane come from 4 different locations, each read is only 4 bytes, and the accesses are very fragmented. `ldmatrix` lets the warp load fragments from shared memory together:
 
 ```
 ldmatrix.sync.aligned.m8n8.x4.shared.b16 {r0,r1,r2,r3}, [addr];
 ```
 
-- 装 1/2/4 个（`.x1/.x2/.x4`）8×8 的 16 位矩阵。每个矩阵的一**行**是 16 个连续字节，各行地址可以任意（16 字节对齐）。
-- **lane 8i .. 8i+7 提供第 i 个矩阵第 0..7 行的地址**。`.x1` 只用 lane 0–7 的地址，`.x2` 用 lane 0–15。
-- 结果：lane l 的 `r[i]` 装第 i 个矩阵的第 `l/4` 行、第 `2(l%4)` 和 `2(l%4)+1` 个元素。
+- It loads 1/2/4 (`.x1/.x2/.x4`) 8×8 matrices of 16-bit elements. One **row** of each matrix is 16 contiguous bytes, and each row address can be arbitrary (16-byte aligned).
+- **Lanes 8i .. 8i+7 supply the addresses of rows 0..7 of matrix i**. `.x1` uses only the addresses of lanes 0–7, `.x2` uses lanes 0–15.
+- Result: `r[i]` of lane l holds elements `2(l%4)` and `2(l%4)+1` of row `l/4` of matrix i.
 
-把这个结果和 §4.3 比较：一个 8×8 矩阵经 `ldmatrix` 后的分布，正好是 A 的一个寄存器（例如 a0 = 左上 8×8）或 B 的一个寄存器的分布。所以 16×16 的 A 用一条 `.x4` 就能装满 a0..a3，只要让 4 个矩阵依次是左上、左下、右上、右下。
+Compare this result with §4.3: the distribution of an 8×8 matrix after `ldmatrix` is exactly the distribution of one A register (for example a0 = the top-left 8×8) or one B register. So one `.x4` fills a0..a3 of a 16×16 A, as long as the 4 matrices are top-left, bottom-left, top-right, bottom-right in that order.
 
-**`.trans`**：装载时把每个 8×8 矩阵转置，lane l 的 `r[i]` 装的是第 `2(l%4)`、`2(l%4)+1` 行的第 `l/4` 列。当 B 操作数在 shared memory 中是 n 连续（例如 attention 的 V：`[N_kv][D]`，作为 `P·V` 的 B 时 D 是 n 维）时，用 `.trans` 就能得到 `.col` 布局的 fragment。本关的 B 是 K-major，不需要 `.trans`；22 关会用到。
+**`.trans`**: transposes each 8×8 matrix during the load; `r[i]` of lane l holds column `l/4` of rows `2(l%4)`, `2(l%4)+1`. When the B operand is n-contiguous in shared memory (for example V in attention: `[N_kv][D]`, where D is the n dimension when V is the B of `P·V`), `.trans` gives a fragment in `.col` layout. The B of this lab is K-major and needs no `.trans`; lab 22 uses it.
 
-**常见误用**：
+**Common misuses**:
 
-| 误用 | 后果 |
+| misuse | consequence |
 |---|---|
-| 只在部分 lane 上执行（放在 `if (lane < 16)` 里） | 未定义行为，可能挂起 |
-| 传 generic 指针当地址 | 地址错，读到别处；要用 `__cvta_generic_to_shared` 转成 32 位 shared 地址 |
-| 行地址不是 16 字节对齐 | 未定义行为 |
-| `.x4` 时 lane 16–31 的地址没有设好 | 第 2、3 个矩阵读错 |
+| executing on only some lanes (inside `if (lane < 16)`) | undefined behavior, may hang |
+| passing a generic pointer as the address | wrong address, reads from elsewhere; convert to a 32-bit shared address with `__cvta_generic_to_shared` |
+| row address not 16-byte aligned | undefined behavior |
+| addresses of lanes 16–31 not set for `.x4` | matrices 2 and 3 are read wrong |
 
-### 4.5 bank conflict 与 XOR swizzle
+### 4.5 Bank conflicts and XOR swizzle
 
-（bank 的定义见 [00 关 §4.3](../00_transpose/README.md#43-shared-memory-与-bank-conflict)。）shared memory 每 128 字节覆盖 32 个 bank 各一次。把 128 字节分成 8 个 16 字节的“槽”（每槽 4 个 bank）。`ldmatrix` 的一个 8×8 矩阵读 8 行 × 16 字节 = 128 字节：**8 行落在 8 个不同的槽**时一次完成（1 个 wavefront），否则要分多次。
+(For the definition of banks, see [lab 00 §4.3](../00_transpose/README.md#43-shared-memory-and-bank-conflicts).) Every 128 bytes of shared memory cover each of the 32 banks once. Divide the 128 bytes into 8 "slots" of 16 bytes (4 banks per slot). One 8×8 matrix of `ldmatrix` reads 8 rows × 16 bytes = 128 bytes: when **the 8 rows fall into 8 different slots**, it completes in one pass (1 wavefront); otherwise it takes several.
 
-step 2 的 shared tile 是 `[128][32]` 的 BF16，每行 64 字节 = 4 个 16 字节 chunk。第 r 行第 c 个 chunk 的字节地址是 `64r + 16c`，所在的槽是 `(4r + c) % 8`。`ldmatrix` 读同一列 chunk（固定 c）的 8 行：
+The shared tile of step 2 is a `[128][32]` BF16 array; each row is 64 bytes = 4 chunks of 16 bytes. The byte address of chunk c of row r is `64r + 16c`, and its slot is `(4r + c) % 8`. `ldmatrix` reads 8 rows of the same chunk column (fixed c):
 
-| 行 r | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| row r | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|---|
-| 槽（c = 0，不 swizzle） | 0 | 4 | 0 | 4 | 0 | 4 | 0 | 4 |
+| slot (c = 0, no swizzle) | 0 | 4 | 0 | 4 | 0 | 4 | 0 | 4 |
 
-8 行只用了 2 个槽，每个槽被 4 行争用：**4 路 bank conflict**，一个矩阵要 4 个 wavefront。
+The 8 rows use only 2 slots, each contended by 4 rows: a **4-way bank conflict**, so one matrix takes 4 wavefronts.
 
-XOR swizzle：不移动 chunk 内的数据，只把第 r 行的逻辑 chunk c 存到物理 chunk `c ^ f(r)`。选 `f(r) = (r >> 1) & 3`：
+XOR swizzle: data inside a chunk does not move; logical chunk c of row r is stored in physical chunk `c ^ f(r)`. Choose `f(r) = (r >> 1) & 3`:
 
-| 行 r | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| row r | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|---|
 | `(r>>1)&3` | 0 | 0 | 1 | 1 | 2 | 2 | 3 | 3 |
-| 物理 chunk（c = 0） | 0 | 0 | 1 | 1 | 2 | 2 | 3 | 3 |
-| 槽 = `4(r&1) + 物理 chunk` | 0 | 4 | 1 | 5 | 2 | 6 | 3 | 7 |
+| physical chunk (c = 0) | 0 | 0 | 1 | 1 | 2 | 2 | 3 | 3 |
+| slot = `4(r&1) + physical chunk` | 0 | 4 | 1 | 5 | 2 | 6 | 3 | 7 |
 
-8 行落在 8 个不同的槽。对任意 c 都成立，因为 XOR 一个固定值是 0..3 上的置换。写入时（每个线程存一个 16 字节 chunk）同样无冲突。
+The 8 rows fall into 8 different slots. This holds for any c, because XOR with a fixed value is a permutation of 0..3. Writes (each thread stores one 16-byte chunk) are also conflict-free.
 
-和 00 关的 padding 相比，swizzle 不浪费 shared memory，而且保持每行 16 字节对齐，这是 `ldmatrix`（以及后面的 `cp.async`、TMA）的要求。CUTLASS 把这类布局写作 `Swizzle<B, M, S>`；30 关的 TMA 也有硬件 swizzle 模式（128B swizzle 对应 8 个 chunk 的 `c ^ (r & 7)`），原理相同。
+Compared with the padding of lab 00, swizzle wastes no shared memory and keeps every row 16-byte aligned, which `ldmatrix` (and later `cp.async` and TMA) requires. CUTLASS writes this kind of layout as `Swizzle<B, M, S>`; the TMA of lab 30 also has hardware swizzle modes (128B swizzle corresponds to `c ^ (r & 7)` over 8 chunks), on the same principle.
 
-## 5. 调度设计
+## 5. Schedule design
 
-### 5.1 step 1：一个 warp 一个 16×8
+### 5.1 Step 1: one 16×8 per warp
 
 ```
-block = 4 warps（128 线程），沿 M 叠放
+block = 4 warps (128 threads), stacked along M
 grid  = (N/8, ceil(M/16 / 4))
-warp w 负责 C[m0 .. m0+15][n0 .. n0+7]，m0 = (blockIdx.y·4 + w)·16，n0 = blockIdx.x·8
-for k0 in 0, 16, ...:   从 global 读 af[4]、bfr[2]；mma
-写回 d[4]
+warp w owns C[m0 .. m0+15][n0 .. n0+7], m0 = (blockIdx.y·4 + w)·16, n0 = blockIdx.x·8
+for k0 in 0, 16, ...:   read af[4], bfr[2] from global; mma
+write back d[4]
 ```
 
-每条 mma 需要 6 次 4 字节的 global 读，几乎没有复用：这一步只用来验证 fragment 坐标。它要求 M、N、K 是 16、8、16 的倍数（`make_plan` 会检查），所以 step 1 只运行 `one_atom`、`atoms`、`long_k`、`aligned` 四个 case。
+Each mma needs 6 global reads of 4 bytes, with almost no reuse: this step only verifies the fragment coordinates. It requires M, N, K to be multiples of 16, 8, 16 (`make_plan` checks this), so step 1 runs only the four cases `one_atom`, `atoms`, `long_k`, `aligned`.
 
-### 5.2 step 2、3：128×128 CTA tile
+### 5.2 Steps 2 and 3: 128×128 CTA tile
 
 ```
-CTA tile 128×128，BK = 32，8 个 warp 排成 2×4，每个 warp 64×32
-           ┌──────┬──────┬──────┬──────┐
- rows 0-63 │ w0   │ w1   │ w2   │ w3   │   每个 warp：4 (M) × 4 (N) 个 m16n8 块
-rows 64-127│ w4   │ w5   │ w6   │ w7   │   累加器 4·4·4 = 64 个 float / lane
-           └──────┴──────┴──────┴──────┘
-             32 列  32 列  32 列  32 列
+CTA tile 128×128, BK = 32, 8 warps arranged 2×4, each warp 64×32
+           ┌────────┬────────┬────────┬────────┐
+ rows 0-63 │ w0     │ w1     │ w2     │ w3     │   per warp: 4 (M) × 4 (N) m16n8 blocks
+rows 64-127│ w4     │ w5     │ w6     │ w7     │   accumulators 4·4·4 = 64 floats / lane
+           └────────┴────────┴────────┴────────┘
+            32 cols  32 cols  32 cols  32 cols
 for k0 in 0, 32, ...:
-    load_tile：global → 寄存器 → shared（A、B 各 128×32，每线程 2 个 16 字节 chunk）
+    load_tile: global → registers → shared (A, B each 128×32, 2 chunks of 16 bytes per thread)
     __syncthreads()
     for kk in 0, 16:
-        A：4 条 ldmatrix.x4（每个 m16 一条）
-        B：2 条 ldmatrix.x4（每条覆盖两个 n8）
-        16 条 mma
+        A: 4 ldmatrix.x4 (one per m16)
+        B: 2 ldmatrix.x4 (each covers two n8)
+        16 mma
     __syncthreads()
-写回：每个 lane 64 个 float，按 frag_c_coord 定位
+write back: 64 floats per lane, located with frag_c_coord
 ```
 
-| 资源 | 用量 |
+| resource | usage |
 |---|---|
-| shared memory | A、B 各 128×32×2 B = 8 KB，共 16 KB |
-| 寄存器（每 lane） | 累加器 64 + A fragment 16 + B fragment 8 + 地址；答案约 125 个 |
-| 每个 k16：ldmatrix / mma | 6 / 16 |
+| shared memory | A, B each 128×32×2 B = 8 KB, 16 KB total |
+| registers (per lane) | accumulators 64 + A fragment 16 + B fragment 8 + addresses; the solution uses about 125 |
+| per k16: ldmatrix / mma | 6 / 16 |
 
-**A 的 ldmatrix 地址**：第 i 个 m16 块是 tile 中的行 `wm + 16i ..`、列 `kk ..`。要让 r0..r3 依次是左上、左下、右上、右下 8×8（即 a0..a3），lane l 应指向：
+**ldmatrix addresses for A**: the i-th m16 block covers tile rows `wm + 16i ..` and columns `kk ..`. For r0..r3 to be the top-left, bottom-left, top-right, bottom-right 8×8 in that order (that is, a0..a3), lane l should point to:
 
 | lane | 0–7 | 8–15 | 16–23 | 24–31 |
 |---|---|---|---|---|
-| 矩阵 | 左上（a0） | 左下（a1） | 右上（a2） | 右下（a3） |
-| 行 | `l` | `l` | `l - 16` | `l - 16` |
-| 列 | `kk` | `kk` | `kk + 8` | `kk + 8` |
+| matrix | top-left (a0) | bottom-left (a1) | top-right (a2) | bottom-right (a3) |
+| row | `l` | `l` | `l - 16` | `l - 16` |
+| col | `kk` | `kk` | `kk + 8` | `kk + 8` |
 
-（行都相对 `wm + 16i`。）用一个式子写出来就是 TODO(2b) 的第 1 步。
+(All rows are relative to `wm + 16i`.) Writing this as one expression is item 1 of TODO(2b).
 
-**B 的 ldmatrix 地址**：B tile 在 shared memory 中是 `[n][k]`。一个 n8 块的 b0 是 `n = 0..7, k = 0..7` 的 8×8，b1 是 `n = 0..7, k = 8..15`。一条 `.x4` 装两个 n8 块 j、j+1，让 4 个矩阵依次是 `(n 0–7, k 0–7)`、`(n 0–7, k 8–15)`、`(n 8–15, k 0–7)`、`(n 8–15, k 8–15)`，就得到 `bfr[j][0], bfr[j][1], bfr[j+1][0], bfr[j+1][1]`。每个 lane 的行（n）和列（k）请自己推出来。
+**ldmatrix addresses for B**: the B tile in shared memory is `[n][k]`. b0 of an n8 block is the 8×8 with `n = 0..7, k = 0..7`, and b1 is `n = 0..7, k = 8..15`. One `.x4` loads two n8 blocks j, j+1: with the 4 matrices in the order `(n 0–7, k 0–7)`, `(n 0–7, k 8–15)`, `(n 8–15, k 0–7)`, `(n 8–15, k 8–15)`, you get `bfr[j][0], bfr[j][1], bfr[j+1][0], bfr[j+1][1]`. Work out the row (n) and column (k) for each lane yourself.
 
-所有 shared memory 地址都经过 `tile_offset<kSwizzle>(row, col)`：step 2 是普通行主序，step 3 会调用你写的 swizzle。`load_tile` 写入和 `ldmatrix` 读取用的是同一个函数，所以只要 swizzle 是每行内的置换，结果就一定正确，只是快慢不同。
+Every shared memory address goes through `tile_offset<kSwizzle>(row, col)`: in step 2 it is plain row-major, and in step 3 it calls the swizzle you write. The `load_tile` writes and the `ldmatrix` reads use the same function, so as long as the swizzle is a permutation within each row, the result is always correct; only the speed differs.
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-所有命令在仓库根目录运行。
+Run all commands from the repository root.
 
-### 步骤 1 · TODO(1)：fragment 坐标与 mma
+### Step 1 · TODO(1): fragment coordinates and mma
 
-- TODO(1a)：`mma_m16n8k16_bf16` 的内联汇编（§4.2）；
-- TODO(1b)：`frag_a_coord`、`frag_b_coord`、`frag_c_coord`（§4.3 的表格，每个一行）；
-- TODO(1c)：`mma_naive` 的 K 循环和写回（§5.1）。
+- TODO(1a): the inline assembly of `mma_m16n8k16_bf16` (§4.2);
+- TODO(1b): `frag_a_coord`, `frag_b_coord`, `frag_c_coord` (the tables in §4.3, one line each);
+- TODO(1c): the K loop and write-back of `mma_naive` (§5.1).
 
 ```bash
 ./lab check 20 --step 1
 ./lab bench 20 --step 1
 ```
 
-### 步骤 2 · TODO(2)：shared memory 与 ldmatrix
+### Step 2 · TODO(2): shared memory and ldmatrix
 
-- TODO(2a)：`ldmatrix_x4` 的内联汇编（§4.4）；
-- TODO(2b)：每个 k16 片的 ldmatrix 和 mma（§5.2 的两张地址表）；
-- TODO(2c)：写回，跳过越界元素。
+- TODO(2a): the inline assembly of `ldmatrix_x4` (§4.4);
+- TODO(2b): the ldmatrix and mma for each k16 slice (the two address tables in §5.2);
+- TODO(2c): write-back, skipping out-of-bounds elements.
 
 ```bash
 ./lab check 20 --step 2
@@ -272,11 +272,11 @@ for k0 in 0, 32, ...:
 ./lab profile 20 --step 2
 ```
 
-在 profile 输出里看 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`（`ldmatrix` 计入 shared load）和 `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum`。按 §4.5 的分析，wavefront 数应该是“理想值”的 4 倍。理想值可以手算：4096³ 时一共 1024 个 CTA × 128 个 K tile × 8 个 warp × 2 个 k16 × 6 条 `ldmatrix.x4` × 4 个 wavefront。
+In the profile output, look at `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` (`ldmatrix` counts as a shared load) and `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum`. By the analysis in §4.5, the wavefront count should be 4 times the "ideal value". You can compute the ideal value by hand: for 4096³, 1024 CTAs × 128 K tiles × 8 warps × 2 k16 × 6 `ldmatrix.x4` × 4 wavefronts in total.
 
-### 步骤 3 · TODO(3)：XOR swizzle
+### Step 3 · TODO(3): XOR swizzle
 
-实现 `swizzle_chunk4(row, chunk)`（§4.5）。只改这一个函数。
+Implement `swizzle_chunk4(row, chunk)` (§4.5). Change only this one function.
 
 ```bash
 ./lab check 20
@@ -284,67 +284,67 @@ for k0 in 0, 32, ...:
 ./lab profile 20 --step 3
 ```
 
-bank conflict 应该降到接近 0，wavefront 数降为 step 2 的 1/4。
+Bank conflicts should drop to nearly 0, and the wavefront count to 1/4 of step 2.
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| symptom | likely cause |
 |---|---|
-| `one_atom` 失败，错误集中在右半（列 4–7）或下半（行 8–15） | fragment 坐标里 group/quad 用反了，或 +8 加在了错误的寄存器上 |
-| `one_atom` 失败，结果像是 A·B 而不是 A·Bᵀ | B 的地址按 `[K][N]` 算了；我们的 B 是 `[N][K]` |
-| 结果每两列互换 | 寄存器里两个 BF16 的高低位顺序弄反（例如手工拼 `uint32_t` 时） |
-| step 2 `aligned` 失败但 `one_atom` 通过 | ldmatrix 的 lane 地址错：检查 lane 16–31 是否指向 `kk + 8` |
-| step 2 `tail`、`tiny` 失败 | 写回没判断越界，或 `load_tile` 的补零被改坏 |
-| `illegal instruction` 或挂起 | `mma`/`ldmatrix` 放在了只有部分 lane 执行的分支里 |
-| step 3 结果错 | swizzle 不是置换（两个逻辑 chunk 映射到同一个物理 chunk） |
-| step 3 没变快 | profile 看 bank conflict 是否下降；swizzle 是否只依赖 row 的第 1–2 位 |
+| `one_atom` fails, with errors concentrated in the right half (columns 4–7) or the bottom half (rows 8–15) | group/quad swapped in the fragment coordinates, or +8 added to the wrong register |
+| `one_atom` fails, and the result looks like A·B instead of A·Bᵀ | B addresses computed as `[K][N]`; our B is `[N][K]` |
+| every two columns are swapped | the high/low order of the two BF16 values in a register is reversed (for example when assembling a `uint32_t` by hand) |
+| step 2 `aligned` fails but `one_atom` passes | wrong ldmatrix lane addresses: check that lanes 16–31 point to `kk + 8` |
+| step 2 `tail`, `tiny` fail | the write-back does not check bounds, or the zero fill in `load_tile` was broken |
+| `illegal instruction` or hang | `mma`/`ldmatrix` placed in a branch executed by only some lanes |
+| step 3 result wrong | the swizzle is not a permutation (two logical chunks map to the same physical chunk) |
+| step 3 not faster | check in the profile whether bank conflicts dropped; check that the swizzle depends only on bits 1–2 of row |
 
-## 7. 性能
+## 7. Performance
 
-本机实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS BF16→FP32 的耗时除以本版本耗时；“占 mma.sync 上限”是 TFLOP/s 除以 §4.1 的 560 TFLOP/s）：
+Measured on this machine (CUDA Graph timing; `vs cublas` is the time of cuBLAS BF16→FP32 divided by the time of this version; "% of mma.sync limit" is TFLOP/s divided by the 560 TFLOP/s of §4.1):
 
-| 版本 | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | 占 mma.sync 上限 |
+| version | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | % of mma.sync limit |
 |---|---|---|---|
-| 步骤 1 | ≈ 0.02× | ≈ 0.01× | ≈ 4% |
-| 步骤 2 | ≈ 0.09× | ≈ 0.09× | ≈ 24% |
-| 步骤 3 | ≈ 0.17× | ≈ 0.17× | ≈ 43–46% |
-| mma.sync 上限 | ≈ 0.39× | ≈ 0.36× | 100% |
+| step 1 | ≈ 0.02× | ≈ 0.01× | ≈ 4% |
+| step 2 | ≈ 0.09× | ≈ 0.09× | ≈ 24% |
+| step 3 | ≈ 0.17× | ≈ 0.17× | ≈ 43–46% |
+| mma.sync limit | ≈ 0.39× | ≈ 0.36× | 100% |
 
-步骤 3 达到 cuBLAS 的 0.12 倍以上（即 mma.sync 上限的约 30%）就说明机制成立。
+Step 3 reaching 0.12 times cuBLAS or better (about 30% of the mma.sync limit) shows the mechanism works.
 
-profile 指标（步骤 2 → 步骤 3，`square`）：
+Profile metrics (step 2 → step 3, `square`):
 
-| 指标 | 步骤 2 | 步骤 3 |
+| metric | step 2 | step 3 |
 |---|---|---|
-| `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` | ≈ 2.0 亿 | ≈ 0.50 亿（= 理想值） |
-| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | ≈ 1.5 亿 | ≈ 1 万 |
+| `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` | ≈ 200 million | ≈ 50 million (= ideal value) |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | ≈ 150 million | ≈ 10 thousand |
 
-步骤 3 仍只有上限的一半左右。原因是 K 循环是同步的：所有 warp 先等 global 读完，再一起算，算的时候没人读 global。`sm__pipe_tensor_cycles_active` 指标能直接看到 Tensor Core 有多少时间在空等。21 关用 `cp.async` 让搬运和计算重叠。
+Step 3 still reaches only about half of the limit. The reason is that the K loop is synchronous: all warps first wait for the global reads to finish, then compute together, and nobody reads global while they compute. The `sm__pipe_tensor_cycles_active` metric shows directly how much of the time the Tensor Cores sit idle. Lab 21 uses `cp.async` to overlap data movement with computation.
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. lane 13 在 m16n8k16 中持有 A 的哪 8 个元素？持有 D 的哪 4 个元素？
-2. 为什么 K-major 的 B（`[N][K]`）用 `ldmatrix` 时不需要 `.trans`，而 attention 中 `P·V` 的 V（`[N_kv][D]`）需要？
-3. 如果 shared tile 每行是 128 字节（BK = 64），不 swizzle 时 `ldmatrix` 是几路冲突？应该用什么 swizzle？
-4. step 2 的 wavefront 恰好是理想值的 4 倍。B 的 `ldmatrix` 也是 4 路冲突吗？为什么？
-5. 只把 `load_tile` 写入的位置做 swizzle、`ldmatrix` 读取时忘了 swizzle，会发生什么？`one_atom` 能发现吗？
+1. Which 8 elements of A does lane 13 hold in m16n8k16? Which 4 elements of D?
+2. Why does K-major B (`[N][K]`) need no `.trans` with `ldmatrix`, while V (`[N_kv][D]`) in `P·V` of attention does?
+3. If each row of the shared tile were 128 bytes (BK = 64), how many ways would the `ldmatrix` conflict be without swizzle? Which swizzle should be used?
+4. The wavefronts of step 2 are exactly 4 times the ideal value. Is the `ldmatrix` of B also a 4-way conflict? Why?
+5. If you swizzle only the positions that `load_tile` writes and forget to swizzle the `ldmatrix` reads, what happens? Can `one_atom` detect it?
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. group = 3，quad = 1。A：`A[3][2..3]`、`A[11][2..3]`、`A[3][10..11]`、`A[11][10..11]`。D：`D[3][2]`、`D[3][3]`、`D[11][2]`、`D[11][3]`。
-2. `.col` 要求同一个 n 的 k 个元素连续。`B[N][K]` 中固定 n、k 连续，满足；V 作为 B 时 k 是 `N_kv`、n 是 D，`V[N_kv][D]` 中连续的是 D（n），所以要在装载时转置。
-3. 第 r 行第 c 个 chunk 在槽 `(8r + c) % 8 = c`，8 行全在同一个槽：8 路冲突。用 `c ^ (r & 7)`：8 行的物理 chunk 两两不同。这就是 `lab::swizzle_chunk<8>`，21 关 BK = 64 时用到。
-4. 是。B tile 也是 `[128][32]` 的 64 字节行，B 的每个 8×8 矩阵同样读同一 chunk 列的 8 个连续行，分析和 A 一样。
-5. 读到的 chunk 和写入的不对应，结果错误。`one_atom` 只有 16 行 × 16 列，K = 16 时只用了 chunk 0、1，而第 0、1 行的 XOR 值是 0，前两行不受影响，但第 2 行起就会错，所以 `one_atom` 能发现；用 `atoms` 和 `aligned` 更容易看出规律。
+1. group = 3, quad = 1. A: `A[3][2..3]`, `A[11][2..3]`, `A[3][10..11]`, `A[11][10..11]`. D: `D[3][2]`, `D[3][3]`, `D[11][2]`, `D[11][3]`.
+2. `.col` requires the k elements of one n to be contiguous. In `B[N][K]`, k is contiguous for fixed n, which satisfies it; when V is the B, k is `N_kv` and n is D, and in `V[N_kv][D]` the contiguous dimension is D (n), so it must be transposed during the load.
+3. Chunk c of row r is in slot `(8r + c) % 8 = c`, so all 8 rows are in the same slot: an 8-way conflict. Use `c ^ (r & 7)`: the physical chunks of the 8 rows are pairwise distinct. This is `lab::swizzle_chunk<8>`, used in lab 21 with BK = 64.
+4. Yes. The B tile is also `[128][32]` with 64-byte rows, and each 8×8 matrix of B likewise reads 8 consecutive rows of the same chunk column; the analysis is the same as for A.
+5. The chunks read do not match the chunks written, and the result is wrong. `one_atom` has only 16 rows × 16 columns, and with K = 16 it uses only chunks 0 and 1. The XOR value of rows 0 and 1 is 0, so the first two rows are unaffected, but from row 2 on the result is wrong, so `one_atom` does detect it; `atoms` and `aligned` make the pattern easier to see.
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- PTX ISA：[Warp Level Matrix Multiply-Accumulate Instructions: mma](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma)，其中 *Matrix Fragments for mma.m16n8k16 with floating point type* 一节有本关 §4.3 的原图；[ldmatrix](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix)
-- CUDA C++ Programming Guide：[Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory)（bank 与 wavefront）
-- Tri Dao，*FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning*，第 3.1 节（为什么要减少非矩阵乘运算）
-- 上游源码（`third_party/` 中固定版本）：
-  - `third_party/cutlass/include/cute/arch/mma_sm80.hpp`：`SM80_16x8x16_F32BF16BF16F32_TN`，即本关的 mma；
-  - `third_party/cutlass/include/cute/arch/copy_sm75.hpp`：`SM75_U32x4_LDSM_N`（`ldmatrix.x4`）与 `SM75_U16x8_LDSM_T`（`.trans`）；
-  - `third_party/flash-attention/csrc/flash_attn/src/kernel_traits.h`：FA2 的 shared memory 布局 `Swizzle<kSwizzle, 3, 3>`。
+- PTX ISA: [Warp Level Matrix Multiply-Accumulate Instructions: mma](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma); its section *Matrix Fragments for mma.m16n8k16 with floating point type* has the original figures for §4.3 of this lab; [ldmatrix](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix)
+- CUDA C++ Programming Guide: [Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory) (banks and wavefronts)
+- Tri Dao, *FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning*, Section 3.1 (why to reduce non-matmul operations)
+- Upstream source (pinned versions in `third_party/`):
+  - `third_party/cutlass/include/cute/arch/mma_sm80.hpp`: `SM80_16x8x16_F32BF16BF16F32_TN`, the mma of this lab;
+  - `third_party/cutlass/include/cute/arch/copy_sm75.hpp`: `SM75_U32x4_LDSM_N` (`ldmatrix.x4`) and `SM75_U16x8_LDSM_T` (`.trans`);
+  - `third_party/flash-attention/csrc/flash_attn/src/kernel_traits.h`: the FA2 shared memory layout `Swizzle<kSwizzle, 3, 3>`.

@@ -1,6 +1,6 @@
 {
   "id": "41_fa4_softmax",
-  "title": "softmax 吞吐：多项式 exp2、MUFU/FMA 混合、条件 rescale",
+  "title": "Softmax throughput: polynomial exp2, MUFU/FMA mix, conditional rescale",
   "part": 4,
   "kind": "attention",
   "prerequisites": [
@@ -10,17 +10,17 @@
   "steps": [
     {
       "step": 1,
-      "title": "软件 exp2：范围约简 + 3 次多项式，全部指数改用 FMA 流水线",
+      "title": "Software exp2: range reduction + degree-3 polynomial; all exponentials move to the FMA pipeline",
       "cases": "all"
     },
     {
       "step": 2,
-      "title": "MUFU 与多项式按固定比例混合，两条流水线同时工作",
+      "title": "Mix MUFU and polynomial at a fixed ratio so both pipelines work at the same time",
       "cases": "all"
     },
     {
       "step": 3,
-      "title": "条件 rescale：最大值增长超过 τ = 8 才移动基准、修正 O",
+      "title": "Conditional rescale: move the reference and correct O only when the max grows by more than τ = 8",
       "cases": "all"
     }
   ],
@@ -34,7 +34,7 @@
         64
       ],
       "dtype": "bf16",
-      "purpose": "N=1：一个 CTA、两个 Q tile，tile 1 的 128 行全部越界（TMA 填零、store 跳过）；O = V，LSE = scale·q·k。"
+      "purpose": "N=1: one CTA with two Q tiles; all 128 rows of tile 1 are out of bounds (TMA fills zeros, the store skips them); O = V, LSE = scale·q·k."
     },
     {
       "name": "one_block",
@@ -45,7 +45,7 @@
         64
       ],
       "dtype": "fp16",
-      "purpose": "N=128：只有 tile 0 有效，B>1、H>1：4-D tensor map 的坐标与 grid 映射。"
+      "purpose": "N=128: only tile 0 is valid; B>1, H>1: 4-D tensor map coordinates and grid mapping."
     },
     {
       "name": "two_tiles",
@@ -57,7 +57,7 @@
       ],
       "dtype": "bf16",
       "pattern": "position",
-      "purpose": "N=256 恰好一对 tile、两个 K/V 块，D=128：tile 1 的 Q 坐标（q0+128）、S¹/O¹ 的 TMEM 列、P¹ 的位置。"
+      "purpose": "N=256 is exactly one tile pair with two K/V blocks, D=128: the Q coordinate of tile 1 (q0+128), the TMEM columns of S¹/O¹, and the position of P¹."
     },
     {
       "name": "tile1_tail",
@@ -68,7 +68,7 @@
         128
       ],
       "dtype": "fp16",
-      "purpose": "N=200：tile 1 只有 72 行有效，第二个 K/V 块只有 72 个有效 key。"
+      "purpose": "N=200: tile 1 has only 72 valid rows, and the second K/V block has only 72 valid keys."
     },
     {
       "name": "tile1_position",
@@ -80,7 +80,7 @@
       ],
       "dtype": "bf16",
       "pattern": "position",
-      "purpose": "非 causal、D=128、N=190：tile 1 只有 62 行；V[j]=j/N 会暴露 P¹ 的打包顺序（相邻两个 key 交换）与 P¹ 的 TMEM 列。"
+      "purpose": "Non-causal, D=128, N=190: tile 1 has only 62 rows; V[j]=j/N exposes the packing order of P¹ (two adjacent keys swapped) and the TMEM columns of P¹."
     },
     {
       "name": "short_tail",
@@ -92,7 +92,7 @@
       ],
       "dtype": "fp16",
       "pattern": "position",
-      "purpose": "N=37、D=128：一行跨两个 64 列 panel；91 个填充 key 必须被 mask。"
+      "purpose": "N=37, D=128: a row spans two 64-column panels; the 91 padding keys must be masked."
     },
     {
       "name": "scale",
@@ -105,7 +105,7 @@
       "dtype": "bf16",
       "pattern": "large_logits",
       "scale": 1.0,
-      "purpose": "scale=1、logit 上百：scale 必须来自 p.scale；不减最大值会溢出。"
+      "purpose": "scale=1, logits in the hundreds: scale must come from p.scale; without subtracting the max the result overflows."
     },
     {
       "name": "uniform",
@@ -117,7 +117,7 @@
       ],
       "dtype": "bf16",
       "pattern": "uniform",
-      "purpose": "Q=0：O 是 V 的均值，LSE = ln N。漏乘/重复乘 α、ℓ 的修正错误都会暴露。"
+      "purpose": "Q=0: O is the mean of V, LSE = ln N. A missing or repeated multiply by α, or a wrong correction of ℓ, shows up here."
     },
     {
       "name": "ones_v",
@@ -129,7 +129,7 @@
       ],
       "dtype": "fp16",
       "pattern": "ones_v",
-      "purpose": "V=1、5 个块、3 个 CTA 行（tile 对）：O 的修正与 ℓ 的修正用的 α 必须相同，O 才等于 1；填充 key 的 P 必须为 0。"
+      "purpose": "V=1, 5 blocks, 3 CTA rows (tile pairs): the correction of O and the correction of ℓ must use the same α for O to equal 1; P of padding keys must be 0."
     },
     {
       "name": "position",
@@ -141,7 +141,7 @@
       ],
       "dtype": "bf16",
       "pattern": "position",
-      "purpose": "V[j]=j/N、5 个块：K/V 环形 buffer 的 item 下标（K 偶数、V 奇数）或 parity 错会读到别的块。"
+      "purpose": "V[j]=j/N, 5 blocks: a wrong item index in the K/V ring buffer (K even, V odd) or a wrong parity reads another block."
     },
     {
       "name": "peaked",
@@ -153,7 +153,7 @@
       ],
       "dtype": "bf16",
       "pattern": "large_logits",
-      "purpose": "D=128、7 个块、logit 很大：反复更新最大值，O 的修正（α）必须在 PV 之前完成。"
+      "purpose": "D=128, 7 blocks, large logits: the max updates repeatedly, and the correction of O (α) must finish before PV."
     },
     {
       "name": "peaked_d64",
@@ -165,7 +165,7 @@
       ],
       "dtype": "fp16",
       "pattern": "large_logits",
-      "purpose": "D=64、FP16：N=513 比块的倍数多 1；O¹ 在 TMEM 中的列与 D 有关。"
+      "purpose": "D=64, FP16: N=513 is 1 more than a multiple of the block size; the TMEM columns of O¹ depend on D."
     },
     {
       "name": "ring",
@@ -177,7 +177,7 @@
       ],
       "dtype": "bf16",
       "pattern": "position",
-      "purpose": "12 个块、24 个 ring item：环形 buffer 绕多圈，full/empty 的 parity 错会读到旧块或挂起。"
+      "purpose": "12 blocks, 24 ring items: the ring buffer wraps several times; a wrong full/empty parity reads a stale block or hangs."
     },
     {
       "name": "peaked_fp16",
@@ -189,7 +189,7 @@
       ],
       "dtype": "fp16",
       "pattern": "large_logits",
-      "purpose": "FP16、D=128、logit 很大且 scale=1：很多元素的 x = (s − m)·scale·log₂e 远小于 −127，软件 exp2 必须先钳位到 −127；最大值在前几块频繁跳动。",
+      "purpose": "FP16, D=128, large logits and scale=1: for many elements x = (s − m)·scale·log₂e is far below −127, so the software exp2 must first clamp to −127; the max jumps often in the first few blocks.",
       "scale": 1.0
     },
     {
@@ -202,7 +202,7 @@
       ],
       "dtype": "fp16",
       "pattern": "growing_max",
-      "purpose": "最大值每块缓慢增长约 1.4–4.3（log₂ 单位），单块增量都小于 τ、累计远超 τ：条件 rescale 必须和“当前基准”比，而不是和上一块的最大值比，否则 P 超过 FP16 的上限变成 inf。"
+      "purpose": "The max grows slowly, by about 1.4–4.3 per block (log₂ units); each per-block increase is below τ, but the total is far above τ: conditional rescale must compare with the \"current reference\", not with the previous block's max, or P exceeds the FP16 upper bound and becomes inf."
     },
     {
       "name": "growing_causal",
@@ -215,7 +215,7 @@
       "dtype": "bf16",
       "pattern": "growing_max",
       "causal": true,
-      "purpose": "growing_max、causal、D=64：每行最大值增长的块不同，同一个 warp 里有的行要修正、有的不要（warp 投票）。"
+      "purpose": "growing_max, causal, D=64: each row's max grows in different blocks, so within one warp some rows need a correction and others do not (warp vote)."
     },
     {
       "name": "jump",
@@ -227,7 +227,7 @@
       ],
       "dtype": "fp16",
       "pattern": "jump_max",
-      "purpose": "从 key 650（第 5 块的中间）起 logit 跳高约 145–430（log₂ 单位）：跳变块必须移动基准、修正 O（α ≈ 0），否则 P 溢出成 inf。"
+      "purpose": "From key 650 (the middle of block 5) the logits jump up by about 145–430 (log₂ units): the jump block must move the reference and correct O (α ≈ 0), or P overflows to inf."
     },
     {
       "name": "jump_causal",
@@ -240,7 +240,7 @@
       "dtype": "bf16",
       "pattern": "jump_max",
       "causal": true,
-      "purpose": "jump_max、BF16、causal、D=128：从 key 434 起跳变，超过 2^128 时 BF16/FP32 也会溢出；行 434 之前看不到跳变，tile 内一部分行跳、一部分不跳。"
+      "purpose": "jump_max, BF16, causal, D=128: the jump starts at key 434; above 2^128 BF16/FP32 overflow too; rows before 434 do not see the jump, so within a tile some rows jump and some do not."
     },
     {
       "name": "medium",
@@ -251,7 +251,7 @@
         128
       ],
       "dtype": "bf16",
-      "purpose": "中等规模随机数据，D=128：8 个块的完整 ping-pong。"
+      "purpose": "Medium-size random data, D=128: a full ping-pong over 8 blocks."
     },
     {
       "name": "medium_d64",
@@ -262,7 +262,7 @@
         64
       ],
       "dtype": "fp16",
-      "purpose": "中等规模随机数据，D=64、FP16。"
+      "purpose": "Medium-size random data, D=64, FP16."
     },
     {
       "name": "causal_n1",
@@ -274,7 +274,7 @@
       ],
       "dtype": "fp16",
       "causal": true,
-      "purpose": "causal 且 N=1：唯一的 query 只看见自己。"
+      "purpose": "Causal with N=1: the only query sees only itself."
     },
     {
       "name": "causal_pair",
@@ -287,7 +287,7 @@
       "dtype": "bf16",
       "pattern": "large_logits",
       "causal": true,
-      "purpose": "causal、一对 tile、logit 很大：tile 0 的第 2 个块全部被 mask（不能产生 NaN），tile 1 的对角块要 mask。"
+      "purpose": "Causal, one tile pair, large logits: block 2 of tile 0 is fully masked (must not produce NaN), and the diagonal block of tile 1 needs a mask."
     },
     {
       "name": "causal_tail",
@@ -299,7 +299,7 @@
       ],
       "dtype": "bf16",
       "causal": true,
-      "purpose": "causal 且 N 不是块的倍数：对角 mask 与尾部 mask 同时生效，第二对 tile 只有 44 行。"
+      "purpose": "Causal with N not a multiple of the block size: the diagonal mask and the tail mask apply at the same time; the second tile pair has only 44 rows."
     },
     {
       "name": "causal_n_bound",
@@ -311,7 +311,7 @@
       ],
       "dtype": "fp16",
       "causal": true,
-      "purpose": "causal、N=640：最后一对 tile（行 512..767）的块数由 N 决定（5 块），不是由对角线决定（6 块）；该对的 tile 1 全部越界，tile 0 的最后一块同时有对角 mask 和尾部 mask。"
+      "purpose": "Causal, N=640: the block count of the last tile pair (rows 512..767) is set by N (5 blocks), not by the diagonal (6 blocks); tile 1 of that pair is fully out of bounds, and the last block of tile 0 has both a diagonal mask and a tail mask."
     },
     {
       "name": "causal_position",
@@ -324,7 +324,7 @@
       "dtype": "fp16",
       "pattern": "position",
       "causal": true,
-      "purpose": "causal、V[j]=j/N、D=128：mask 偏一位就会读到未来的位置值。"
+      "purpose": "Causal, V[j]=j/N, D=128: a mask that is off by one reads values from future positions."
     },
     {
       "name": "causal_peaked",
@@ -337,7 +337,7 @@
       "dtype": "fp16",
       "pattern": "large_logits",
       "causal": true,
-      "purpose": "causal 且 logit 很大：对角块中被 mask 的元素不能参与最大值。"
+      "purpose": "Causal with large logits: masked elements in the diagonal block must not take part in the max."
     },
     {
       "name": "causal_uniform",
@@ -350,7 +350,7 @@
       "dtype": "bf16",
       "pattern": "uniform",
       "causal": true,
-      "purpose": "causal 且 Q=0：O[i] 是 V[0..i] 的均值，LSE[i] = ln(i+1)。"
+      "purpose": "Causal with Q=0: O[i] is the mean of V[0..i], LSE[i] = ln(i+1)."
     },
     {
       "name": "causal_ones_v",
@@ -363,7 +363,7 @@
       "dtype": "fp16",
       "pattern": "ones_v",
       "causal": true,
-      "purpose": "causal 且 V=1：O 必须等于 1，包括只有一个 key 的第 0 行。"
+      "purpose": "Causal with V=1: O must equal 1, including row 0, which has only one key."
     },
     {
       "name": "causal_medium",
@@ -375,7 +375,7 @@
       ],
       "dtype": "bf16",
       "causal": true,
-      "purpose": "中等规模 causal，D=128：第 p 对 tile 只处理块 0..2p+1。"
+      "purpose": "Medium-size causal, D=128: tile pair p processes only blocks 0..2p+1."
     },
     {
       "name": "causal_medium_d64",
@@ -387,7 +387,7 @@
       ],
       "dtype": "fp16",
       "causal": true,
-      "purpose": "中等规模 causal，D=64。"
+      "purpose": "Medium-size causal, D=64."
     },
     {
       "name": "perf",
@@ -399,7 +399,7 @@
       ],
       "dtype": "bf16",
       "perf": true,
-      "purpose": "B·H=64、N=4096、D=128：550 GFLOP，与 22、34 关同一 case。"
+      "purpose": "B·H=64, N=4096, D=128: 550 GFLOP, the same case as labs 22 and 34."
     },
     {
       "name": "perf_causal",
@@ -412,7 +412,7 @@
       "dtype": "bf16",
       "perf": true,
       "causal": true,
-      "purpose": "同上但 causal：跳块后工作量约一半。"
+      "purpose": "Same as above but causal: skipping blocks leaves about half the work."
     },
     {
       "name": "perf_d64",
@@ -424,7 +424,7 @@
       ],
       "dtype": "fp16",
       "perf": true,
-      "purpose": "D=64、FP16：每个 key 的 MMA 减半，指数（MUFU）所占比例更大。"
+      "purpose": "D=64, FP16: the MMA per key is halved, so the exponentials (MUFU) take a larger share."
     },
     {
       "name": "perf_8k",
@@ -436,7 +436,7 @@
       ],
       "dtype": "bf16",
       "perf": true,
-      "purpose": "N=8192、D=128：每个 CTA 64 个块，主循环占绝对多数，序幕/收尾的影响最小。"
+      "purpose": "N=8192, D=128: 64 blocks per CTA; the main loop dominates, so the prologue/teardown matters least."
     }
   ],
   "perf_target": {

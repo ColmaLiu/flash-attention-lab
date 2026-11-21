@@ -1,80 +1,80 @@
-# 40_fa4_pipeline 参考答案说明
+# 40_fa4_pipeline reference solution notes
 
-## 设计选择
+## Design choices
 
-**一个 CTA 两个 Q tile（256 行）、两个 softmax warpgroup。** 结构取自 FA4（`flash_fwd_sm100.py`，`q_stage = 2`）：
-warp 0–3 是 tile 0 的 softmax，warp 4–7 是 tile 1 的 softmax，线程 r ↔ 本 tile 第 r 行 ↔ TMEM lane r。两个 tile 共用
-K_j、V_j。没有 persistent、LPT（43 关）、2-CTA（42 关）、多项式 exp2 与条件 rescale（41 关）。
+**Two Q tiles (256 rows) and two softmax warpgroups per CTA.** The structure comes from FA4 (`flash_fwd_sm100.py`, `q_stage = 2`):
+warps 0–3 are the softmax of tile 0, warps 4–7 the softmax of tile 1; thread r ↔ row r of its tile ↔ TMEM lane r. The two tiles share
+K_j and V_j. No persistent kernel, LPT (lab 43), 2-CTA (lab 42), polynomial exp2 or conditional rescale (lab 41).
 
-**TMEM 512 列正好分给两个 tile。** S⁰ 0–127、S¹ 128–255、O⁰/O¹ 从 256 起各 D 列。每个 tile 只有一块 S，P 写在 S 的后
-64 列（FA4 的 `tmem_s_to_p_offset = n_block_size // 2`）。34 关的“同一 tile 的 S 双缓冲”放不下，重叠改由两个 tile
-之间提供。
+**The 512 TMEM columns split exactly between the two tiles.** S⁰ 0–127, S¹ 128–255, O⁰/O¹ from 256 on, D columns each. Each tile has only one S region, and P is written into the last
+64 columns of S (FA4's `tmem_s_to_p_offset = n_block_size // 2`). The "S double buffering within one tile" of lab 34 does not fit, so the overlap comes instead from the two
+tiles.
 
-**MMA 发射顺序（FA4 非 `s_ping_pong` 分支）。** 序幕 QK⁰₀、QK¹₀；每块 `PV⁰_j QK⁰_{j+1} PV¹_j QK¹_{j+1}`。由此：
-- softmax 等的 `s_full[t]` 第 j 阶段同时意味着 PV^t_{j−1} 完成（commit 跟踪同一线程此前全部 MMA，PTX 保证），所以
-  softmax 写 P、correction 读 O 之前都不需要额外的 `o_ready`；
-- QK^t_{j+1} 覆盖 PV^t_j 正在读的 P^t，**依赖同一线程的 MMA 按发射顺序执行**。PTX 8.7 只对“相同 accumulator 和
-  形状”的 MMA 对保证这一点，这里不满足；FA4 与 CUTLASS 77 都这样做，本答案照做并在讲义 §4.3 明确说明。步骤 1
-  （P 在 shared memory）不依赖这一点。未做“严格按规范”（QK 前等 PV commit）版本的性能对比。
+**MMA issue order (FA4's non-`s_ping_pong` branch).** Prologue QK⁰₀, QK¹₀; per block `PV⁰_j QK⁰_{j+1} PV¹_j QK¹_{j+1}`. Consequences:
+- phase j of `s_full[t]`, which softmax waits for, also means PV^t_{j−1} has completed (the commit tracks all earlier MMAs of the same thread, guaranteed by PTX), so
+  neither softmax writing P nor correction reading O needs an extra `o_ready`;
+- QK^t_{j+1} overwrites the P^t that PV^t_j is reading, which **relies on MMAs from the same thread executing in issue order**. PTX 8.7 guarantees this only for MMA pairs with "the same accumulator and
+  shape", which does not hold here; FA4 and CUTLASS 77 both do it, this solution follows them, and lesson §4.3 says so explicitly. Step 1
+  (P in shared memory) does not rely on this. There is no performance comparison with a "strictly by the spec" version (wait for the PV commit before QK).
 
-**K/V 共用一个环。** item u：偶数为 K_{u/2}、奇数为 V_{u/2}，与 MMA 的消费顺序一致；K 在两个 tile 的 QK 后释放，
-V 在两个 PV 后释放。P 不在 shared memory 后（步骤 2–3）D = 128 从 3 级增到 4 级、D = 64 从 6 级到 8 级。D = 128
-步骤 2–3 用 5 级时 shared memory 超出 227 KB（加上 correction 的统计量）。
+**K and V share one ring.** item u: even is K_{u/2}, odd is V_{u/2}, matching the order in which the MMA consumes them; K is released after the QKs of both tiles,
+V after both PVs. Once P is no longer in shared memory (steps 2–3), D = 128 goes from 3 to 4 stages and D = 64 from 6 to 8 stages. With 5 stages at D = 128 in
+steps 2–3, shared memory exceeds 227 KB (counting the correction statistics).
 
-**correction warpgroup（步骤 3）。** softmax 求出 m′、α 后立刻经 shared memory（`Stats::alpha`）+ `stats_full`
-交给 correction，再算 exp2；correction 修正 O 并 arrive `p_ready`（count 256 = softmax 128 + correction 128）。
-`stats_full` 不需要 empty barrier（讲义 §5.6 的因果链）；最终 m、ℓ 用单独的 `final_full`，否则 `stats_full` 可能
-连续完成两个阶段。epilogue（O/ℓ → Q^t 的 smem → TMA store、LSE）由 correction 做，与 FA4 的
-`use_correction_warps_for_epi` 相同。修正是无条件的（41 关做条件 rescale）。
+**correction warpgroup (step 3).** As soon as softmax has m′ and α, it hands them to correction through shared memory (`Stats::alpha`) + `stats_full`,
+then computes exp2; correction corrects O and arrives on `p_ready` (count 256 = softmax 128 + correction 128).
+`stats_full` needs no empty barrier (the causal chain in lesson §5.6); the final m and ℓ use a separate `final_full`, otherwise `stats_full` could
+complete two phases in a row. The epilogue (O/ℓ → smem of Q^t → TMA store, LSE) is done by correction, the same as FA4's
+`use_correction_warps_for_epi`. The correction is unconditional (lab 41 does conditional rescale).
 
-**setmaxnreg。** 16 个 warp（512 线程，启动时每线程 128）：softmax `inc` 192，correction `dec` 80，MMA/TMA/2 个空闲
-warp `dec` 48，2·192 + 80 + 48 = 512。数值与 FA4 默认值（`num_regs_softmax = 192`、`num_regs_correction = 80`）一致。
-ptxas 按 `setmaxnreg` 之后的值给各段代码分配寄存器：MMA 段只有 48 个，最初编译器把两个 tile 的 16 个 Q 描述符提到循环
-外，溢出约 160 字节；MMA 的 tile 循环加 `#pragma unroll 1` 后无溢出。步骤 1–2 是 10 个 warp、无 `setmaxnreg`，
-ptxas 上限 168（320 线程按 384 计）；步骤 2 写 P 时用 `x16` 的 `tcgen05.st`（`x32` 时溢出 8–16 字节）。
+**setmaxnreg.** 16 warps (512 threads, 128 per thread at launch): softmax `inc` 192, correction `dec` 80, MMA/TMA/2 idle
+warps `dec` 48, 2·192 + 80 + 48 = 512. The values match FA4's defaults (`num_regs_softmax = 192`, `num_regs_correction = 80`).
+ptxas allocates registers for each code region according to the value after `setmaxnreg`: the MMA region has only 48, and at first the compiler hoisted the 16 Q descriptors of the two tiles out of the loop,
+spilling about 160 bytes; with `#pragma unroll 1` on the tile loop of the MMA there are no spills. Steps 1–2 have 10 warps and no `setmaxnreg`;
+the ptxas limit is 168 (320 threads counted as 384); in step 2, P is written with the `x16` `tcgen05.st` (`x32` spills 8–16 bytes).
 
-**MMA warp 整个 warp 跑调度、elect 一个 lane 发射。** 用 `clock64()` 插桩一个 CTA（未提交）发现：MMA 只由 lane 0 运行
-（其余 31 个 lane 停在末尾的 `__syncthreads`）时，`p_ready` 已完成后还要约 250–550 周期 MMA 线程才发出 PV；改成全
-warp 等待、`elect.sync` 一个 lane 发射后降到约 40 周期，`perf` 约快 6%（0.79× → 0.84×）。原因（发散 warp 的调度）
-未进一步验证。TMA warp 改成“全 warp 等待 + leader 发 Q 和 K/V”的一种写法时反而慢约 10%（0.84× → 0.75×，可重复），而另一种写法
-（per-warp arrive 的变体）不变；原因未查明，TMA warp 保留 lane 0 写法（它提前几级装数据，不在关键路径上）。
+**The whole MMA warp runs the schedule; one elected lane issues.** Instrumenting one CTA with `clock64()` (not committed) showed: when the MMA runs only on lane 0
+(the other 31 lanes park at the final `__syncthreads`), the MMA thread takes about 250–550 cycles after `p_ready` has completed to issue PV; with the whole
+warp waiting and one lane chosen by `elect.sync` issuing, this drops to about 40 cycles, and `perf` is about 6% faster (0.79× → 0.84×). The cause (scheduling of divergent warps)
+was not verified further. One way of writing the TMA warp as "whole warp waits + leader issues Q and K/V" was instead about 10% slower (0.84× → 0.75×, reproducible), while another way
+(a per-warp arrive variant) made no difference; the cause was not found, so the TMA warp keeps the lane-0 style (it loads several stages ahead and is not on the critical path).
 
-**MMA 描述符：一次计算、逐 K 片加偏移。** start address 字段在低 14 位（16 字节单位），shared 地址 < 256 KB 不会进位，
-`desc + (bytes >> 4)` 即可，减少 MMA 线程的指令。单独测量时与逐片重算描述符的差别在噪声内（≈1–2%），为了 MMA 线程
-指令短而保留。
+**MMA descriptors: computed once, offset per K slice.** The start address field is in the low 14 bits (in 16-byte units); shared addresses < 256 KB never carry,
+so `desc + (bytes >> 4)` is enough, which saves instructions in the MMA thread. Measured on its own, the difference from recomputing the descriptor per slice is within noise (≈1–2%); kept to keep the MMA thread's
+instruction stream short.
 
-**未采用的尝试**（同次对比，差别在噪声内）：S 的 4 次 `tcgen05.ld` 同时在路上再统一 wait；去掉 `acquire` 中的
-`tcgen05.fence::after_thread_sync`；`p_ready` 改为每 warp 一个 arrive（count 4/8）；把 exp2 与写 P 分块交织。
+**Attempts not adopted** (compared in the same run, differences within noise): keeping the 4 `tcgen05.ld` of S in flight together with a single wait; removing the
+`tcgen05.fence::after_thread_sync` in `acquire`; one `p_ready` arrive per warp (count 4/8); interleaving exp2 and writing P in chunks.
 
-## 各 step 的性能（相对 cuDNN，CUDA Graph，7 号卡，每项 3 次的范围）
+## Performance per step (vs cuDNN, CUDA Graph, GPU 7, range over 3 runs each)
 
-| 版本 | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
+| Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|
-| 34 关步骤 5（对照） | ≈ 0.54–0.59× | ≈ 0.70× | ≈ 0.57–0.59× | — |
-| 步骤 1（ping-pong，P 经 smem） | ≈ 0.77–0.78× | ≈ 0.88–0.89× | ≈ 0.80× | ≈ 0.75–0.76× |
-| 步骤 2（P 在 TMEM，TS MMA） | ≈ 0.80× | ≈ 0.89–0.90× | ≈ 0.73–0.75× | ≈ 0.77–0.78× |
-| 步骤 3（correction WG + setmaxnreg） | ≈ 0.84× | ≈ 0.93–0.94× | ≈ 0.79–0.81× | ≈ 0.82× |
-| FA4（`flash_attn.cute`） | ≈ 1.15× | ≈ 1.33× | ≈ 1.13× | ≈ 1.10× |
+| Lab 34 step 5 (for comparison) | ≈ 0.54–0.59× | ≈ 0.70× | ≈ 0.57–0.59× | — |
+| Step 1 (ping-pong, P through smem) | ≈ 0.77–0.78× | ≈ 0.88–0.89× | ≈ 0.80× | ≈ 0.75–0.76× |
+| Step 2 (P in TMEM, TS MMA) | ≈ 0.80× | ≈ 0.89–0.90× | ≈ 0.73–0.75× | ≈ 0.77–0.78× |
+| Step 3 (correction WG + setmaxnreg) | ≈ 0.84× | ≈ 0.93–0.94× | ≈ 0.79–0.81× | ≈ 0.82× |
+| FA4 (`flash_attn.cute`) | ≈ 1.15× | ≈ 1.33× | ≈ 1.13× | ≈ 1.10× |
 
-插桩时间线（`perf`，稳态，SM 周期）：一块的周期 T ≈ 3450（MMA 只用 lane 0 时 ≈ 3700）；softmax WG 从拿到 S 到 arrive
-≈ 1900–2200，其中 128 个 exp2 ≈ 1450–1700；一个 tile 的 PV + QK ≈ 1100。T ≈ softmax + PV + QK + 交接，与讲义 §3.1 的
-链模型一致。MUFU 下限是每 tile 每块 1024 周期，所以 41 关的多项式 exp2 是下一步。
+Instrumented timeline (`perf`, steady state, SM cycles): period of one block T ≈ 3450 (≈ 3700 with the MMA on lane 0 only); softmax WG from receiving S to arriving
+≈ 1900–2200, of which the 128 exp2 take ≈ 1450–1700; PV + QK of one tile ≈ 1100. T ≈ softmax + PV + QK + handoff, consistent with the chain model of lesson §3.1.
+The MUFU lower bound is 1024 cycles per tile per block, so the polynomial exp2 of lab 41 is the next step.
 
-## 验证
+## Verification
 
-- `./lab check 40 --solution`：3 个 step × 25 个 case 全部通过；`./lab selftest 40` 与 `selftest 40 --perf`（目标 0.72）通过；
-- `./lab sanitize --solution` 的 memcheck、racecheck、synccheck 在 `two_tiles`、`causal_tail` 上（全部 step）0 错误；
-  racecheck 看不见 TMA/TMEM 访问，同步论证见讲义 §5.6 的表；
-- `./lab sass 40 --solution`：24 个 kernel STACK 均为 0；步骤 1–2 每线程 164–168 个寄存器，步骤 3 启动值 128（各角色由
-  `setmaxnreg` 决定，ptxas 按段分配，无溢出）；
-- 骨架：由答案生成，逐步把第 1..n 步的 TODO 换回答案代码后 `--step n` 通过、`--step n+1` 报 TODO(n+1)；只填 1a、
-  或填到 3a 时也在 TODO 处停下而不挂起；验证后恢复为原骨架（字节一致）。
-- `perf_target` 取 0.72 而不是 0.75：最差的 `perf_d64` 在 ≈ 0.79–0.81×，cuDNN 自身有约 4% 的波动。
+- `./lab check 40 --solution`: all 3 steps × 25 cases pass; `./lab selftest 40` and `selftest 40 --perf` (target 0.72) pass;
+- memcheck, racecheck and synccheck of `./lab sanitize --solution` report 0 errors on `two_tiles` and `causal_tail` (all steps);
+  racecheck cannot see TMA/TMEM accesses; the synchronization argument is the table in lesson §5.6;
+- `./lab sass 40 --solution`: STACK is 0 for all 24 kernels; steps 1–2 use 164–168 registers per thread, step 3 launches with 128 (each role's count is set by
+  `setmaxnreg`, ptxas allocates per region, no spills);
+- skeleton: generated from the solution; after replacing the TODOs of steps 1..n with solution code one step at a time, `--step n` passes and `--step n+1` reports TODO(n+1); filling only 1a,
+  or filling up to 3a, also stops at a TODO instead of hanging; restored to the original skeleton afterwards (byte-identical).
+- `perf_target` is 0.72 rather than 0.75: the worst case, `perf_d64`, is at ≈ 0.79–0.81×, and cuDNN itself varies by about 4%.
 
-## 已知局限
+## Known limitations
 
-- 依赖同一线程 MMA 的按序执行（上文）。
-- causal 时两个 tile 走同样多的块，tile 0 每对多算一个全被 mask 的块（FA4 相同）；Q tile 按 `blockIdx.x` 顺序发射（43 关）。
-- N 很小时 tile 1 全部越界仍然被计算（结果不写回）。
-- 非 persistent；每个 CTA 重新初始化 barrier、分配 TMEM、装 Q。
-- 只支持 D ∈ {64, 128}、FP16/BF16，O 与输入同 dtype。
+- Relies on in-order execution of MMAs from the same thread (above).
+- In causal mode both tiles go through the same number of blocks, so per pair tile 0 computes one extra fully masked block (same as FA4); Q tiles launch in `blockIdx.x` order (lab 43).
+- When N is very small, a fully out-of-bounds tile 1 is still computed (the results are not written back).
+- Not persistent; every CTA re-initializes barriers, allocates TMEM, and loads Q.
+- Supports only D ∈ {64, 128}, FP16/BF16, O with the same dtype as the inputs.

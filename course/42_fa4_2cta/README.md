@@ -1,348 +1,356 @@
-# 42 · 2-CTA attention：一对 CTA 共用 pair MMA，K/V 各装一半
+# 42 · 2-CTA attention: a CTA pair shares a pair MMA, and each loads half of K/V
 
-> 部分 4 · FA4 — Blackwell 上的完整优化　｜　前置：[40_fa4_pipeline](../40_fa4_pipeline/README.md)、[41_fa4_softmax](../41_fa4_softmax/README.md)、[33_2cta_gemm](../33_2cta_gemm/README.md)　｜　代码：[`students/42_fa4_2cta/kernel.cu`](../../students/42_fa4_2cta/kernel.cu)
+> Part 4 · FA4 — full optimization on Blackwell | Prerequisites: [40_fa4_pipeline](../40_fa4_pipeline/README.md), [41_fa4_softmax](../41_fa4_softmax/README.md), [33_2cta_gemm](../33_2cta_gemm/README.md) | Code: [`students/42_fa4_2cta/kernel.cu`](../../students/42_fa4_2cta/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-33 关在 GEMM 上学了 2-CTA MMA：一个 cluster 里的两个 CTA 组成一对（pair），leader 的一个线程发 `tcgen05.mma.cta_group::2`，M = 256，A 和 B 各从两个 CTA 的 shared memory 读一半，结果写进两个 CTA 的 TMEM。40 关搭好了 FA4 的流水：一个 CTA 两个 Q tile ping-pong、P 写回 TMEM、correction warpgroup；41 关加快了 softmax：软件 `exp2` 与 `MUFU.EX2` 混合、条件 rescale。
+Lab 33 taught 2-CTA MMA on GEMM: the two CTAs of a cluster form a pair, one leader thread issues `tcgen05.mma.cta_group::2` with M = 256, A and B are each read half from the shared memory of each of the two CTAs, and the result is written to the TMEM of both CTAs. Lab 40 built the FA4 pipeline: two Q tiles ping-pong in one CTA, P is written back to TMEM, and a correction warpgroup; lab 41 sped up softmax: software `exp2` mixed with `MUFU.EX2`, and conditional rescale.
 
-本关从 41 关的答案出发，加入 2-CTA，正是 FA4 在 `use_2cta_instrs=True` 时做的事：
+This lab starts from the lab 41 solution and adds 2-CTA, which is exactly what FA4 does with `use_2cta_instrs=True`:
 
-| | 40、41 关（1-CTA） | 本关（2-CTA） |
+| | Labs 40, 41 (1-CTA) | This lab (2-CTA) |
 |---|---|---|
-| 一个 cluster 算几行 query | 256（cluster = 1 个 CTA） | **512**（2 个 CTA，每个 256） |
-| QKᵀ | 每个 CTA 自己的 M = 128 MMA | **pair MMA，M = 256**：leader 的 tile t 和 peer 的 tile t 一起算 |
-| P·V | TS MMA，M = 128 | **TS pair MMA**，A = 两个 CTA 各自 TMEM 里的 P |
-| 每个 CTA 装的 K_j | 128 个 key × D | **64 个 key × D**（另一半在 peer） |
-| 每个 CTA 装的 V_j | 128 个 key × D | **128 个 key × D/2 列**（另一半列在 peer） |
-| MMA warp | 每个 CTA 一个 | **只有 leader 有**；它替两个 CTA 发全部 MMA |
-| `p_ready` | 本 CTA 256 次 arrive | **leader 的 barrier 收两个 CTA 的 512 次 arrive** |
-| softmax、correction、epilogue | 每个 CTA 自己（41 关的算术） | 不变：每个 CTA 处理自己 TMEM 里的行；多项式比例沿用 41 关（§7.3 解释为什么没改） |
+| Query rows per cluster | 256 (cluster = 1 CTA) | **512** (2 CTAs, 256 each) |
+| QKᵀ | Each CTA runs its own M = 128 MMA | **Pair MMA, M = 256**: tile t of the leader and tile t of the peer are computed together |
+| P·V | TS MMA, M = 128 | **TS pair MMA**, A = P in each CTA's own TMEM |
+| K_j loaded per CTA | 128 keys × D | **64 keys × D** (the other half is in the peer) |
+| V_j loaded per CTA | 128 keys × D | **128 keys × D/2 columns** (the other half of the columns is in the peer) |
+| MMA warp | One per CTA | **Only in the leader**; it issues all MMAs for both CTAs |
+| `p_ready` | 256 arrives in this CTA | **The leader's barrier collects 512 arrives from both CTAs** |
+| softmax, correction, epilogue | Each CTA on its own (lab 41 arithmetic) | Unchanged: each CTA handles the rows in its own TMEM; the polynomial ratio stays as in lab 41 (§7.3 explains why it was not changed) |
 
-接口不变：FP16/BF16 的 Q、K、V、O，`[B,N,H,D]`，D = 64 或 128，causal 与非 causal，O 与 FP32 的 LSE。
+The interface is unchanged: FP16/BF16 Q, K, V, O, `[B,N,H,D]`, D = 64 or 128, causal and non-causal, O and an FP32 LSE.
 
-三步：
+Three steps:
 
-1. **pair QKᵀ**：cluster 启动、pair TMEM、K 对半装载、leader 侧的 full barrier、multicast commit、排空与 cluster 收尾；只检查第一个 K/V 块的 S（probe）；
-2. **完整的 2-CTA 流水**：V 按列对半装载、TS pair MMA、跨 CTA 的 `p_ready`、causal；
-3. **跨 CTA 交接的代价**：把 `p_ready` 的远程 arrive 从 `.release.cluster` 换成 `.release.cta`。
+1. **Pair QKᵀ**: cluster launch, pair TMEM, split K load, leader-side full barriers, multicast commit, drain and cluster teardown; checks only S of the first K/V block (probe);
+2. **Full 2-CTA pipeline**: split V load by columns, TS pair MMA, cross-CTA `p_ready`, causal;
+3. **The cost of the cross-CTA handoff**: change the remote arrive on `p_ready` from `.release.cluster` to `.release.cta`.
 
-做完后你应该能：
+When you finish, you should be able to:
 
-- 画出 pair 的数据布局：哪一行在哪个 CTA 的哪个 TMEM lane，K、V 的哪一半在哪个 CTA；
-- 列出每个 mbarrier 用的是哪个 CTA 的副本、谁 arrive、谁 wait；
-- 推导 2-CTA 省下的 shared memory、L2→SM 流量和 shared memory 读带宽；
-- 用实测解释：softmax 受 MUFU 限制时（40 关的 softmax）2-CTA 反而慢约 2–12%；换上 41 关的 softmax 后，非 causal 的主循环与 1-CTA 打平，整体仍差约 1–3%（上限接近噪声），D = 64 与 causal 差约 5–7%；以及按配置选择 1-CTA / 2-CTA 的依据。
+- draw the data layout of the pair: which row is in which TMEM lane of which CTA, and which half of K and V is in which CTA;
+- list, for each mbarrier, which CTA's copy is used, who arrives and who waits;
+- derive the shared memory, L2→SM traffic and shared memory read bandwidth that 2-CTA saves;
+- explain from measurements: when softmax is MUFU-bound (the lab 40 softmax), 2-CTA is actually about 2–12% slower; with the lab 41 softmax, the non-causal main loop ties with 1-CTA, but the whole kernel is still about 1–3% slower (the upper end is close to noise), and D = 64 and causal are about 5–7% slower; and the basis for choosing 1-CTA / 2-CTA per configuration.
 
-## 2. 动机：41 关之后还剩什么
+## 2. Motivation: what is left after lab 41
 
-40 关 §7.2 的结论：一个 tile 的链是 softmax（≈ 2000 周期，大头是 128 个 `exp2`）+ 交接 + PV + QK（≈ 1100 周期）。41 关把一部分 `exp2` 移到 FMA 流水线、跳过大部分 O 的修正，softmax 段变短，链上 MMA 一侧的比重随之变大。
+Conclusion of lab 40 §7.2: the chain of one tile is softmax (≈ 2000 cycles, mostly the 128 `exp2`s) + handoff + PV + QK (≈ 1100 cycles). Lab 41 moved some `exp2`s to the FMA pipeline and skips most O corrections, so the softmax segment got shorter and the MMA side takes a larger share of the chain.
 
-FA4 论文和代码里还有两类优化：
+The FA4 paper and code have two more kinds of optimization:
 
-| 方向 | 做法 | 关卡 |
+| Direction | Method | Lab |
 |---|---|---|
-| 缩短 softmax | 多项式 `exp2` 分担 MUFU、条件 rescale | 41（已完成，本关沿用） |
-| 减轻 MMA 一侧的负担 | **2-CTA MMA**：B 操作数（K、V）在两个 CTA 之间对半分 | **本关** |
-| 调度 | persistent、LPT、causal 的块分类 | 43 |
+| Shorten softmax | Polynomial `exp2` shares the MUFU load, conditional rescale | 41 (done, reused in this lab) |
+| Lighten the MMA side | **2-CTA MMA**: the B operands (K, V) are split in half between two CTAs | **This lab** |
+| Scheduling | Persistent, LPT, classification of causal blocks | 43 |
 
-2-CTA 减轻的是三样东西（§3 推导）：每个 CTA 的 K/V shared memory、每个输出行的 L2→SM 流量、MMA 每周期从 shared memory 读的字节数。它**不**减少 softmax 的工作量。所以本关的一个重要问题是：softmax 要快到什么程度，2-CTA 才能带来收益？§7 用实测回答（先用 40 关的 softmax 看它为什么输，再换上 41 关的 softmax）。
+2-CTA lightens three things (derived in §3): the K/V shared memory per CTA, the L2→SM traffic per output row, and the bytes the MMA reads from shared memory per cycle. It does **not** reduce the softmax work. So one important question of this lab is: how fast must softmax be for 2-CTA to pay off? §7 answers with measurements (first with the lab 40 softmax to see why it loses, then with the lab 41 softmax).
 
-## 3. 数学
+## 3. Math
 
-attention 的数学与 40 关完全相同（online softmax、P 写回 TMEM、O 的修正）。本关只改变“谁算哪几行、谁装哪一半 K/V”。
+The attention math is exactly the same as lab 40 (online softmax, P written back to TMEM, correction of O). This lab changes only "who computes which rows, and who loads which half of K/V".
 
-### 3.1 pair 的数据布局
+### 3.1 Data layout of the pair
 
-cluster c（`%clusterid.x`）负责第 q0 = 512c 起的 512 行。CTA r（`%cluster_ctarank`，0 = leader，1 = peer）的 tile t 是
+Cluster c (`%clusterid.x`) owns the 512 rows starting at q0 = 512c. Tile t of CTA r (`%cluster_ctarank`, 0 = leader, 1 = peer) is
 
 ```
 rows(r, t) = q0 + 256 t + 128 r  ..  + 127
 ```
 
-于是 pair tile t（两个 CTA 的 tile t 合起来）正好是连续的 256 行 `q0 + 256t .. q0 + 256t + 255`：
+So pair tile t (tile t of both CTAs together) is exactly the 256 contiguous rows `q0 + 256t .. q0 + 256t + 255`:
 
 ```
              leader (rank 0)                    peer (rank 1)
              ───────────────                    ─────────────
-tile 0       rows q0      .. q0+127             rows q0+128 .. q0+255     ← pair tile 0（MMA 行 0..255）
+tile 0       rows q0      .. q0+127             rows q0+128 .. q0+255     ← pair tile 0 (MMA rows 0..255)
 tile 1       rows q0+256  .. q0+383             rows q0+384 .. q0+511     ← pair tile 1
-TMEM         S⁰ S¹ O⁰ O¹ 的 lane r = 本 CTA tile 的第 r 行（两个 CTA 列地址相同）
+TMEM         lane r of S⁰ S¹ O⁰ O¹ = row r of this CTA's tile (same column addresses in both CTAs)
 
 K_j (128 keys × D)      keys 0..63  × D           keys 64..127 × D          ← B of QKᵀ, N = keys
 V_j (128 keys × D)      keys 0..127 × cols 0..D/2-1   keys 0..127 × cols D/2..D-1   ← B of PV, N = D
 ```
 
-`tcgen05.mma.cta_group::2` 的规则（33 关 §4.4）：A 的第 0–127 行来自 leader、128–255 行来自 peer；**B 按 N 分**：N 的前一半来自 leader，后一半来自 peer；D 的第 0–127 行写 leader 的 TMEM，128–255 行写 peer 的 TMEM。
+Rules of `tcgen05.mma.cta_group::2` (lab 33 §4.4): rows 0–127 of A come from the leader and rows 128–255 from the peer; **B is split by N**: the first half of N comes from the leader, the second half from the peer; rows 0–127 of D go to the leader's TMEM, rows 128–255 to the peer's TMEM.
 
-- QKᵀ：A = Q（M 是 query），B = K（N 是 key）。所以 K 按 **key** 对半分。
-- PV：A = P（M 是 query），B = V（N 是 D 的列，K 是 key）。所以 V 按 **列** 对半分：每个 CTA 都要全部 128 个 key，但只要 D/2 列。
+- QKᵀ: A = Q (M is the query), B = K (N is the key). So K is split in half by **key**.
+- PV: A = P (M is the query), B = V (N is the column of D, K is the key). So V is split in half by **column**: each CTA needs all 128 keys but only D/2 columns.
 
-小例子（D = 128，N = 4096，第 0 个 cluster）：leader 装 Q 行 0–127、256–383，K_j 的 key 128j..128j+63，V_j 的第 0–63 列；peer 装 Q 行 128–255、384–511，K_j 的 key 128j+64..128j+127，V_j 的第 64–127 列。pair MMA 之后 leader 的 S⁰ 是行 0–127 对 128 个 key 的分数，peer 的 S⁰ 是行 128–255 的。
+Small example (D = 128, N = 4096, cluster 0): the leader loads Q rows 0–127 and 256–383, keys 128j..128j+63 of K_j, and columns 0–63 of V_j; the peer loads Q rows 128–255 and 384–511, keys 128j+64..128j+127 of K_j, and columns 64–127 of V_j. After the pair MMA, the leader's S⁰ holds the scores of rows 0–127 against 128 keys, and the peer's S⁰ holds those of rows 128–255.
 
-### 3.2 省下了什么
+### 3.2 What it saves
 
-每块 K/V（128 个 key）、每个 CTA 的字节数（16 位元素）：
+Bytes per K/V block (128 keys) per CTA (16-bit elements):
 
-| | 40 关 | 本关 | 比例 |
+| | Lab 40 | This lab | Ratio |
 |---|---|---|---|
-| K_j + V_j 进 shared memory | 2 · 128 · D · 2 B（D = 128：64 KB） | 一半（32 KB） | 0.5 |
-| 同样的环字节数能放几块 | 128 KB / 64 KB = 2 块 | 128 KB / 32 KB = 4 块 | 2 |
-| L2→SM 的 K/V 流量（每个输出行） | 64 KB / 256 行 = 256 B/行 | 32 KB / 256 行 = 128 B/行 | 0.5 |
+| K_j + V_j into shared memory | 2 · 128 · D · 2 B (D = 128: 64 KB) | Half (32 KB) | 0.5 |
+| Blocks that fit in the same ring bytes | 128 KB / 64 KB = 2 blocks | 128 KB / 32 KB = 4 blocks | 2 |
+| L2→SM K/V traffic (per output row) | 64 KB / 256 rows = 256 B/row | 32 KB / 256 rows = 128 B/row | 0.5 |
 
-整个 `perf` case（B·H = 64，N = 4096，D = 128）：40 关 1024 个 CTA × 32 块 × 64 KB ≈ 2.15 GB 的 K/V 加 67 MB 的 Q；本关 ≈ 1.07 GB + 67 MB。
+For the whole `perf` case (B·H = 64, N = 4096, D = 128): lab 40 moves 1024 CTAs × 32 blocks × 64 KB ≈ 2.15 GB of K/V plus 67 MB of Q; this lab ≈ 1.07 GB + 67 MB.
 
-MMA 从 shared memory 读操作数的带宽（按每 SM 每周期 128 B、BF16 每 SM 每周期约 8192 FLOP 估算）：
+Bandwidth for the MMA to read operands from shared memory (estimated at 128 B per SM per cycle, and about 8192 BF16 FLOP per SM per cycle):
 
-| MMA（每个 SM 的份） | 一条 K = 16 的 MMA 读多少 | 用多少周期 | 每周期读 |
+| MMA (the share of each SM) | Bytes read by one K = 16 MMA | Cycles it takes | Read per cycle |
 |---|---|---|---|
-| 40 关 QKᵀ，M = 128，N = 128（A、B 都在 smem） | A 4 KB + B 4 KB | 128·128·16·2 / 8192 = 64 | 128 B，**正好占满** |
-| 本关 QKᵀ（pair，每个 SM 一半 B） | A 4 KB + B 2 KB | 64 | 96 B（0.75） |
-| 40 关 PV，N = D = 128（A 在 TMEM） | B 4 KB | 64 | 64 B |
-| 本关 PV（pair） | B 2 KB | 64 | 32 B（0.5） |
+| Lab 40 QKᵀ, M = 128, N = 128 (A and B both in smem) | A 4 KB + B 4 KB | 128·128·16·2 / 8192 = 64 | 128 B, **exactly saturated** |
+| This lab QKᵀ (pair, half of B per SM) | A 4 KB + B 2 KB | 64 | 96 B (0.75) |
+| Lab 40 PV, N = D = 128 (A in TMEM) | B 4 KB | 64 | 64 B |
+| This lab PV (pair) | B 2 KB | 64 | 32 B (0.5) |
 
-所以 1-CTA 的 QKᵀ 在 shared memory 带宽上没有余量；2-CTA 把它降到 75%。这只在 MMA 一侧成为瓶颈时有用（§7）。
+So the 1-CTA QKᵀ has no headroom in shared memory bandwidth; 2-CTA lowers it to 75%. This helps only when the MMA side becomes the bottleneck (§7).
 
-### 3.3 代价
+### 3.3 Costs
 
-- **两个 SM 被绑在一起**：pair tile t 的 PV 必须等**两个** CTA 的 softmax 都交出 P，S 也同时写进两个 CTA。每块的链上多了两次跨 SM 的交接（multicast commit 到 peer、peer 的 arrive 到 leader）。
-- **causal 的对角浪费翻倍**：一个 pair tile 是 256 行，一个 cluster 的两个 tile 一起前进（ping-pong），cluster 的时间由走得最远的 tile 1 决定：cluster c 走 `4c + 4` 块。40 关同样的 512 行由两个 CTA 分别走 `4c + 2` 和 `4c + 4` 块。N = 4096 时平均每 512 行的 SM 时间是 2·(4c+4) ≈ 36 块 vs (8c+6) ≈ 34 块，多约 6%。tile 0 少走两块（步骤 2 的 `tile_blocks`）省不回来：tile 1 照样要走完，tile 0 早停只是让 tile 1 最后两块没有 ping-pong 伙伴。
-- **cluster 启动**：一对 CTA 要同时有两个空闲 SM；TMEM 的 `cta_group::2` 分配是一段跨 CTA 的软件协议（33 关 NOTES）。实测（41 关 softmax，`perf`）setup 整体从约 0.45 µs 变成约 1.0 µs，CTA 末尾的收尾从约 1.1 µs 变成约 1.8 µs（CTA 寿命约 65 µs）。分配协议在多出的 setup 里占多少没有单独测。
+- **Two SMs are tied together**: the PV of pair tile t must wait until the softmax of **both** CTAs has handed over P, and S is written into both CTAs at the same time. The chain of each block gains two cross-SM handoffs (the multicast commit to the peer, and the peer's arrive to the leader).
+- **The diagonal waste of causal doubles**: a pair tile is 256 rows, the two tiles of one cluster advance together (ping-pong), and the cluster's time is set by tile 1, which goes furthest: cluster c walks `4c + 4` blocks. In lab 40 the same 512 rows are handled by two CTAs that walk `4c + 2` and `4c + 4` blocks. At N = 4096 the average SM time per 512 rows is 2·(4c+4) ≈ 36 blocks vs (8c+6) ≈ 34 blocks, about 6% more. Tile 0 walking two fewer blocks (`tile_blocks` in step 2) does not win it back: tile 1 still has to walk to the end, and stopping tile 0 early only leaves the last two blocks of tile 1 without a ping-pong partner.
+- **Cluster launch**: a CTA pair needs two idle SMs at the same time; the `cta_group::2` TMEM allocation is a cross-CTA software protocol (lab 33 NOTES). Measured (lab 41 softmax, `perf`): the whole setup grows from about 0.45 µs to about 1.0 µs, and the teardown at the end of a CTA from about 1.1 µs to about 1.8 µs (CTA lifetime about 65 µs). How much of the extra setup is the allocation protocol was not measured separately.
 
-## 4. 硬件与指令
+## 4. Hardware and instructions
 
-### 4.1 本关新增的头文件函数
+### 4.1 New header functions in this lab
 
-| 函数（头文件） | PTX | 用途 |
+| Function (header) | PTX | Purpose |
 |---|---|---|
-| `lab::tma_load_4d_cg2`（`cluster.cuh`） | `cp.async.bulk.tensor.4d.cta_group::2...` | 33 关 `tma_load_2d_cg2` 的 4-D 版：box 写进本 CTA，complete_tx 落在 leader 的 barrier |
-| `lab::mma_f16_ts_cg2`（`cluster.cuh`） | `tcgen05.mma.cta_group::2.kind::f16 [d], [a_tmem], b_desc, idesc, p` | TS 形式的 pair MMA：A 来自两个 CTA 各自 TMEM 的同一地址 |
-| `lab::mbar_arrive_remote`（`cluster.cuh`） | `mbarrier.arrive.shared::cluster.b64`（默认 `.release.cta`） | 步骤 3 的廉价远程 arrive（§4.4） |
-| `lab::make_smem_desc_mnmajor_sw64`（`tcgen05.cuh`） | 描述符，layout = 4（SWIZZLE_64B） | D = 64 时 V 的一半只有 32 列 = 64 B 一行 |
+| `lab::tma_load_4d_cg2` (`cluster.cuh`) | `cp.async.bulk.tensor.4d.cta_group::2...` | 4-D version of lab 33's `tma_load_2d_cg2`: the box is written into this CTA, and complete_tx lands on the leader's barrier |
+| `lab::mma_f16_ts_cg2` (`cluster.cuh`) | `tcgen05.mma.cta_group::2.kind::f16 [d], [a_tmem], b_desc, idesc, p` | TS-form pair MMA: A comes from the same address in each CTA's own TMEM |
+| `lab::mbar_arrive_remote` (`cluster.cuh`) | `mbarrier.arrive.shared::cluster.b64` (default `.release.cta`) | The cheap remote arrive of step 3 (§4.4) |
+| `lab::make_smem_desc_mnmajor_sw64` (`tcgen05.cuh`) | Descriptor, layout = 4 (SWIZZLE_64B) | At D = 64 a half of V has only 32 columns = 64 B per row |
 
-其余 pair 原语（`tmem_alloc_cg2`、`mma_f16_ss_cg2`、`tcgen05_commit_cg2_multicast`、`map_shared_rank`、`mbar_wait_cluster`、`mbar_arrive_cluster`、`cluster_sync`、`launch_cluster`）在 33 关写过。一个 kernel 里所有 tcgen05 指令必须用同一个 `cta_group`，所以本关连 commit 都用 `cg2` 的 multicast 版。
+The other pair primitives (`tmem_alloc_cg2`, `mma_f16_ss_cg2`, `tcgen05_commit_cg2_multicast`, `map_shared_rank`, `mbar_wait_cluster`, `mbar_arrive_cluster`, `cluster_sync`, `launch_cluster`) were written in lab 33. All tcgen05 instructions in one kernel must use the same `cta_group`, so in this lab even the commits use the `cg2` multicast version.
 
-### 4.2 pair QKᵀ
+### 4.2 Pair QKᵀ
 
 ```cpp
 idesc = make_idesc_f16(256 /*M of the pair*/, 128 /*N = keys*/, bf16);
-da = make_smem_desc_kmajor_sw128(sq);   // leader 的 Q^t；peer 的在同一偏移
-db = make_smem_desc_kmajor_sw128(sk);   // leader 的 K 一半：[D/64 panel][64 key][64]
+da = make_smem_desc_kmajor_sw128(sq);   // leader's Q^t; the peer's is at the same offset
+db = make_smem_desc_kmajor_sw128(sk);   // leader's half of K: [D/64 panel][64 key][64]
 for kk: mma_f16_ss_cg2(s_tmem, da + a_off(kk), db + b_off(kk), idesc, kk > 0);
 ```
 
-与 40 关 `mma_qk` 唯一的不同是 K 的 panel 只有 64 行（`kHalfKeys`），所以 `b_off = (panel · 64 · 64 + col) · 2 / 16`。描述符只描述 leader 的 buffer，硬件在 peer 的同一偏移读另一半——所以**两个 CTA 的 shared memory 布局必须完全相同**。
+The only difference from lab 40's `mma_qk` is that a K panel has only 64 rows (`kHalfKeys`), so `b_off = (panel · 64 · 64 + col) · 2 / 16`. The descriptor describes only the leader's buffer, and the hardware reads the other half at the same offset in the peer, so **the shared memory layout of the two CTAs must be exactly the same**.
 
-### 4.3 TS pair PV 与 64B swizzle
+### 4.3 TS pair PV and 64B swizzle
 
 ```cpp
-idesc = make_idesc_f16(256, D /*N = 全部 D 列*/, bf16, true, false, /*b_mn_major=*/true);
-db = D == 128 ? make_smem_desc_mnmajor_sw128(sv, ...)   // 一行 64 列 = 128 B
-              : make_smem_desc_mnmajor_sw64(sv, ...);   // 一行 32 列 = 64 B
+idesc = make_idesc_f16(256, D /*N = all D columns*/, bf16, true, false, /*b_mn_major=*/true);
+db = D == 128 ? make_smem_desc_mnmajor_sw128(sv, ...)   // a row of 64 columns = 128 B
+              : make_smem_desc_mnmajor_sw64(sv, ...);   // a row of 32 columns = 64 B
 for kk: mma_f16_ts_cg2(o_tmem, p_tmem + 8 kk, db + kk · 16 · rowbytes / 16, idesc, acc || kk > 0);
 ```
 
-- idesc 的 N 是**整个** D：硬件把 N 对半分给两个 CTA。每个 CTA 的 V 一半是 [128 key][D/2]，MN-major。
-- D = 128 时一半 = 64 列 = 128 字节，正好一个 128B swizzle 行（40 关的布局）。D = 64 时一半只有 32 列 = 64 字节，128B swizzle 用不了，要用 **64B swizzle**：TMA 的 box 宽 32 个元素、`CU_TENSOR_MAP_SWIZZLE_64B`，描述符 layout 字段 = 4，8 行一个 512 字节的 atom（SBO = 512），K 方向前进 16 行 = 16 · 64 字节。
-- A 的地址规则与 40 关相同（每 16 个 key 8 列）；leader 和 peer 的 P 都在各自 TMEM 的同一列。
-- 每个 CTA 只有一个 MN panel，所以 LBO 用不到。
+- The N of idesc is the **whole** D: the hardware splits N in half between the two CTAs. Each CTA's half of V is [128 key][D/2], MN-major.
+- At D = 128 a half = 64 columns = 128 bytes, exactly one 128B swizzle row (the lab 40 layout). At D = 64 a half has only 32 columns = 64 bytes, so 128B swizzle cannot be used and you need **64B swizzle**: a TMA box 32 elements wide with `CU_TENSOR_MAP_SWIZZLE_64B`, descriptor layout field = 4, 8 rows per 512-byte atom (SBO = 512), and advancing 16 rows in the K direction = 16 · 64 bytes.
+- The address rule for A is the same as lab 40 (8 columns per 16 keys); the P of the leader and of the peer are in the same column of each one's own TMEM.
+- Each CTA has only one MN panel, so LBO is not used.
 
-### 4.4 跨 CTA 的 arrive：`.release.cluster` 与 `.release.cta`
+### 4.4 Cross-CTA arrive: `.release.cluster` vs `.release.cta`
 
-peer 的 softmax 和 correction 线程写完自己 TMEM 里的 P、修正完 O 后，要告诉 **leader** 的 MMA 线程。它们在 leader 的 `p_ready` 上远程 arrive（地址来自 `mapa`）：
+After the peer's softmax and correction threads finish writing P into their own TMEM and correcting O, they must tell the **leader's** MMA thread. They arrive remotely on the leader's `p_ready` (the address comes from `mapa`):
 
 ```cpp
-tcgen05_fence_before_thread_sync();       // 本线程的 tcgen05.ld/st 排在 arrive 之前
+tcgen05_fence_before_thread_sync();       // order this thread's tcgen05.ld/st before the arrive
 arrive(map_shared_rank(&bar.p_ready[t], 0));
 ```
 
-33 关用的是 `mbar_arrive_cluster`：`mbarrier.arrive.release.cluster`。编译成 SASS 后是（自己编译一个只含这条指令的 kernel，`cuobjdump -sass`）：
+Lab 33 used `mbar_arrive_cluster`: `mbarrier.arrive.release.cluster`. Compiled to SASS it is (compile a kernel that contains only this instruction yourself, then `cuobjdump -sass`):
 
 ```
 .release.cluster:  MEMBAR.ALL.CTA; MEMBAR.ALL.GPU; ERRBAR; CGAERRBAR; SYNCS.ARRIVE.TRANS64.RED.A1T0 [addr]
 .release.cta:      SYNCS.ARRIVE.TRANS64.RED.A1T0 [addr]
 ```
 
-`.release.cluster` 让这个线程之前的**所有**内存写在 cluster 范围可见，硬件用一次 GPU 范围的 `MEMBAR` 实现，要等本线程所有在途的访存完成。每块、每个 tile、512 个线程各做一次。插桩（数据见 `solutions/42_fa4_2cta/NOTES.md`）：步骤 2 里 leader 的 MMA 线程在最后一个线程 arrive 之后约 650–900 ns 才看到 `p_ready` 完成；步骤 3 约 100 ns。
+`.release.cluster` makes **all** memory writes before this thread's arrive visible at cluster scope; the hardware implements it with a GPU-scope `MEMBAR`, which waits for all of this thread's in-flight memory accesses to complete. It happens once per block, per tile, in each of 512 threads. Instrumentation (data in `solutions/42_fa4_2cta/NOTES.md`): in step 2, the leader's MMA thread sees `p_ready` complete about 650–900 ns after the last thread arrives; in step 3, about 100 ns.
 
-`.release.cta` 在形式上**不保证**正确，即使数据在 TMEM 里：
+`.release.cta` is formally **not guaranteed** to be correct, even though the data is in TMEM:
 
-- PTX 内存模型中，peer 线程的 `.release.cta` arrive 与 leader 的 `try_wait.acquire.cluster` 作用域不同时包含两个线程，不是 morally strong，**没有 synchronizes-with**。tcgen05 的顺序规则（`fence::before_thread_sync` …… 线程同步 …… `fence::after_thread_sync`）依赖的正是这个线程同步，所以“数据在 TMEM”并不能补上形式上的缺口。
-- 有保证的只有两点：arrive 一定被计数（`p_ready` 的相位要等 512 次 arrive 全部到达）；本线程的 `tcgen05.wait::st` / `wait::ld` 在 arrive 之前已经让它自己的 TMEM 访问完成。
-- 其余依赖当前硬件与编译器的行为——这是一个硬件层面的论证：TMEM 的写在 `wait::st` 返回时已经完成，`SYNCS.ARRIVE` 在它之后发出，leader 看到相位完成之后才发 MMA。CUTLASS（`ClusterBarrier::arrive(cta_id, pred)`，`include/cutlass/arch/barrier.h`）和 FA4（pipeline 的 `consumer_release` 远程 arrive 到 leader）都这样做。CuTe DSL 的 `cute/arch/mbar.py` 注释说得很直白：远程 arrive 在形式上应该用 cluster 作用域；默认用 CTA 是因为现有协议依赖 barrier 计数和当前硬件/编译器行为，而 cluster 作用域“实测更慢”。
+- In the PTX memory model, the scopes of the peer thread's `.release.cta` arrive and the leader's `try_wait.acquire.cluster` do not both include the two threads, so the pair is not morally strong and there is **no synchronizes-with**. The tcgen05 ordering rule (`fence::before_thread_sync` … thread synchronization … `fence::after_thread_sync`) depends on exactly this thread synchronization, so "the data is in TMEM" does not close the formal gap.
+- Only two things are guaranteed: the arrive is always counted (the phase of `p_ready` waits for all 512 arrives); and this thread's `tcgen05.wait::st` / `wait::ld` has completed its own TMEM accesses before the arrive.
+- The rest relies on the behavior of the current hardware and compiler. This is a hardware-level argument: the TMEM write has completed when `wait::st` returns, `SYNCS.ARRIVE` is issued after it, and the leader issues the MMA only after it sees the phase complete. CUTLASS (`ClusterBarrier::arrive(cta_id, pred)`, `include/cutlass/arch/barrier.h`) and FA4 (the pipeline's `consumer_release` arrives remotely on the leader) both do this. The comment in the CuTe DSL's `cute/arch/mbar.py` says it plainly: a remote arrive should formally use cluster scope; CTA is the default because existing protocols rely on barrier counting and current hardware/compiler behavior, and cluster scope is "measured to be slower".
 
-所以步骤 3 是一个**有意识的取舍**：用形式保证换约 1.2 倍的速度，与 CUTLASS/FA4 相同。要形式上正确，保留步骤 2 的 `.release.cluster`；交接 shared/global memory 里的数据（例如经 DSMEM 写对方的 smem）时更不能省。
+So step 3 is a **deliberate trade-off**: give up the formal guarantee for about 1.2 times the speed, the same as CUTLASS/FA4. For formal correctness, keep the `.release.cluster` of step 2; when handing off data in shared/global memory (for example writing the other CTA's smem through DSMEM), you must not drop it.
 
-### 4.5 常见误用
+### 4.5 Common misuses
 
-| 误用 | 后果 |
+| Misuse | Consequence |
 |---|---|
-| peer 也发 MMA | 每块算两遍，S/O 被写两次，结果错或挂起 |
-| peer 也 `arrive_expect_tx` 同一个 leader barrier | tx 字节数翻倍、arrive 多一次：相位提前完成或永远完不成 |
-| commit 不 multicast（`cta_group::1` 的 `tcgen05_commit`） | 编译期就不允许混用 cta_group；即使改成 mask 只含 leader，peer 的 softmax 永远等不到 `s_full` |
-| K 按 D 对半、V 按 key 对半 | 方向反了：B 总是按 **N** 对半，QKᵀ 的 N 是 key，PV 的 N 是 D 的列 |
-| D = 64 的 V 一半仍用 128B swizzle | box 宽 32 元素只有 64 B，128B swizzle 的地址模式不对，O 错 |
-| `__syncthreads` 代替 cluster barrier | peer 的 TMA 或 leader 的 commit 可能在对方 `mbarrier.init` 之前到达 |
-| 一个 CTA 提前退出 | leader 的 MMA 还在读它的 smem、写它的 TMEM；或 multicast 落到已退出的 CTA |
+| The peer also issues MMAs | Every block is computed twice, S/O are written twice: wrong results or a hang |
+| The peer also does `arrive_expect_tx` on the same leader barrier | The tx byte count doubles and there is one more arrive: the phase completes early or never completes |
+| The commit is not multicast (`tcgen05_commit` of `cta_group::1`) | Mixing cta_groups is not allowed at compile time; even with a mask that contains only the leader, the peer's softmax never sees `s_full` |
+| K split by D, V split by key | The directions are swapped: B is always split by **N**; the N of QKᵀ is the key, the N of PV is the column of D |
+| The V half at D = 64 still uses 128B swizzle | A 32-element box is only 64 B wide, so the 128B swizzle addressing is wrong, and O is wrong |
+| `__syncthreads` instead of a cluster barrier | The peer's TMA or the leader's commit can arrive before the other CTA's `mbarrier.init` |
+| One CTA exits early | The leader's MMA is still reading its smem and writing its TMEM; or a multicast lands on a CTA that has exited |
 
-## 5. 调度设计
+## 5. Schedule design
 
-### 5.1 角色与存储预算
+### 5.1 Roles and storage budget
 
-角色与 40 关步骤 3 相同（16 个 warp，`setmaxnreg` 192/80/48），只有 MMA warp 只在 leader 里工作：
+The roles are the same as lab 40 step 3 (16 warps, `setmaxnreg` 192/80/48), except that the MMA warp works only in the leader:
 
 | warp | leader | peer |
 |---|---|---|
-| 0–3、4–7 | softmax tile 0、tile 1 | 同左（自己的行） |
-| 8–11 | correction + epilogue | 同左 |
-| 12 | **MMA：两个 CTA 的全部 MMA** | 空闲（直接到收尾的 cluster barrier） |
-| 13 | TMA：自己的 Q、K/V 一半 | 同左 |
-| 14–15 | 空闲 | 空闲 |
+| 0–3, 4–7 | softmax tile 0, tile 1 | Same (its own rows) |
+| 8–11 | correction + epilogue | Same |
+| 12 | **MMA: all MMAs of both CTAs** | Idle (goes straight to the cluster barrier of the teardown) |
+| 13 | TMA: its own Q, half of K/V | Same |
+| 14–15 | Idle | Idle |
 
-每个 CTA 的 shared memory（1024 B 对齐余量另计）：
+Shared memory per CTA (the 1024 B alignment slack is extra):
 
 | | D = 128 | D = 64 |
 |---|---|---|
-| Q（2 个 tile，epilogue 时兼作 O 的暂存） | 64 KB | 32 KB |
-| K/V 环：一级 = 一个“一半” | 8 级 × 16 KB = 128 KB | 16 级 × 8 KB = 128 KB |
-| correction 的统计量 | 3 KB | 3 KB |
+| Q (2 tiles; also the O staging buffer in the epilogue) | 64 KB | 32 KB |
+| K/V ring: one stage = one "half" | 8 stages × 16 KB = 128 KB | 16 stages × 8 KB = 128 KB |
+| Correction statistics | 3 KB | 3 KB |
 
-环的字节数与 40 关一样，但级数翻倍（40 关 D = 128 是 4 级 × 32 KB）：同样的空间能提前装 4 块而不是 2 块。TMEM 与 40 关完全相同，两个 CTA 用同样的列（`cta_group::2` 的 alloc 保证两边拿到同一个基址）。
+The ring has the same bytes as lab 40, but twice as many stages (lab 40 at D = 128 has 4 stages × 32 KB): the same space can prefetch 4 blocks instead of 2. TMEM is exactly the same as lab 40, and both CTAs use the same columns (the `cta_group::2` alloc guarantees that both sides get the same base address).
 
-host 端（已写好）：Q 的 box [128 行][64]，K 的 box **[64 行][64]**，V 的 box D = 128 时 [128 行][64]、D = 64 时 **[128 行][32] + 64B swizzle**，O 的 box [32 行][64]。grid = (2 · ⌈N/512⌉, H, B)，cluster = (2, 1, 1)。
+Host side (already written): the Q box is [128 rows][64], the K box is **[64 rows][64]**, the V box is [128 rows][64] for D = 128 and **[128 rows][32] + 64B swizzle** for D = 64, and the O box is [32 rows][64]. grid = (2 · ⌈N/512⌉, H, B), cluster = (2, 1, 1).
 
-### 5.2 TMA：两个 CTA 装各自的一半，完成在 leader 的 barrier
+### 5.2 TMA: each CTA loads its own half, completion on the leader's barrier
 
 ```
-for t: (leader) arrive_expect_tx(q_full[t], 2 × 本 CTA 的 Q 字节)
-       tma_load_4d_cg2(sq(t), Q, rows(rank, t), → leader 的 q_full[t])
-for u = 0 .. 2·blocks − 1:                     # 偶数 K_{u/2}，奇数 V_{u/2}
-       wait 本 CTA 的 kv_empty[u % S]
-       (leader) arrive_expect_tx(kv_full[s], 2 × 一半的字节)
+for t: (leader) arrive_expect_tx(q_full[t], 2 × Q bytes of this CTA)
+       tma_load_4d_cg2(sq(t), Q, rows(rank, t), → leader's q_full[t])
+for u = 0 .. 2·blocks − 1:                     # even: K_{u/2}, odd: V_{u/2}
+       wait this CTA's kv_empty[u % S]
+       (leader) arrive_expect_tx(kv_full[s], 2 × bytes of one half)
        K: tma_load_4d_cg2(ring(s) + panel, K, x = 64·panel, row = 128j + 64·rank) × D/64
        V: tma_load_4d_cg2(ring(s), V, x = rank · D/2, row = 128j)
-drain: 再等 S 次 kv_empty（leader 的 multicast commit 全部到达后才能退出）
+drain: wait S more times on kv_empty (exit only after all of the leader's multicast commits have arrived)
 ```
 
-只有 leader arm，字节数是两个 CTA 的和。peer 的 complete_tx 可能比 leader 的 `arrive_expect_tx` 先到：tx 计数暂时为负是允许的，相位仍要等 leader 那 1 次 arrive（33 关 NOTES）。
+Only the leader arms, and the byte count is the sum over both CTAs. The peer's complete_tx may arrive before the leader's `arrive_expect_tx`: a temporarily negative tx count is allowed, and the phase still waits for the leader's 1 arrive (lab 33 NOTES).
 
-### 5.3 MMA：leader 一个线程替两个 CTA 发射
+### 5.3 MMA: one leader thread issues for both CTAs
 
-顺序与 40 关相同（`PV⁰_j QK⁰_{j+1} PV¹_j QK¹_{j+1}`），每条都是 pair MMA，每个 commit 都 multicast 到两个 CTA（mask `0b11`）：
+The order is the same as lab 40 (`PV⁰_j QK⁰_{j+1} PV¹_j QK¹_{j+1}`); each one is a pair MMA, and each commit is multicast to both CTAs (mask `0b11`):
 
 ```
-序幕: wait kv_full(K₀); for t: wait q_full[t]; QK^t_0 → commit s_full[t] (both)
-      commit kv_empty[0] (both)
+prologue: wait kv_full(K₀); for t: wait q_full[t]; QK^t_0 → commit s_full[t] (both)
+          commit kv_empty[0] (both)
 for j:
   wait kv_full(V_j), kv_full(K_{j+1})
   for t (j < blocks_t):
-    wait_cluster p_ready[t] (phase j)      ← 两个 CTA 共 512 次 arrive
-    PV^t_j = P^t (两边 TMEM) · V_j (两边各一半列)
+    wait_cluster p_ready[t] (phase j)      ← 512 arrives in total from both CTAs
+    PV^t_j = P^t (TMEM of both) · V_j (each side holds half the columns)
     (t = 1) commit kv_empty[V_j] (both)
     j+1 < blocks_t ? QK^t_{j+1} + commit s_full[t] (both) : commit o_full[t] (both)
   commit kv_empty[K_{j+1}] (both)
 ```
 
-### 5.4 barrier 地图
+### 5.4 Barrier map
 
-同一个 `Barriers` 结构在两个 CTA 的同一偏移各有一份；表中 L = leader，P = peer。
+The same `Barriers` struct has one copy at the same offset in each of the two CTAs; in the table, L = leader and P = peer.
 
-| barrier | 用哪份 | count / 每相位 | 谁 arrive | 谁 wait |
+| barrier | Which copy | count / per phase | Who arrives | Who waits |
 |---|---|---|---|---|
-| `q_full[t]` | L | 1 + tx | L 的 TMA（expect_tx 两边字节）；两边 TMA 的 complete_tx | L 的 MMA |
-| `kv_full[s]` | L | 1 + tx | 同上 | L 的 MMA |
-| `kv_empty[s]` | L 和 P | 1 | L 的 MMA：`commit.cta_group::2.multicast 0b11` | 各自的 TMA |
-| `s_full[t]` | L 和 P | 1 | L 的 MMA：multicast commit | 各自的 softmax t |
-| `p_ready[t]` | L | 2 × 256 | 两边的 softmax t（128）+ correction（128），远程 arrive | L 的 MMA（`try_wait.acquire.cluster`） |
-| `o_full[t]` | L 和 P | 1 | L 的 MMA：multicast commit | 各自的 correction（epilogue） |
-| `stats_full[t]`、`final_full[t]` | 各自 | 128 | 本 CTA 的 softmax t | 本 CTA 的 correction |
+| `q_full[t]` | L | 1 + tx | L's TMA (expect_tx with the bytes of both sides); complete_tx of both sides' TMA | L's MMA |
+| `kv_full[s]` | L | 1 + tx | Same as above | L's MMA |
+| `kv_empty[s]` | L and P | 1 | L's MMA: `commit.cta_group::2.multicast 0b11` | Each side's own TMA |
+| `s_full[t]` | L and P | 1 | L's MMA: multicast commit | Each side's own softmax t |
+| `p_ready[t]` | L | 2 × 256 | Softmax t (128) + correction (128) of both sides, remote arrive | L's MMA (`try_wait.acquire.cluster`) |
+| `o_full[t]` | L and P | 1 | L's MMA: multicast commit | Each side's own correction (epilogue) |
+| `stats_full[t]`, `final_full[t]` | Each its own | 128 | This CTA's softmax t | This CTA's correction |
 
 ```
-         leader CTA                                   peer CTA
- ┌──────────────────────────────┐            ┌──────────────────────────────┐
- │ TMA ──expect_tx──► q/kv_full ◄──complete_tx── TMA                        │
- │                     │ wait                │                              │
- │                    MMA ══ pair MMA ══════════► (smem 读 Q、K/V 一半；写 TMEM) │
- │  commit multicast ─┼─► s_full, o_full, kv_empty ◄─┼── 同一条 commit 也到 peer │
- │                     ▲                     │                              │
- │  softmax/corr ──arrive── p_ready ◄═══remote arrive═══ softmax/corr       │
- └──────────────────────────────┘            └──────────────────────────────┘
+             leader CTA                                     peer CTA
+ ┌────────────────────────────────────┐       ┌────────────────────────────────────┐
+ │ TMA ──expect_tx──► q/kv_full ◄─────┼───────┼── complete_tx ── TMA               │
+ │                       │ wait       │       │                                    │
+ │  ┌────────────────────┘            │       │                                    │
+ │  ▼                                 │       │                                    │
+ │ MMA ═══════ pair MMA ══════════════╪═══════╪══► reads Q and the K/V half        │
+ │ │ ▲                                │       │    from smem; writes TMEM          │
+ │ │ │ wait                           │       │                                    │
+ │ │ └──── p_ready ◄══════════════════╪═══════╪═══ remote arrive ═══ softmax/corr  │
+ │ │        ▲                         │       │                                    │
+ │ │        └─arrive─ softmax/corr    │       │                                    │
+ │ │ commit multicast                 │       │                                    │
+ │ ├──► s_full, o_full, kv_empty      │       │                                    │
+ │ └──────────────────────────────────┼───────┼──► s_full, o_full, kv_empty        │
+ │                                    │       │    (same commit also reaches peer) │
+ └────────────────────────────────────┘       └────────────────────────────────────┘
 ```
 
-**setup**：thread 0 初始化 + `fence.mbarrier_init.release.cluster`；两边 warp 0 `tcgen05.alloc.cta_group::2`（512 列）+ relinquish；`fence::before` → `barrier.cluster` → `fence::after`。cluster barrier 保证对方的 barrier 已初始化之后才有人给它发信号。
+**Setup**: thread 0 initializes + `fence.mbarrier_init.release.cluster`; warp 0 on both sides does `tcgen05.alloc.cta_group::2` (512 columns) + relinquish; `fence::before` → `barrier.cluster` → `fence::after`. The cluster barrier guarantees that nobody signals the other CTA's barriers before they are initialized.
 
-**收尾（drain）**：每个 CTA 在退出前必须收完别人发给它的东西：
+**Teardown (drain)**: before it exits, each CTA must receive everything others send to it:
 
-| 发给谁 | 什么 | 谁保证收完 |
+| Sent to | What | Who guarantees it has all arrived |
 |---|---|---|
-| peer、leader | `kv_empty` 的 multicast commit | 各自 TMA 的 drain（多等 S 次） |
-| peer、leader | `s_full`、`o_full` 的 multicast commit | softmax 等过每一个 `s_full` 相位，correction 等过 `o_full` |
-| leader | peer 的远程 arrive（`p_ready`）、peer 的 TMA complete_tx | leader 的 MMA 等过每一个 `p_ready` 和 `kv_full` 相位 |
-| peer | leader 的 MMA 读 peer 的 smem、写 peer 的 TMEM | `o_full` 是最后一个 commit，跟踪全部此前的 MMA |
+| peer, leader | Multicast commits of `kv_empty` | Each side's TMA drain (waits S more times) |
+| peer, leader | Multicast commits of `s_full`, `o_full` | Softmax has waited on every `s_full` phase, correction on `o_full` |
+| leader | The peer's remote arrives (`p_ready`), the peer's TMA complete_tx | The leader's MMA has waited on every `p_ready` and `kv_full` phase |
+| peer | The leader's MMA reads the peer's smem and writes the peer's TMEM | `o_full` is the last commit and tracks all earlier MMAs |
 
-然后 `fence::before` → `barrier.cluster` → warp 0 `fence::after` + `tcgen05.dealloc.cta_group::2`。
+Then `fence::before` → `barrier.cluster` → warp 0 does `fence::after` + `tcgen05.dealloc.cta_group::2`.
 
-### 5.5 causal
+### 5.5 Causal
 
-pair tile t 的最后一行是 `q0 + 256t + 255`，它走的块数是 `min(⌈N/128⌉, ⌊(q0 + 256t + 255)/128⌋ + 1)`，两个 CTA 必须一致（它们共用 MMA）。tile 0 比 tile 1 少两块；MMA 在 `j ≥ blocks_0` 时跳过 tile 0。每个 pair tile 里 leader 的 128 行最后一块全被 mask（与 40 关 tile 0 相同，m 仍从前面的块得到，不会产生 NaN）。mask 本身完全沿用 40 关，按本 CTA 的 `qt` 与行号计算。
+The last row of pair tile t is `q0 + 256t + 255`, and the number of blocks it walks is `min(⌈N/128⌉, ⌊(q0 + 256t + 255)/128⌋ + 1)`; the two CTAs must agree on it (they share the MMA). Tile 0 walks two fewer blocks than tile 1; the MMA skips tile 0 when `j ≥ blocks_0`. In each pair tile, the last block of the leader's 128 rows is fully masked (the same as tile 0 in lab 40; m still comes from earlier blocks, so no NaN appears). The mask itself is taken over from lab 40 unchanged and is computed from this CTA's `qt` and row index.
 
-### 5.6 时间线（稳态，D = 128，一格约 250 ns）
+### 5.6 Timeline (steady state, D = 128, one cell ≈ 250 ns)
 
 ```
 leader MMA  │PV⁰QK⁰│      │PV¹QK¹│      │PV⁰QK⁰│      │PV¹QK¹│
-Tensor(L,P) │██████│      │██████│      │██████│      │██████│     ← 两个 SM 同时执行同一条 pair MMA
-softmax 0 L │      │ld max exp exp exp P │      │ld max exp exp exp P│
-softmax 0 P │      │ld max exp exp exp P │      │ld max exp exp exp P│  ← 两边都 arrive 后 PV⁰ 才能发
-softmax 1 L │ exp P│      │ld max exp exp exp P│      │ld max …
-softmax 1 P │ exp P│      │ld max exp exp exp P│      │ld max …
-              ↑p_ready⁰ = 两个 CTA 中较晚的那一个 + 远程 arrive 的延迟
+Tensor(L,P) │██████│      │██████│      │██████│      │██████│     ← both SMs execute the same pair MMA at the same time
+softmax 0 L │      │ld max exp exp exp P│      │ld max exp exp exp P│
+softmax 0 P │      │ld max exp exp exp P│      │ld max exp exp exp P│  ← PV⁰ can issue only after both sides arrive
+softmax 1 L │  … exp exp P│      │ld max exp exp exp P│      │ld max …
+softmax 1 P │  … exp exp P│      │ld max exp exp exp P│      │ld max …
+                                        ↑ p_ready⁰ = the later of the two CTAs + remote arrive latency
 ```
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-骨架里 40 关的全部内容（softmax、correction、epilogue、角色划分、`setmaxnreg`、host 端 tensor map、dispatch）都已写好。`p.step` 选择 `Config<D, 1|2|3>`；三步是**同一个 kernel 逐步补全**。
+Everything from lab 40 in the skeleton (softmax, correction, epilogue, role split, `setmaxnreg`, host-side tensor maps, dispatch) is already written. `p.step` selects `Config<D, 1|2|3>`; the three steps **complete the same kernel one piece at a time**.
 
-### 步骤 1 · TODO(1a)–(1f)：pair QKᵀ
+### Step 1 · TODO(1a)–(1f): pair QKᵀ
 
-- 1a：host 端的 grid 与 `lab::launch_cluster`（§5.1）；
-- 1b：setup 与收尾：pair TMEM 的分配/释放、cluster barrier（§5.4）；
-- 1c：`tile_row`：CTA r 的 tile t 从哪一行开始（§3.1）；
-- 1d：TMA 装 Q 和 K 的一半（§5.2）；
-- 1e：`mma_qk_pair`（§4.2）；
-- 1f：MMA 序幕的 multicast commit（§5.3）。
+- 1a: the host-side grid and `lab::launch_cluster` (§5.1);
+- 1b: setup and teardown: allocation/release of pair TMEM, cluster barriers (§5.4);
+- 1c: `tile_row`: the first row of tile t of CTA r (§3.1);
+- 1d: TMA loads of Q and the half of K (§5.2);
+- 1e: `mma_qk_pair` (§4.2);
+- 1f: the multicast commit in the MMA prologue (§5.3).
 
-这一步只算第一个 K/V 块：softmax 线程把 `scale · S` 写进 probe（已写好），检查的是 `[B, H, N, min(N,128)]` 的 S，覆盖 cluster 中全部四个 tile 和 K 的两半。
+This step computes only the first K/V block: the softmax threads write `scale · S` into the probe (already written), and the check is on S of shape `[B, H, N, min(N,128)]`, covering all four tiles of a cluster and both halves of K.
 
 ```bash
-./lab check 42 --step 1 --case two_tiles      # 第一个 pair tile = leader + peer
-./lab check 42 --step 1                       # 含 3 个 cluster、只有 3 个 tile 有效等 case
+./lab check 42 --step 1 --case two_tiles      # the first pair tile = leader + peer
+./lab check 42 --step 1                       # includes cases such as 3 clusters, or only 3 valid tiles
 ```
 
-### 步骤 2 · TODO(2a)–(2e)：完整的 2-CTA 流水
+### Step 2 · TODO(2a)–(2e): the full 2-CTA pipeline
 
-- 2a：TMA 装 V 的一半（§5.2）；
-- 2b：`mma_pv_pair`，含 D = 64 的 64B swizzle（§4.3）；
-- 2c：MMA 主循环（§5.3）；
-- 2d：`arrive_leader` 的步骤 2 分支（`.release.cluster`）与 `kPReadyArrivals`（§4.4、§5.4）；
-- 2e：causal 的块数（§5.5）。
+- 2a: TMA load of the half of V (§5.2);
+- 2b: `mma_pv_pair`, including the 64B swizzle for D = 64 (§4.3);
+- 2c: the MMA main loop (§5.3);
+- 2d: the step-2 branch of `arrive_leader` (`.release.cluster`) and `kPReadyArrivals` (§4.4, §5.4);
+- 2e: the causal block count (§5.5).
 
 ```bash
-./lab check 42 --step 2 --case peer_position   # peer 的 P、V 列的一半
-./lab check 42 --step 2 --case position        # D = 64：64B swizzle
+./lab check 42 --step 2 --case peer_position   # the peer's P, the half of the V columns
+./lab check 42 --step 2 --case position        # D = 64: 64B swizzle
 ./lab check 42 --step 2
 ./lab bench 42 --step 2 --case perf
 ```
 
-### 步骤 3 · TODO(3)：跨 CTA 交接的代价
+### Step 3 · TODO(3): the cost of the cross-CTA handoff
 
-先看现象：
+First look at the symptom:
 
 ```bash
-./lab sass 42        # 在 artifacts/sass/ 的完整 SASS 里找 MEMBAR.ALL.GPU 出现在哪里
+./lab sass 42        # in the full SASS under artifacts/sass/, find where MEMBAR.ALL.GPU appears
 ./lab bench 42 --step 2 --case perf
 ```
 
-然后在 `arrive_leader` 的步骤 3 分支换成不带 GPU 范围 fence 的远程 arrive（§4.4），说出为什么本关可以这样做。
+Then, in the step-3 branch of `arrive_leader`, switch to a remote arrive without the GPU-scope fence (§4.4), and say why this lab can do so.
 
 ```bash
 ./lab check 42 --step 3
@@ -350,122 +358,122 @@ softmax 1 P │ exp P│      │ld max exp exp exp P│      │ld max …
 ./lab bench 42 --case perf_causal
 ./lab bench 42 --case perf_d64
 ./lab bench 42 --case perf_8k
-./lab bench 41 --solution --case perf          # 与 1-CTA（41 关）对比
+./lab bench 41 --solution --case perf          # compare with 1-CTA (lab 41)
 ```
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| Symptom | Likely cause |
 |---|---|
-| 步骤 1 `TIMEOUT` | 只有 leader 装了 K/Q，或 peer 的 TMA 用了自己的 barrier（必须是 `map_shared_rank(…, 0)`）；`arrive_expect_tx` 的字节数不是两边之和；peer 也 arm 了 |
-| 步骤 1 只有行 128–255、384–511 错 | `tile_row` 的映射；或 peer 的 Q 装到了别的偏移 |
-| 步骤 1 key 64–127 那一半错 | K 的一半的行坐标（`+ 64·rank`）；`b_off` 用了 128 行的 panel |
-| 步骤 1/2 在 kernel 结束时挂起或报非法地址 | 收尾少了 cluster barrier 或 drain；peer 提前退出 |
-| 步骤 2 `TIMEOUT` | `kPReadyArrivals` 不是 512；leader 用 `mbar_wait`/peer 的 arrive 打到了本 CTA 的 `p_ready`；`o_full`/`s_full` 没 multicast |
-| 步骤 2 D = 128 对、D = 64 的 O 错 | V 一半的 swizzle 或描述符：64B swizzle、行宽 64 B、K 方向每 16 行前进 1024 B |
-| 步骤 2 O 的后一半列错 | V 的 x 坐标（`rank · D/2`）；idesc 的 N 用了 D/2 |
-| causal 只有后面的 cluster 错 | 块数用了 CTA 的行而不是 pair tile 的最后一行 |
-| 步骤 3 没有变快 | 仍在用 `.release.cluster`；`./lab sass 42` 看 MEMBAR |
+| Step 1 `TIMEOUT` | Only the leader loads K/Q, or the peer's TMA uses its own barrier (it must be `map_shared_rank(…, 0)`); the byte count of `arrive_expect_tx` is not the sum over both sides; the peer also arms |
+| Step 1: only rows 128–255, 384–511 are wrong | The `tile_row` mapping; or the peer's Q is loaded at a different offset |
+| Step 1: the half with keys 64–127 is wrong | The row coordinate of the K half (`+ 64·rank`); `b_off` uses a 128-row panel |
+| Step 1/2 hangs at the end of the kernel or reports an illegal address | The teardown is missing a cluster barrier or the drain; the peer exits early |
+| Step 2 `TIMEOUT` | `kPReadyArrivals` is not 512; the leader uses `mbar_wait`, or the peer's arrive goes to its own CTA's `p_ready`; `o_full`/`s_full` are not multicast |
+| Step 2: D = 128 is right, O at D = 64 is wrong | The swizzle or descriptor of the V half: 64B swizzle, 64 B row width, advancing 1024 B per 16 rows in the K direction |
+| Step 2: the second half of the O columns is wrong | The x coordinate of V (`rank · D/2`); the N of idesc uses D/2 |
+| Causal: only later clusters are wrong | The block count uses the CTA's rows instead of the last row of the pair tile |
+| Step 3 is not faster | Still using `.release.cluster`; check MEMBAR with `./lab sass 42` |
 
-## 7. 性能
+## 7. Performance
 
-### 7.1 相对库基线与 41 关
+### 7.1 Against the library baseline and lab 41
 
-3 号卡实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好；两次运行的范围）：
+Measured on GPU 3 (CUDA Graph; `vs cudnn` = cuDNN time / time of this version, higher is better; range over two runs):
 
-| 版本 | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
+| Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|
-| 41 关步骤 3（1-CTA，对照） | ≈ 0.94–0.95× | ≈ 1.04–1.05× | ≈ 0.95× | ≈ 0.92× |
-| 步骤 2（2-CTA，`.release.cluster`） | ≈ 0.73–0.74× | ≈ 0.79–0.80× | ≈ 0.80–0.81× | ≈ 0.71–0.75× |
-| 步骤 3（2-CTA，`.release.cta`） | ≈ 0.90–0.92× | ≈ 0.96× | ≈ 0.87–0.88× | ≈ 0.89–0.90× |
-| 步骤 3 相对 41 关的速度 | ≈ 0.96–0.99× | ≈ 0.93–0.95× | ≈ 0.93–0.94× | ≈ 0.98–0.99× |
-| FA4（`flash_attn.cute`） | ≈ 1.15–1.16× | ≈ 1.33–1.35× | ≈ 1.14–1.16× | ≈ 1.08–1.10× |
+| Lab 41 step 3 (1-CTA, reference) | ≈ 0.94–0.95× | ≈ 1.04–1.05× | ≈ 0.95× | ≈ 0.92× |
+| Step 2 (2-CTA, `.release.cluster`) | ≈ 0.73–0.74× | ≈ 0.79–0.80× | ≈ 0.80–0.81× | ≈ 0.71–0.75× |
+| Step 3 (2-CTA, `.release.cta`) | ≈ 0.90–0.92× | ≈ 0.96× | ≈ 0.87–0.88× | ≈ 0.89–0.90× |
+| Speed of step 3 relative to lab 41 | ≈ 0.96–0.99× | ≈ 0.93–0.95× | ≈ 0.93–0.94× | ≈ 0.98–0.99× |
+| FA4 (`flash_attn.cute`) | ≈ 1.15–1.16× | ≈ 1.33–1.35× | ≈ 1.14–1.16× | ≈ 1.08–1.10× |
 
-你的步骤 3 在四个 perf case 上都达到 cuDNN 的约 0.8 倍以上，就说明 2-CTA 的流水是对的。要点：
+If your step 3 reaches at least about 0.8× cuDNN on all four perf cases, your 2-CTA pipeline is right. Key points:
 
-- 步骤 2 → 3：约 1.2 倍，全部来自 §4.4 的 fence。
-- 非 causal 的 D = 128（`perf`、`perf_8k`）与 41 关基本打平；D = 64 和 causal 仍然输（§7.4）。
-- 2-CTA 本身没有让本关超过 41 关。下面三节解释为什么，以及它需要什么条件才能赢。
+- Step 2 → 3: about 1.2 times, all from the fence of §4.4.
+- Non-causal D = 128 (`perf`, `perf_8k`) roughly ties with lab 41; D = 64 and causal still lose (§7.4).
+- 2-CTA by itself does not make this lab beat lab 41. The next three sections explain why, and what it needs to win.
 
-### 7.2 为什么 softmax 受 MUFU 限制时 2-CTA 输
+### 7.2 Why 2-CTA loses when softmax is MUFU-bound
 
-先用 40 关的 softmax（全部 128 个 `exp2` 都走 MUFU，条件 rescale 也没有）做同样的 2-CTA（维护者实验，插桩代码不在仓库中；`perf`，全部 CTA 平均）：
+First, the same 2-CTA with the lab 40 softmax (all 128 `exp2`s on MUFU, and no conditional rescale) (a maintainer experiment; the instrumentation code is not in the repository; `perf`, averaged over all CTAs):
 
-| 指标 | 40 关（1-CTA） | 40 关 softmax + 2-CTA |
+| Metric | Lab 40 (1-CTA) | Lab 40 softmax + 2-CTA |
 |---|---|---|
-| 相对 cuDNN | ≈ 0.84× | ≈ 0.75× |
-| CTA 主循环（32 块） | ≈ 69.5 µs | ≈ 78 µs |
-| 每块的周期（时钟 ≈ 1.62 / 1.66 GHz） | ≈ 3500 | ≈ 4050 |
-| Tensor Core 忙碌（NCU，锁频） | ≈ 57% | ≈ 51% |
-| MUFU 指令数 | 33.8 M | 33.8 M |
-| L2→SM 读（`lts__t_sectors_srcunit_tex_op_read`） | ≈ 1.49 GB | ≈ 1.01 GB（≈ 0.68×；推导 0.53×） |
+| Relative to cuDNN | ≈ 0.84× | ≈ 0.75× |
+| CTA main loop (32 blocks) | ≈ 69.5 µs | ≈ 78 µs |
+| Cycles per block (clock ≈ 1.62 / 1.66 GHz) | ≈ 3500 | ≈ 4050 |
+| Tensor Core busy (NCU, locked clocks) | ≈ 57% | ≈ 51% |
+| MUFU instruction count | 33.8 M | 33.8 M |
+| L2→SM reads (`lts__t_sectors_srcunit_tex_op_read`) | ≈ 1.49 GB | ≈ 1.01 GB (≈ 0.68×; derived 0.53×) |
 
-链被 `exp2` 拉长时，MMA 一侧省下的资源用不上，而两个 SM 被 pair MMA 锁在一起：一个 tile 的 PV 要等两个 CTA 中较晚的 softmax，任何一边的抖动都推迟两个 tile 的交错。每块多出的约 500 周期我们没有完全定位（少量插桩就让差距缩到约 3%），上面是假设，不是测量结论。
+When `exp2` stretches the chain, the resources saved on the MMA side go unused, while the pair MMA locks the two SMs together: the PV of a tile has to wait for the later of the two CTAs' softmax, and jitter on either side delays the interleaving of both tiles. We did not fully locate the extra ~500 cycles per block (a small amount of instrumentation already shrinks the gap to about 3%); the above is a hypothesis, not a measured conclusion.
 
-一个**只用于测时、结果不正确**的实验指出了方向：softmax 只对一半元素做 `MUFU.EX2`、另一半换成一条 FMA。40 关的主循环从 69.6 降到 61.2 µs 后不再变短（只做 1/4、1/128 也一样），2-CTA 从 78.2 降到 56.4 µs、再到约 55 µs：softmax 足够快时，1-CTA 被 MMA 一侧（QKᵀ 占满 shared memory 带宽，§3.2）卡住，2-CTA 不会，约快 9–12%。
+An experiment that is **for timing only and gives wrong results** points the way: softmax does `MUFU.EX2` on only half of the elements and replaces the other half with one FMA. The lab 40 main loop drops from 69.6 to 61.2 µs and then stops getting shorter (doing only 1/4 or 1/128 is the same), while 2-CTA drops from 78.2 to 56.4 µs and then to about 55 µs: once softmax is fast enough, 1-CTA is held back by the MMA side (QKᵀ saturates shared memory bandwidth, §3.2), 2-CTA is not, and it is about 9–12% faster.
 
-### 7.3 换上 41 关的 softmax
+### 7.3 Switching to the lab 41 softmax
 
-41 关的 softmax 是真实的版本：16 对列中 3 对走多项式（FMA 流水线上约 10 条指令一对），其余走 MUFU；条件 rescale 让 correction 大多数块什么都不做。主循环（`perf`，全部 CTA 平均）：
+The lab 41 softmax is the real version: 3 of every 16 column pairs take the polynomial path (about 10 instructions per pair on the FMA pipeline), the rest take MUFU; conditional rescale means correction does nothing in most blocks. Main loop (`perf`, averaged over all CTAs):
 
-| | 41 关（1-CTA） | 本关步骤 3 |
+| | Lab 41 (1-CTA) | This lab, step 3 |
 |---|---|---|
-| CTA 主循环（32 块），D = 128 | ≈ 61.4 µs | ≈ 61.4 µs（打平） |
-| 同上，D = 64（`perf_d64`） | ≈ 52.5 µs | ≈ 53.8 µs |
-| setup / 收尾 | ≈ 0.45 / 1.1 µs | ≈ 1.0 / 1.8 µs |
+| CTA main loop (32 blocks), D = 128 | ≈ 61.4 µs | ≈ 61.4 µs (tie) |
+| Same, D = 64 (`perf_d64`) | ≈ 52.5 µs | ≈ 53.8 µs |
+| Setup / teardown | ≈ 0.45 / 1.1 µs | ≈ 1.0 / 1.8 µs |
 
-- 与 41 关相比，主循环的差距从 2-CTA 版 40 关的约 12% 缩到 0。软件 `exp2` 仍要在 FMA 流水线上做事，softmax 没有快到假实验那样，所以 MMA 一侧的余量只够抵消 pair 的耦合，还不能变成收益。
-- 剩下的约 1–3%（上限接近噪声）来自每个 CTA 一次性的开销：setup 整体多约 0.55 µs（推测主要是 `cta_group::2` 的 TMEM 分配协议与 cluster barrier，未单独测），收尾多一次 cluster barrier 与 `dealloc.cta_group::2`，一对 CTA 要同时退出才能放进下一个 cluster。CTA 寿命约 65 µs，每个 CTA 多约 1.2 µs。persistent kernel（43 关）只付一次这笔开销。
-- **多项式比例要不要重调**：2-CTA 每个 SM 的 MMA 与 shared memory 负担更轻，平衡点可能移动。实测（`kPolyPairs` = 2、3、4、5、6）：D = 128 时 3、4、5 在噪声内，2 和 6 变慢；D = 64 时 4 比 3 快约 3%（主循环 53.8 → 51.8 µs，`perf_d64` ≈ 0.81 → 0.785 ms），但 4 让 causal 的 D = 64 kernel 在 192 个寄存器下溢出（`./lab sass` 的 STACK 24）。答案保留 41 关的 3。τ = 8 不改：它由 FP16 的上限决定（41 关 §3.5），不是性能参数。
+- Compared with lab 41, the main-loop gap shrinks from about 12% (2-CTA with the lab 40 softmax) to 0. The software `exp2` still has work to do on the FMA pipeline, and softmax is not as fast as in the fake experiment, so the headroom on the MMA side is only enough to offset the coupling of the pair, not to turn into a gain.
+- The remaining ~1–3% (the upper end is close to noise) comes from one-time costs per CTA: the whole setup takes about 0.55 µs more (presumably mostly the `cta_group::2` TMEM allocation protocol and the cluster barrier; not measured separately), the teardown adds one cluster barrier and `dealloc.cta_group::2`, and a CTA pair must exit together before the next cluster can be placed. The CTA lifetime is about 65 µs, and each CTA costs about 1.2 µs more. A persistent kernel (lab 43) pays this cost only once.
+- **Should the polynomial ratio be retuned?** With 2-CTA the MMA and shared memory load per SM is lighter, so the balance point may move. Measured (`kPolyPairs` = 2, 3, 4, 5, 6): at D = 128, 3, 4 and 5 are within noise, while 2 and 6 are slower; at D = 64, 4 is about 3% faster than 3 (main loop 53.8 → 51.8 µs, `perf_d64` ≈ 0.81 → 0.785 ms), but 4 makes the causal D = 64 kernel spill under 192 registers (STACK 24 in `./lab sass`). The solution keeps lab 41's 3. τ = 8 is not changed: it is set by the FP16 upper bound (lab 41 §3.5), not a performance parameter.
 
-### 7.4 1-CTA 还是 2-CTA：按配置选择
+### 7.4 1-CTA or 2-CTA: choose by configuration
 
-| 配置 | 实测（步骤 3 相对 41 关） | 原因 | 选择 |
+| Configuration | Measured (step 3 relative to lab 41) | Reason | Choice |
 |---|---|---|---|
-| 非 causal，D = 128 | ≈ 0.96–0.99× | 主循环打平，每 CTA 多约 1.2 µs 的固定开销 | 非 persistent 时差别接近噪声；persistent 后可能倾向 2-CTA（未经测试的预测，本课没有测 persistent + 2-CTA） |
-| 非 causal，D = 64 | ≈ 0.93–0.94× | 每块 MMA 只有一半，MMA 一侧更不是瓶颈 | 1-CTA |
-| causal | ≈ 0.93–0.95× | 一个 cluster 的 512 行一起前进，对角浪费比 1-CTA 多约 2 块 / 512 行（§3.3） | 1-CTA |
+| Non-causal, D = 128 | ≈ 0.96–0.99× | The main loop ties, and each CTA pays about 1.2 µs of fixed cost | Without persistence the difference is close to noise; with persistence it may favor 2-CTA (an untested prediction; this course does not measure persistent + 2-CTA) |
+| Non-causal, D = 64 | ≈ 0.93–0.94× | Each block has only half the MMA, so the MMA side is even less of a bottleneck | 1-CTA |
+| Causal | ≈ 0.93–0.95× | The 512 rows of a cluster advance together, so the diagonal waste is about 2 blocks / 512 rows more than 1-CTA (§3.3) | 1-CTA |
 
-这与 FA4 的选择一致（`flash_attn/cute/interface.py` 中的 `use_2cta_instrs`）：只对**非 causal**、head_dim 补齐到 128 或 192、head_dim_v = 128（以及 hdim 256 的专用 kernel）打开；D = 64 与 causal 不用（代码只写了条件，上表是我们的解释）。FA4 的 `_TUNING_CONFIG` 的键第一项就是 `use_2cta_instrs`：2-CTA 的 D = 128 非 causal 用 softmax 184 个寄存器、`ex2_emu_freq = 10`。FA4 还有本课没有做的部分（persistent、P 分段交给 MMA 等）；我们没有单独测 FA4 自身 1-CTA 与 2-CTA 的差别。
+This matches FA4's choice (`use_2cta_instrs` in `flash_attn/cute/interface.py`): it is turned on only for **non-causal**, head_dim padded to 128 or 192, head_dim_v = 128 (plus a dedicated kernel for hdim 256); it is not used for D = 64 or causal (the code only states the conditions; the table above is our interpretation). The first item of the key of FA4's `_TUNING_CONFIG` is `use_2cta_instrs`: the 2-CTA D = 128 non-causal configuration uses 184 softmax registers and `ex2_emu_freq = 10`. FA4 also has parts this course does not do (persistent, handing P to the MMA in segments, etc.); we did not separately measure the difference between FA4's own 1-CTA and 2-CTA.
 
-本关的 `run()` **不**按配置切换：每个 case 都走 pair 路径，以便验证它；按上表，一个生产用的 `run()` 只会在非 causal 的 D = 128 上考虑 2-CTA，而本关测得的差别还不足以证明这样做值得。
+This lab's `run()` does **not** switch by configuration: every case goes through the pair path so that it gets verified; by the table above, a production `run()` would consider 2-CTA only for non-causal D = 128, and the difference measured in this lab is not enough to prove that it is worth it.
 
 ```bash
 ./lab profile 42 --case perf
 ```
 
-看 `sm__pipe_tensor_cycles_active`、`lts__t_sectors_srcunit_tex_op_read`（与 41 关比）和 `smsp__inst_executed_pipe_xu`。
+Look at `sm__pipe_tensor_cycles_active`, `lts__t_sectors_srcunit_tex_op_read` (compare with lab 41) and `smsp__inst_executed_pipe_xu`.
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. D = 128 时，leader 的 TMA 为 `kv_full[s]` arm 多少字节？`q_full[t]` 呢？如果 peer 也 arm 一次，会发生什么？
-2. pair PV 的 idesc 里 N 写 D 还是 D/2？为什么 QKᵀ 的 K 按 key 分、PV 的 V 却按列分？
-3. 为什么 `p_ready` 只用 leader 的那份，而 `s_full` 两边都用？`p_ready` 的 count 为什么是 512？
-4. peer 的 MMA warp 什么都不做就走到收尾的 cluster barrier。peer 在什么时候之后才能安全地 dealloc TMEM、退出？
-5. 把 `p_ready` 的 arrive 换成 `.release.cta` 为什么在本关是可以接受的？举一个必须用 `.release.cluster` 的例子。
-6. 本关的 causal 比非 causal 相对 40 关输得更多。用 cluster c 走的块数解释。
+1. At D = 128, how many bytes does the leader's TMA arm on `kv_full[s]`? And on `q_full[t]`? What happens if the peer also arms once?
+2. In the idesc of the pair PV, is N written as D or D/2? Why is K for QKᵀ split by key, but V for PV split by column?
+3. Why does `p_ready` use only the leader's copy, while `s_full` uses both? Why is the count of `p_ready` 512?
+4. The peer's MMA warp does nothing and goes straight to the cluster barrier of the teardown. After what point can the peer safely dealloc TMEM and exit?
+5. Why is switching the arrive on `p_ready` to `.release.cta` acceptable in this lab? Give an example where `.release.cluster` is required.
+6. In this lab, causal loses more relative to lab 40 than non-causal. Explain with the number of blocks that cluster c walks.
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. 一半 = 64 key × 128 × 2 B = 16 KB；两个 CTA 共 32 KB。`q_full[t]`：2 × 128 × 128 × 2 B = 64 KB。peer 也 arm 会多一次 arrive（count 1 的相位会被 peer 的 arrive 提前完成，或下一相位多出一次）并多出 tx 字节：读到没装完的数据或挂起。
-2. N 写整个 D：硬件把 N 对半分给两个 CTA。`cta_group::2` 的 B 总是按 N 分；QKᵀ 的 N 是 key，PV 的 N 是 D 的列（key 是 PV 的 K 维度，每个 CTA 都要全部 128 个 key）。
-3. `p_ready` 的唯一消费者是 leader 的 MMA 线程，所以只需要 leader 那份，两边的生产者都往那里 arrive；`s_full` 的消费者是两边各自的 softmax，所以 commit multicast 到两边各一份。count = 2 个 CTA × (128 个 softmax 线程 + 128 个 correction 线程)。
-4. 收完发给它的全部信号并且 leader 的 MMA 不再读写它：它的 TMA 排空了 `kv_empty`，softmax 等过每个 `s_full`，correction 等过 `o_full`（最后一个 commit，跟踪此前全部 MMA，包括读 peer 的 Q、K/V 和写 peer 的 TMEM），然后两边过 cluster barrier。
-5. 形式上它不可接受：跨 CTA 的 `.release.cta` 与 `acquire.cluster` 不构成 synchronizes-with，TMEM 也不例外。有保证的只是 arrive 被计数、本线程的 `wait::st` 已完成它的 TMEM 写；其余依赖硬件行为，CUTLASS/FA4 也这样做，换来约 1.2 倍。若 peer 用普通 store 把数据写进 leader 的 shared memory（DSMEM），再 arrive 通知 leader 去读，就必须 `.release.cluster`（配合 leader 的 `.acquire.cluster`）。
-6. cluster c 的两个 pair tile 一起前进，时间由 tile 1 决定：4c + 4 块，两个 SM 都被占用。40 关同样的 512 行是两个 CTA，分别 4c + 2 和 4c + 4 块。N = 4096 平均每 512 行多约 2 块（≈ 6%）；tile 0 早停省不回来。
+1. One half = 64 keys × 128 × 2 B = 16 KB; both CTAs together 32 KB. `q_full[t]`: 2 × 128 × 128 × 2 B = 64 KB. If the peer also arms, there is one extra arrive (a phase with count 1 is completed early by the peer's arrive, or the next phase gets an extra one) and extra tx bytes: reading data that has not finished loading, or a hang.
+2. N is the whole D: the hardware splits N in half between the two CTAs. B of `cta_group::2` is always split by N; the N of QKᵀ is the key, and the N of PV is the column of D (the key is the K dimension of PV, and each CTA needs all 128 keys).
+3. The only consumer of `p_ready` is the leader's MMA thread, so only the leader's copy is needed, and the producers on both sides arrive there; the consumers of `s_full` are each side's own softmax, so the commit is multicast to one copy on each side. count = 2 CTAs × (128 softmax threads + 128 correction threads).
+4. After it has received every signal sent to it and the leader's MMA no longer reads or writes it: its TMA has drained `kv_empty`, softmax has waited on every `s_full`, correction has waited on `o_full` (the last commit, which tracks all earlier MMAs, including reading the peer's Q, K/V and writing the peer's TMEM); then both sides pass the cluster barrier.
+5. Formally it is not acceptable: a cross-CTA `.release.cta` and `acquire.cluster` do not form synchronizes-with, and TMEM is no exception. All that is guaranteed is that the arrive is counted and that this thread's `wait::st` has completed its TMEM writes; the rest relies on hardware behavior, CUTLASS/FA4 do the same, and it buys about 1.2 times. If the peer writes data into the leader's shared memory (DSMEM) with ordinary stores and then arrives to tell the leader to read it, it must use `.release.cluster` (paired with the leader's `.acquire.cluster`).
+6. The two pair tiles of cluster c advance together, and the time is set by tile 1: 4c + 4 blocks, with both SMs occupied. In lab 40 the same 512 rows are two CTAs walking 4c + 2 and 4c + 4 blocks. At N = 4096 that is about 2 more blocks per 512 rows on average (≈ 6%); stopping tile 0 early does not win it back.
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- Tri Dao 等，FlashAttention-4（2025）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
-  - `__init__`：`use_2cta_instrs`、`cta_group_size`、`mma_tiler_qk = (cta_group_size · m_block_size, n_block_size, D)`、`mma_tiler_pv`、`cluster_shape_mn = (2, 1)`；
-  - `_setup_attributes`：`smem_size_kv_per_stage = max(K, V) // cta_group_size`、`kv_stage`；
-  - `tma_copy_bytes[...] *= cta_group_size`（leader 一次 arm 两边的字节）；
-  - `softmax_correction_threads_cluster`（`p_ready` 对应的 pipeline 生产者数含两个 CTA）；
-  - 文件顶部 `_TUNING_CONFIG`（键的第一项是 `use_2cta_instrs`）；
-  - `flash_attn/cute/interface.py` 中 `use_2cta_instrs = (...)` 的条件。
-- CUTLASS：`third_party/cutlass/include/cutlass/arch/barrier.h`（`ClusterBarrier::arrive(smem_ptr, cta_id, pred)` 的远程 arrive 用默认语义）；`examples/77_blackwell_fmha` 的 FMHA 前向是 1-SM 的；2-SM 只用于 MLA（`kernel/sm100_fmha_mla_tma_warpspecialized.hpp`，`kIs2Sm`、`Allocator2Sm`）。
-- CuTe DSL（conda 环境中的 `nvidia_cutlass_dsl/.../cutlass/cute/arch/mbar.py`，`mbarrier_arrive` 的 `scope` 注释）。
-- PTX ISA 8.7：[tcgen05.mma（cta_group::2，A 在 TMEM）](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma)、[cp.async.bulk.tensor（.cta_group）](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor)、[mbarrier](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier)、[tcgen05 Memory Consistency Model](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model)、[Memory Consistency Model](https://docs.nvidia.com/cuda/parallel-thread-execution/#memory-consistency-model)（scope 与 morally strong）。
-- 本仓库：33 关讲义 §4–§5 与 `solutions/33_2cta_gemm/NOTES.md`（pair barrier、drain、racecheck 的误报）；40 关讲义 §3、§5、§7.2。
+- Zadouri et al., [FlashAttention-4](https://arxiv.org/abs/2603.05451v1) (2026); upstream implementation `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`:
+  - `__init__`: `use_2cta_instrs`, `cta_group_size`, `mma_tiler_qk = (cta_group_size · m_block_size, n_block_size, D)`, `mma_tiler_pv`, `cluster_shape_mn = (2, 1)`;
+  - `_setup_attributes`: `smem_size_kv_per_stage = max(K, V) // cta_group_size`, `kv_stage`;
+  - `tma_copy_bytes[...] *= cta_group_size` (the leader arms the bytes of both sides at once);
+  - `softmax_correction_threads_cluster` (the number of pipeline producers for `p_ready` includes both CTAs);
+  - `_TUNING_CONFIG` at the top of the file (the first item of the key is `use_2cta_instrs`);
+  - the condition of `use_2cta_instrs = (...)` in `flash_attn/cute/interface.py`.
+- CUTLASS: `third_party/cutlass/include/cutlass/arch/barrier.h` (the remote arrive of `ClusterBarrier::arrive(smem_ptr, cta_id, pred)` uses the default semantics); the FMHA forward in `examples/77_blackwell_fmha` is 1-SM; 2-SM is used only for MLA (`kernel/sm100_fmha_mla_tma_warpspecialized.hpp`, `kIs2Sm`, `Allocator2Sm`).
+- CuTe DSL (`nvidia_cutlass_dsl/.../cutlass/cute/arch/mbar.py` in the conda environment, the `scope` comment of `mbarrier_arrive`).
+- PTX ISA 8.7: [tcgen05.mma (cta_group::2, A in TMEM)](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma), [cp.async.bulk.tensor (.cta_group)](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor), [mbarrier](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier), [tcgen05 Memory Consistency Model](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model), [Memory Consistency Model](https://docs.nvidia.com/cuda/parallel-thread-execution/#memory-consistency-model) (scope and morally strong).
+- This repository: lab 33 lesson §4–§5 and `solutions/33_2cta_gemm/NOTES.md` (pair barriers, drain, racecheck false positives); lab 40 lesson §3, §5, §7.2.

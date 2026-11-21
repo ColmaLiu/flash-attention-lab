@@ -1,159 +1,159 @@
-# 00 · 访存与线程映射：矩阵转置
+# 00 · Memory access and thread mapping: matrix transpose
 
-> 部分 0 · 预备　｜　前置：无　｜　代码：[`students/00_transpose/kernel.cu`](../../students/00_transpose/kernel.cu)
+> Part 0 · Preliminaries | Prerequisites: none | Code: [`students/00_transpose/kernel.cu`](../../students/00_transpose/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-把一个 FP32 矩阵转置：`y[c][r] = x[r][c]`。转置没有任何计算，速度完全取决于**数据怎么在内存层级之间移动**。本关用四个版本，把同一个转置从 HBM 标称带宽的 15% 提到约 74%（约为连续拷贝速度的 90%）。做完后你应该能：
+Transpose an FP32 matrix: `y[c][r] = x[r][c]`. A transpose does no arithmetic, so its speed depends entirely on **how data moves between the levels of the memory hierarchy**. This lab builds four versions of the same transpose and raises it from 15% of nominal HBM bandwidth to about 74% (about 90% of the speed of a contiguous copy). When you finish, you should be able to:
 
-- 把线程坐标映射到数组下标，并判断一个 warp 的访存是否合并（coalesced）；
-- 用 shared memory 改变访问顺序，并计算 bank conflict；
-- 用 Little 定律解释“为什么每个线程要多搬一些数据”；
-- 用 `./lab bench` 和 `./lab profile` 验证以上判断，而不是靠猜。
+- map thread coordinates to array indices, and decide whether a warp's memory access is coalesced;
+- use shared memory to change the access order, and count bank conflicts;
+- use Little's law to explain "why each thread should move more data";
+- check all of the above with `./lab bench` and `./lab profile` instead of guessing.
 
-后面每一关的 attention kernel 都在反复做这几件事：把 Q、K、V 的 tile 从 HBM 搬进 shared memory，换一种顺序读出来，并让足够多的数据同时在路上。
+The attention kernels in every later lab do these same things over and over: move tiles of Q, K and V from HBM into shared memory, read them back in a different order, and keep enough data in flight at once.
 
-## 2. 动机：为什么从转置开始
+## 2. Motivation: why start with a transpose
 
-FlashAttention 论文的核心观察是：attention 的瓶颈不是浮点运算，而是 HBM 读写（论文第 2.2 节）。要理解这句话，得先知道“读写 HBM”在 GPU 上具体是什么：多少线程在发请求、请求怎样合并、需要多少请求同时在路上。转置是最小的、只有访存的 kernel，最适合把这些事情看清楚。
+The core observation of the FlashAttention paper is that the bottleneck of attention is not floating-point arithmetic but HBM reads and writes (paper Section 2.2). To understand this claim, you first need to know what "reading and writing HBM" means on a GPU: how many threads issue requests, how the requests are coalesced, and how many requests must be in flight at once. A transpose is the smallest kernel that does only memory access, so it is the best place to see these things clearly.
 
-## 3. 数学：下标与下界
+## 3. Math: indices and lower bound
 
-两个矩阵都是行主序（row-major），最后一维连续：
+Both matrices are row-major: the last dimension is contiguous.
 
 ```
-x: [rows, cols]   x[r][c] 的地址 = x + (r * cols + c)
-y: [cols, rows]   y[c][r] 的地址 = y + (c * rows + r)
+x: [rows, cols]   address of x[r][c] = x + (r * cols + c)
+y: [cols, rows]   address of y[c][r] = y + (c * rows + r)
 ```
 
-转置必须读 `rows*cols*4` 字节、写同样多字节。`big` case 是 8192×8192，读写共 512 MiB。B200 的 HBM3e 标称 8 TB/s，所以时间下界约 0.067 ms；在本机实测，最简单的 `y.copy_(x)`（连续拷贝，无转置）大约跑到 6.5 TB/s，这是更现实的上限。
+A transpose must read `rows*cols*4` bytes and write the same number of bytes. The `big` case is 8192×8192, so reads plus writes total 512 MiB. B200 HBM3e has a nominal bandwidth of 8 TB/s, so the lower bound on time is about 0.067 ms. On this machine, the simplest `y.copy_(x)` (a contiguous copy, no transpose) measures about 6.5 TB/s, which is a more realistic upper bound.
 
-`./lab bench` 报告的 `GB/s` 就是 `2 * rows * cols * 4 / 时间`，`% peak` 是它相对 8 TB/s 的比例。
+The `GB/s` that `./lab bench` reports is `2 * rows * cols * 4 / time`, and `% peak` is that value as a fraction of 8 TB/s.
 
-## 4. 硬件与指令
+## 4. Hardware and instructions
 
-### 4.1 线程层级
+### 4.1 Thread hierarchy
 
-| 层级 | 本关的用法 | B200 上的数字 |
+| Level | Use in this lab | Numbers on B200 |
 |---|---|---|
-| grid | 覆盖整个矩阵的 block 网格 | — |
-| block（CTA） | 32×8 = 256 个线程，共享一块 shared memory | 每个 SM 最多 2048 线程、228 KB shared memory |
-| warp | 32 个连续 `threadIdx.x` 的线程，**一起执行同一条指令** | 每个 SM 最多 64 个 warp |
-| thread | 搬一个或几个元素 | 148 个 SM |
+| grid | the grid of blocks that covers the whole matrix | — |
+| block (CTA) | 32×8 = 256 threads that share one shared memory region | up to 2048 threads and 228 KB shared memory per SM |
+| warp | 32 threads with consecutive `threadIdx.x`, **executing the same instruction together** | up to 64 warps per SM |
+| thread | moves one or a few elements | 148 SMs |
 
-一个 block 内线程的线性编号是 `threadIdx.x + threadIdx.y * blockDim.x`，每 32 个连续编号组成一个 warp。本关 `blockDim.x = 32`，所以**同一个 `threadIdx.y` 的 32 个线程就是一个 warp**。记住这一点，它决定了下面所有的访存分析。
+The linear index of a thread inside a block is `threadIdx.x + threadIdx.y * blockDim.x`, and every 32 consecutive indices form one warp. In this lab `blockDim.x = 32`, so **the 32 threads with the same `threadIdx.y` are one warp**. Remember this; it drives all the memory-access analysis below.
 
-### 4.2 全局内存访问的合并
+### 4.2 Coalescing global memory access
 
-warp 执行一条 load/store 指令时，硬件把 32 个线程的地址合在一起处理：
+When a warp executes a load/store instruction, the hardware handles the addresses of all 32 threads together:
 
-- 内存以 **32 字节的 sector** 为单位在 L1/L2/HBM 之间移动；
-- 32 个线程访问连续的 32 个 `float`（128 字节）时，只需要 **4 个 sector**：这叫合并访问；
-- 32 个线程各自访问相隔很远的地址时，需要 **32 个 sector**，每个只用到 4 字节。
+- memory moves between L1/L2/HBM in units of **32-byte sectors**;
+- when 32 threads access 32 consecutive `float`s (128 bytes), only **4 sectors** are needed: this is coalesced access;
+- when 32 threads each access addresses far apart, **32 sectors** are needed, and only 4 bytes of each are used.
 
-朴素转置里，warp 的 32 个线程有相同的 `r` 和连续的 `c`：
+In the naive transpose, the 32 threads of a warp have the same `r` and consecutive `c`:
 
-- 读 `x[r][c]`：地址连续，合并；
-- 写 `y[c][r]`：相邻线程地址相差 `rows * 4` 字节，不合并。
+- reading `x[r][c]`: the addresses are contiguous, so the access is coalesced;
+- writing `y[c][r]`: adjacent threads' addresses differ by `rows * 4` bytes, so the access is not coalesced.
 
-下面是本机 `./lab profile 00 --solution --step 1` 的结果（8192×8192），注意 store 每个请求对应 32 个 sector：
+Below is the result of `./lab profile 00 --solution --step 1` on this machine (8192×8192). Each store request maps to 32 sectors:
 
-| 指标 | 读 x | 写 y |
+| Metric | read x | write y |
 |---|---|---|
-| 请求数（warp 指令） | 2,097,152 | 2,097,152 |
-| sector 数 | 8,388,608（每请求 4 个） | 67,108,864（每请求 32 个） |
+| requests (warp instructions) | 2,097,152 | 2,097,152 |
+| sectors | 8,388,608 (4 per request) | 67,108,864 (32 per request) |
 
-有意思的是，HBM 实际读写字节数（`dram__bytes_*`）几乎和优化后的版本一样：同一 32 字节 sector 的其余部分很快会被别的 warp 写到，L2 把这些零碎写入合并后才写回 HBM。所以朴素版本慢的原因不是“HBM 多搬了 8 倍数据”，而是 **L1/L2 要处理 8 倍的 sector 事务**，事务处理速度成了瓶颈。这就是为什么要测量，而不是只凭教科书结论推断。
+Interestingly, the number of bytes actually read from and written to HBM (`dram__bytes_*`) is almost the same as for the optimized versions: other warps soon write the rest of the same 32-byte sector, and L2 merges these fragmented writes before writing back to HBM. So the naive version is not slow because "HBM moves 8 times as much data". It is slow because **L1/L2 must process 8 times as many sector transactions**, and transaction throughput becomes the bottleneck. This is why you measure instead of reasoning only from textbook conclusions.
 
-### 4.3 Shared memory 与 bank conflict
+### 4.3 Shared memory and bank conflicts
 
-shared memory 在每个 SM 上，延迟和带宽都远好于 HBM，块内线程可以互相读对方写入的数据。它被分成 **32 个 bank**，每个 bank 每周期服务一个 4 字节字：
+Shared memory sits on each SM. Its latency and bandwidth are far better than HBM's, and threads in a block can read data that other threads in the block wrote. It is split into **32 banks**, and each bank serves one 4-byte word per cycle:
 
 ```
-bank(地址) = (字节地址 / 4) % 32
+bank(address) = (byte address / 4) % 32
 ```
 
-一个 warp 的 32 个线程如果访问 32 个不同的 bank，一个周期完成；如果有 k 个线程访问同一个 bank 的**不同地址**，就要串行成 k 次，这叫 k 路 bank conflict（访问同一个地址是广播，不冲突）。
+If the 32 threads of a warp access 32 different banks, the access completes in one cycle. If k threads access **different addresses** in the same bank, the access is serialized into k passes; this is a k-way bank conflict (accessing the same address is a broadcast, not a conflict).
 
-声明 `float tile[32][32]` 时，`tile[i][j]` 的 bank 是 `(i*32 + j) % 32 = j`。按行读（固定 `i`，`j = lane`）没有冲突；**按列读**（固定 `j`，`i = lane`）32 个线程全落在 bank `j`：32 路冲突。
+With the declaration `float tile[32][32]`, the bank of `tile[i][j]` is `(i*32 + j) % 32 = j`. Reading by row (fixed `i`, `j = lane`) has no conflict. **Reading by column** (fixed `j`, `i = lane`) puts all 32 threads in bank `j`: a 32-way conflict.
 
-把每行补一个 float：`float tile[32][33]`，`tile[i][j]` 的 bank 变成 `(i*33 + j) % 32 = (i + j) % 32`。按列读时 `i = 0..31` 落在 32 个不同的 bank，冲突消失。代价是每个 block 多用 128 字节 shared memory。
+Pad each row with one float: with `float tile[32][33]`, the bank of `tile[i][j]` becomes `(i*33 + j) % 32 = (i + j) % 32`. A column read with `i = 0..31` hits 32 different banks, and the conflict disappears. The cost is 128 extra bytes of shared memory per block.
 
-（后面 tensor core 关卡会用另一种方法：XOR swizzle，不浪费空间。思路相同：让一列数据分散到不同 bank。）
+(The later tensor core labs use another method, XOR swizzle, which wastes no space. The idea is the same: spread one column of data across different banks.)
 
 ### 4.4 `__syncthreads()`
 
-块内所有线程到达这条指令后才继续，并保证之前对 shared memory 的写入对块内其他线程可见。转置中一个线程会读**别的线程**写进 tile 的元素，所以 load 和 store 之间必须有它。少了它，结果有时对有时错，取决于 warp 的调度顺序。
+All threads in the block must reach this instruction before any continues, and it guarantees that earlier writes to shared memory are visible to the other threads in the block. In the transpose, a thread reads elements that **other threads** wrote into the tile, so this barrier must sit between the load and the store. Without it, the result is sometimes right and sometimes wrong, depending on the order in which warps are scheduled.
 
-### 4.5 Little 定律：需要多少数据在路上
+### 4.5 Little's law: how much data must be in flight
 
 ```
-带宽 = 在途字节数 / 延迟
+bandwidth = bytes in flight / latency
 ```
 
-HBM 的访问延迟大约在几百纳秒到 1 微秒量级。要达到 6.5 TB/s，按 700 ns 估算，全 GPU 需要约 4.5 MB 同时在路上，平均每个 SM 约 30 KB。
+HBM access latency is on the order of a few hundred nanoseconds to 1 microsecond. To reach 6.5 TB/s with an estimate of 700 ns, the whole GPU needs about 4.5 MB in flight at once, or about 30 KB per SM on average.
 
-一个 SM 上最多驻留 2048 个线程。在途数据量 = 驻留线程数 × 每个线程同时在路上的 load 数 × 每次的字节数。后两项取决于代码怎么写：
+At most 2048 threads are resident on one SM. Data in flight = resident threads × loads in flight per thread × bytes per load. The last two factors depend on how you write the code:
 
-- **load 必须能一起发出去。** 线程发出一条 load 后不会停下来等数据，而是继续执行后面不依赖这个数据的指令；只有用到数据时才等待。所以一个线程里互不依赖、能连续发出的 load 越多，同时在路上的数据就越多。这叫指令级并行（ILP）。
-- **循环的写法会影响编译器能否这样做。** 写成 `for (k = 0; k < 4; ++k)` 时，循环次数是编译期常数，编译器把它完全展开，4 条 load 连续发出。写成 `for (i = threadIdx.y; i < 32; i += 8)` 时，循环次数取决于 `threadIdx.y`，编译器生成带分支的代码，每次 load 后立刻把结果写进 shared memory，下一条 load 要等上一条返回。本机实测这一个改动让步骤 3 从约 2.8 TB/s 变成约 5.0 TB/s。用 `./lab sass 00` 生成的 SASS 文件可以检查：找到 kernel 里第一条 `STS` 之前有几条 `LDG`。
+- **The loads must be able to issue together.** After a thread issues a load, it does not stop to wait for the data. It keeps executing later instructions that do not depend on that data, and waits only when it uses the data. So the more independent loads a thread can issue back to back, the more data is in flight at once. This is called instruction-level parallelism (ILP).
+- **How you write the loop affects whether the compiler can do this.** With `for (k = 0; k < 4; ++k)`, the trip count is a compile-time constant, so the compiler fully unrolls the loop and issues the 4 loads back to back. With `for (i = threadIdx.y; i < 32; i += 8)`, the trip count depends on `threadIdx.y`, so the compiler generates code with branches: after each load it immediately writes the result into shared memory, and the next load waits for the previous one to return. Measured on this machine, this one change moves step 3 from about 2.8 TB/s to about 5.0 TB/s. You can check it in the SASS file that `./lab sass 00` generates: count the `LDG` instructions before the first `STS` in the kernel.
 
-步骤 3 中每个线程有 4 条 load 在路上，一个 SM 满载时约 2048 × 4 × 4 B = 32 KB，刚好在上面估算的需求附近；而且每个 block 在 `__syncthreads()` 之后的写阶段不再读数据。步骤 4 保持 tile 不变，把每个 block 的线程从 32×8 减到 32×2：每个线程负责 16 个元素，连续发出 16 条 load，在途数据量提高到原来的 4 倍。这在 GPU 上很常见：**单个线程的 ILP 和 SM 上的线程数（TLP）共同决定在途访存量**，线程少一些、每个线程多做一些，往往更快。
+In step 3, each thread has 4 loads in flight. A fully loaded SM then has about 2048 × 4 × 4 B = 32 KB in flight, right around the estimate above. Also, each block reads no data in its write phase after `__syncthreads()`. Step 4 keeps the tile the same and cuts each block's threads from 32×8 to 32×2: each thread handles 16 elements and issues 16 loads back to back, which raises the data in flight to 4 times the previous amount. This is common on GPUs: **per-thread ILP and the number of threads on the SM (TLP) together determine the memory traffic in flight**, and fewer threads that each do more work are often faster.
 
-## 5. 调度设计
+## 5. Schedule design
 
-### 步骤 1：一个线程一个元素
+### Step 1: one thread per element
 
 ```
 block = (32, 8), grid = (ceil(cols/32), ceil(rows/8))
-c = blockIdx.x * 32 + threadIdx.x      ← warp 内连续
+c = blockIdx.x * 32 + threadIdx.x      ← contiguous within a warp
 r = blockIdx.y * 8  + threadIdx.y
 ```
 
-### 步骤 2–4：经过 shared memory 的 tile
+### Steps 2–4: a tile through shared memory
 
 ```
-             x 的一个 tile（kTile × kTile）                 y 中对应的位置
-   c0 ────────────────────► 列                    r0 ──────────────► 列
-r0 ┌──────────────────────┐                   c0 ┌──────────────────┐
-   │ warp 0 读第 0 行      │  ── 写入 tile ──►     │ warp 0 写第 0 行  │
-   │ warp 1 读第 1 行      │     __sync          │ = x 的第 c0 列     │
-   │ ...                  │  ── 按列读出 ──►      │ ...              │
-   └──────────────────────┘                      └──────────────────┘
-   全局读：合并                                       全局写：合并
+            one tile of x (kTile × kTile)                   matching place in y
+   c0 ────────────────────► cols                     r0 ──────────────────► cols
+r0 ┌──────────────────────┐                      c0 ┌──────────────────────┐
+   │ warp 0 reads row 0   │  ── write tile ──►      │ warp 0 writes row 0  │
+   │ warp 1 reads row 1   │     __sync              │ = column c0 of x     │
+   │ ...                  │  ── read by col ─►      │ ...                  │
+   └──────────────────────┘                         └──────────────────────┘
+   global read: coalesced                           global write: coalesced
 ```
 
-- 读阶段：warp `threadIdx.y` 读 tile 的第 `threadIdx.y`、`threadIdx.y+kThreadsY`、… 行，lane 对应列，合并；写入 `tile[i][j]`，按行写，无冲突。
-- 写阶段：y 的第 `c0+i` 行就是 x 的第 `c0+i` 列。warp 写 y 的一行，lane `j` 写 `y[c0+i][r0+j]`，需要 `tile[j][i]`，即**按列读 tile**。
+- Read phase: warp `threadIdx.y` reads rows `threadIdx.y`, `threadIdx.y+kThreadsY`, … of the tile, with lanes mapped to columns, so the reads are coalesced. It writes `tile[i][j]` by row, with no conflict.
+- Write phase: row `c0+i` of y is column `c0+i` of x. A warp writes one row of y; lane `j` writes `y[c0+i][r0+j]` and needs `tile[j][i]`, which means **reading the tile by column**.
 
-| 版本 | tile | block | 每线程元素数 | shared memory / block |
+| Version | tile | block | elements per thread | shared memory / block |
 |---|---|---|---|---|
-| 步骤 2 | `float[32][32]` | 32×8 | 4 | 4096 B |
-| 步骤 3 | `float[32][33]` | 32×8 | 4 | 4224 B |
-| 步骤 4 | `float[32][33]` | 32×2 | 16 | 4224 B |
+| step 2 | `float[32][32]` | 32×8 | 4 | 4096 B |
+| step 3 | `float[32][33]` | 32×8 | 4 | 4224 B |
+| step 4 | `float[32][33]` | 32×2 | 16 | 4224 B |
 
-步骤 4 每个 block 只有 64 个线程。一个 SM 最多驻留 32 个 block，所以仍然能放满 2048 个线程，shared memory 用量为 32 × 4224 B ≈ 135 KB，在 228 KB 以内。
+In step 4 each block has only 64 threads. At most 32 blocks are resident on one SM, so the SM can still hold the full 2048 threads, and the shared memory use is 32 × 4224 B ≈ 135 KB, within 228 KB.
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-所有命令在仓库根目录运行。每一步只要求对应的 TODO；其余代码已经写好。
+Run all commands from the repository root. Each step asks only for its own TODO; the rest of the code is already written.
 
-### 步骤 1 · TODO(1)：朴素转置
+### Step 1 · TODO(1): naive transpose
 
-在 `transpose_naive` 里算出 `(r, c)`、判断越界、拷贝一个元素。
+In `transpose_naive`, compute `(r, c)`, check bounds, and copy one element.
 
 ```bash
 ./lab check 00 --step 1
 ./lab bench 00 --step 1
 ```
 
-- 第一个 case `tiny` 是 7×11，输入值等于它在 x 中的线性下标（`coordinate` 模式）。出错时报告会给出“在 `[col=…, row=…]` 得到 v、期望 w”，`v` 直接告诉你读到了 x 的哪个位置。
-- 报告 “elements are NaN … never written” 说明有输出没写到：检查 grid 覆盖和越界条件是否写反。
-- `rows * cols` 在大 case 中超过 2³¹，下标请用 `int64_t`。
+- The first case, `tiny`, is 7×11, and each input value equals its linear index in x (`coordinate` mode). On an error, the report says "at `[col=…, row=…]` got v, expected w", and `v` tells you directly which position of x you read.
+- The report "elements are NaN … never written" means some outputs were never written: check the grid coverage and whether the bounds checks are swapped.
+- `rows * cols` exceeds 2³¹ in the big case, so use `int64_t` for indices.
 
-### 步骤 2 · TODO(2)：shared memory tile
+### Step 2 · TODO(2): shared memory tile
 
-在 `transpose_tiled` 中实现读、同步、写三段。按骨架注释把循环写成编译期次数的形式 `for (k = 0; k < kTile / kThreadsY; ++k)`（原因见第 4.5 节），步骤 4 可以直接复用。
+In `transpose_tiled`, implement the three phases: read, synchronize, write. Following the skeleton comments, write the loops with a compile-time trip count, `for (k = 0; k < kTile / kThreadsY; ++k)` (see Section 4.5 for why), so that step 4 can reuse them directly.
 
 ```bash
 ./lab check 00 --step 2
@@ -161,11 +161,11 @@ r0 ┌──────────────────────┐     
 ./lab profile 00 --step 2
 ```
 
-在 profile 输出中找 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`：这是 shared memory load 的 bank conflict 次数。8192×8192 上它是几千万量级，和第 4.3 节的分析对得上吗？
+In the profile output, find `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`: this is the number of bank conflicts on shared memory loads. On 8192×8192 it is in the tens of millions. Does that match the analysis in Section 4.3?
 
-### 步骤 3 · TODO(3)：消除 bank conflict
+### Step 3 · TODO(3): remove bank conflicts
 
-在 `run()` 的 `case 3` 选择 `kPad` 并发射 kernel。改动只有一行，但请先在纸上算出 `kPad = 1` 时一列的 32 个元素落在哪些 bank。
+In `case 3` of `run()`, choose `kPad` and launch the kernel. The change is only one line, but first work out on paper which banks the 32 elements of a column hit when `kPad = 1`.
 
 ```bash
 ./lab check 00 --step 3
@@ -173,9 +173,9 @@ r0 ┌──────────────────────┐     
 ./lab profile 00 --step 3
 ```
 
-### 步骤 4 · TODO(4)：每个线程多搬一些
+### Step 4 · TODO(4): each thread moves more data
 
-在 `case 4` 选择 `kThreadsY`，使每个线程负责 16 个元素，并发射 kernel。如果步骤 2 的循环按 `kTile / kThreadsY` 写，kernel 本身不用改。先算一算：步骤 3 和步骤 4 中，一个 SM 满载时各有多少字节的 load 在路上？
+In `case 4`, choose `kThreadsY` so that each thread handles 16 elements, and launch the kernel. If you wrote the step 2 loops in terms of `kTile / kThreadsY`, the kernel itself needs no change. First work it out: in step 3 and in step 4, how many bytes of loads are in flight on a fully loaded SM?
 
 ```bash
 ./lab check 00
@@ -183,57 +183,57 @@ r0 ┌──────────────────────┐     
 ./lab bench 00 --step 4 --cold
 ```
 
-`--cold` 在每次计时前清空 L2，测的是数据真正来自 HBM 时的性能；8192×8192 的输入（256 MiB）本来就比 L2（126 MB）大，所以两种计时差别不大。小矩阵上两者会差很多，想想为什么。
+`--cold` flushes L2 before each timed run, so it measures performance when the data really comes from HBM. The 8192×8192 input (256 MiB) is already larger than L2 (126 MB), so the two timing modes differ little. On small matrices they differ a lot; think about why.
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| Symptom | Likely cause |
 |---|---|
-| 大部分 case 过了，`tail` 失败 | 尾部 tile 的越界判断用错了维度（读用 `rows/cols`，写用 `cols/rows`） |
-| 偶尔失败、结果不稳定 | 缺少 `__syncthreads()` |
-| `row` case 失败 | 把 y 当成了 `[rows, cols]` |
-| 步骤 3 没变快 | 检查 bank conflict 指标是否真的下降；是否忘了改 `case 3` |
-| `TIMEOUT` | 循环变量写错导致死循环 |
+| most cases pass, `tail` fails | the bounds check of the tail tile uses the wrong dimension (reads use `rows/cols`, writes use `cols/rows`) |
+| occasional failures, unstable results | missing `__syncthreads()` |
+| `row` case fails | y was treated as `[rows, cols]` |
+| step 3 is not faster | check that the bank conflict metric really dropped; check that you did not forget to change `case 3` |
+| `TIMEOUT` | a wrong loop variable causes an infinite loop |
 
-## 7. 性能
+## 7. Performance
 
-本机实测（8192×8192，CUDA Graph 计时；`vs torch` 是 PyTorch `y.copy_(x.t())` 的耗时除以本版本耗时）：
+Measured on this machine (8192×8192, CUDA Graph timing; `vs torch` is the time of PyTorch `y.copy_(x.t())` divided by the time of this version):
 
-| 版本 | `vs torch` | % HBM 标称峰值 |
+| Version | `vs torch` | % nominal HBM peak |
 |---|---|---|
-| 步骤 1 | ≈ 0.65× | ≈ 15% |
-| 步骤 2 | ≈ 1.0× | ≈ 24% |
-| 步骤 3 | ≈ 2.7× | ≈ 62% |
-| 步骤 4 | ≈ 3.2× | ≈ 74% |
+| step 1 | ≈ 0.65× | ≈ 15% |
+| step 2 | ≈ 1.0× | ≈ 24% |
+| step 3 | ≈ 2.7× | ≈ 62% |
+| step 4 | ≈ 3.2× | ≈ 74% |
 
-你的数字可能因 GPU 频率和负载略有不同，比例关系应当一致。步骤 3 达到 `vs torch` 2.5× 左右、步骤 4 再快 15% 以上，即说明机制成立。如果步骤 3 只有 1.5× 左右，检查循环是否写成了编译期次数（第 4.5 节）。
+Your numbers may differ slightly with GPU clock and load, but the ratios should match. If step 3 reaches about 2.5× `vs torch` and step 4 is another 15% or more faster, the mechanism works. If step 3 is only about 1.5×, check that the loops use a compile-time trip count (Section 4.5).
 
-`./lab profile` 时 Nsight Compute 会锁定时钟，`gpu__time_duration` 比 `bench` 慢一些，只用它比较指标，不要和 bench 的时间直接比。
+During `./lab profile`, Nsight Compute locks the clocks, so `gpu__time_duration` is somewhat slower than `bench`. Use it only to compare metrics; do not compare it directly with bench times.
 
-步骤 4 已经接近 6.5 TB/s 的连续拷贝速度。剩余差距主要来自读写交替的 block 结构：一个 block 在写阶段不发出新的读请求。到 [30_tma_mbarrier](../30_tma_mbarrier/README.md) 用 TMA 做转置时会再回到这个问题。
+Step 4 is already close to the 6.5 TB/s contiguous-copy speed. Most of the remaining gap comes from the block structure that alternates reads and writes: a block issues no new read requests during its write phase. [30_tma_mbarrier](../30_tma_mbarrier/README.md) returns to this problem when it does the transpose with TMA.
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. `blockDim = (32, 8)` 时，`threadIdx = (5, 3)` 的线程属于 block 中的第几个 warp？
-2. 步骤 1 中，如果把 `threadIdx.x` 对应到行、`threadIdx.y` 对应到列，读和写哪个会合并？
-3. `float tile[32][32]` 中，按列读第 7 列时 32 个线程访问哪些 bank？如果改成 `double tile[32][33]` 还无冲突吗？
-4. 步骤 4 的 block 只有 2 个 warp。按列读 tile 时，是否仍然无 bank 冲突？为什么？
-5. 一个 4096×4096 的 FP32 矩阵能全部放进 L2。对它做 graph 计时和 `--cold` 计时，哪个更快，为什么？
+1. With `blockDim = (32, 8)`, which warp of the block does the thread with `threadIdx = (5, 3)` belong to?
+2. In step 1, if `threadIdx.x` maps to rows and `threadIdx.y` maps to columns, which is coalesced, the read or the write?
+3. In `float tile[32][32]`, which banks do the 32 threads access when they read column 7? If you change it to `double tile[32][33]`, is it still conflict-free?
+4. In step 4 a block has only 2 warps. Is reading the tile by column still free of bank conflicts? Why?
+5. A 4096×4096 FP32 matrix fits entirely in L2. If you time it with graph timing and with `--cold` timing, which is faster, and why?
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. 线性编号 `5 + 3*32 = 101`，`101 / 32 = 3`，第 3 个 warp（从 0 数）。
-2. 写会合并，读不合并：warp 内 32 个线程会有连续的行号 `r`，`y[c][r]` 连续、`x[r][c]` 跨行。
-3. bank 全是 7，32 路冲突。`double` 每个元素占两个相邻 bank，32 个线程共要 256 字节，硬件本来就分两次（每次半个 warp、16 个线程）服务。`double tile[32][33]` 中第 `i` 行第 `j` 列的起始 bank 是 `(66i + 2j) % 32 = (2i + 2j) % 32`；同一个半 warp 内 `i` 取 16 个连续值，占用的 bank 对互不相同，所以除了必需的两次之外没有额外冲突。可以用 `./lab profile` 的 bank conflict 指标验证。
-4. 无冲突。bank conflict 只发生在同一个 warp 的一次访问内。写阶段一个 warp 的 32 个 lane 读 `tile[lane][i]`，bank 是 `(lane*33 + i) % 32 = (lane + i) % 32`，32 个 lane 两两不同；这和 block 里有几个 warp 无关。
-5. graph 计时更快：反复运行时输入留在 L2，`--cold` 每次先清空 L2，数据必须从 HBM 读。
+1. The linear index is `5 + 3*32 = 101`, and `101 / 32 = 3`, so it is warp 3 (counting from 0).
+2. The write is coalesced and the read is not: the 32 threads of a warp have consecutive row indices `r`, so `y[c][r]` is contiguous while `x[r][c]` crosses rows.
+3. All in bank 7: a 32-way conflict. A `double` occupies two adjacent banks, and 32 threads need 256 bytes in total, so the hardware already serves them in two passes (half a warp, 16 threads, per pass). In `double tile[32][33]`, the starting bank of row `i`, column `j` is `(66i + 2j) % 32 = (2i + 2j) % 32`. Within one half warp, `i` takes 16 consecutive values and the bank pairs they occupy are all different, so there is no conflict beyond the two required passes. You can verify this with the bank conflict metric from `./lab profile`.
+4. Conflict-free. A bank conflict happens only within one access by one warp. In the write phase, the 32 lanes of a warp read `tile[lane][i]`, whose bank is `(lane*33 + i) % 32 = (lane + i) % 32`, and the 32 lanes are pairwise different. This does not depend on how many warps the block has.
+5. Graph timing is faster: across repeated runs the input stays in L2, while `--cold` flushes L2 before each run, so the data must be read from HBM.
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- CUDA Programming Guide：[Coalesced Global Memory Access](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#coalesced-global-memory-access)，[Shared Memory Bank Conflicts](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory-bank-conflicts)，以及同页的 [Matrix Transpose Example Using Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#matrix-transpose-example-using-shared-memory)
-- CUDA C++ Best Practices Guide：[Coalesced Access to Global Memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory)
-- Mark Harris，[An Efficient Matrix Transpose in CUDA C/C++](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/)（经典文章，本关步骤 1–3 的来源）
-- Vasily Volkov，*Understanding Latency Hiding on GPUs*（博士论文，2016）：用 Little 定律分析 GPU 访存
-- FlashAttention 论文第 2.1–2.2 节：GPU 内存层级与 IO 感知
+- CUDA Programming Guide: [Coalesced Global Memory Access](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#coalesced-global-memory-access), [Shared Memory Bank Conflicts](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory-bank-conflicts), and on the same page, [Matrix Transpose Example Using Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#matrix-transpose-example-using-shared-memory)
+- CUDA C++ Best Practices Guide: [Coalesced Access to Global Memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory)
+- Mark Harris, [An Efficient Matrix Transpose in CUDA C/C++](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/) (a classic article, the source of steps 1–3 in this lab)
+- Vasily Volkov, *Understanding Latency Hiding on GPUs* (PhD thesis, 2016): analyzes GPU memory access with Little's law
+- FlashAttention paper, Sections 2.1–2.2: the GPU memory hierarchy and IO awareness

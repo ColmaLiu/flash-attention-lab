@@ -1,6 +1,6 @@
 {
   "id": "34_fa3",
-  "title": "FA3 的思想在 SM100 上：warp specialization、TMEM 中的 S/O 与 softmax–MMA 重叠",
+  "title": "FA3 ideas on SM100: warp specialization, S/O in TMEM, and softmax–MMA overlap",
   "part": 3,
   "kind": "attention",
   "prerequisites": [
@@ -11,7 +11,7 @@
   "steps": [
     {
       "step": 1,
-      "title": "角色分工与 S = Q·Kᵀ（单块，TMEM → probe）",
+      "title": "Roles and S = Q·Kᵀ (single block, TMEM → probe)",
       "cases": [
         "n1",
         "one_block",
@@ -31,7 +31,7 @@
     },
     {
       "step": 2,
-      "title": "单块 attention：P 经 shared memory，O += P·V（V 为 MN-major），归一化与 LSE",
+      "title": "Single-block attention: P through shared memory, O += P·V (V is MN-major), normalization and LSE",
       "cases": [
         "n1",
         "one_block",
@@ -45,7 +45,7 @@
     },
     {
       "step": 3,
-      "title": "完整 K/V 循环：online softmax，softmax warp 在 TMEM 中修正 O",
+      "title": "Full K/V loop: online softmax, softmax warps correct O in TMEM",
       "cases": [
         "n1",
         "one_block",
@@ -69,12 +69,12 @@
     },
     {
       "step": 4,
-      "title": "causal：跳过对角线之后的块，只给对角块和尾块加 mask",
+      "title": "causal: skip the blocks after the diagonal, mask only the diagonal block and the tail block",
       "cases": "all"
     },
     {
       "step": 5,
-      "title": "S 双缓冲：QKᵀ_{j+1} 与 softmax_j 重叠",
+      "title": "S double buffering: QKᵀ_{j+1} overlaps softmax_j",
       "cases": "all"
     }
   ],
@@ -88,7 +88,7 @@
         64
       ],
       "dtype": "bf16",
-      "purpose": "N=1：Q、K、V 的 box 都只有 1 行有效，其余 127 行由 TMA 填零；O = V，LSE = scale·q·k。O 的 TMA store 必须裁掉 127 个越界行。"
+      "purpose": "N=1: the Q, K, V boxes each have only 1 valid row; TMA fills the other 127 rows with zeros; O = V, LSE = scale·q·k. The TMA store of O must clip the 127 out-of-bounds rows."
     },
     {
       "name": "one_block",
@@ -99,7 +99,7 @@
         64
       ],
       "dtype": "fp16",
-      "purpose": "N=128 恰好一个块，B>1、H>1：4-D tensor map 的坐标顺序 (d, head, row, batch) 与 grid 映射。"
+      "purpose": "N=128 is exactly one block, B>1, H>1: the coordinate order (d, head, row, batch) of the 4-D tensor map and the grid mapping."
     },
     {
       "name": "short_tail",
@@ -111,7 +111,7 @@
       ],
       "dtype": "fp16",
       "pattern": "position",
-      "purpose": "N=37、D=128：一行跨两个 64 列的 panel；91 个填充 key 必须被 mask。"
+      "purpose": "N=37, D=128: one row spans two 64-column panels; the 91 padding keys must be masked."
     },
     {
       "name": "block_tail",
@@ -122,7 +122,7 @@
         128
       ],
       "dtype": "bf16",
-      "purpose": "N=100、B>1、H>1、D=128：单块但不满，O 的尾部裁剪跨 batch 不越界。"
+      "purpose": "N=100, B>1, H>1, D=128: a single partial block; the tail clipping of O must not cross into the next batch."
     },
     {
       "name": "scale",
@@ -135,7 +135,7 @@
       "dtype": "bf16",
       "pattern": "large_logits",
       "scale": 1.0,
-      "purpose": "scale=1、logit 上百：scale 必须来自 p.scale；不减最大值会溢出。"
+      "purpose": "scale=1, logits in the hundreds: scale must come from p.scale; without subtracting the max it overflows."
     },
     {
       "name": "one_uniform",
@@ -147,7 +147,7 @@
       ],
       "dtype": "bf16",
       "pattern": "uniform",
-      "purpose": "Q=0：O 是 V 的均值，LSE = ln N。漏乘/重复乘 1/ℓ、ℓ 求和错误都会暴露。"
+      "purpose": "Q=0: O is the mean of V, LSE = ln N. Missing or repeating the multiply by 1/ℓ, or a wrong ℓ sum, all show up."
     },
     {
       "name": "one_ones_v",
@@ -159,7 +159,7 @@
       ],
       "dtype": "fp16",
       "pattern": "ones_v",
-      "purpose": "V=1：O 必须等于 1；填充 key 的 P 若不为 0，O 会大于 1。"
+      "purpose": "V=1: O must equal 1; if P of the padding keys is not 0, O exceeds 1."
     },
     {
       "name": "one_position",
@@ -171,7 +171,7 @@
       ],
       "dtype": "bf16",
       "pattern": "position",
-      "purpose": "V[j]=j/N：P 写进 shared memory 的 swizzle 错、V 的 MN-major 描述符（LBO/SBO、转置位）错，都会得到错误的位置均值。"
+      "purpose": "V[j]=j/N: a wrong swizzle when writing P to shared memory, or a wrong MN-major descriptor for V (LBO/SBO, transpose bit), gives a wrong positional mean."
     },
     {
       "name": "tail",
@@ -182,7 +182,7 @@
         128
       ],
       "dtype": "bf16",
-      "purpose": "N=300：3 个块，最后一个块只有 44 个有效 key；最后一个 Q tile 只有 44 行。"
+      "purpose": "N=300: 3 blocks; the last block has only 44 valid keys; the last Q tile has only 44 rows."
     },
     {
       "name": "peaked_d64",
@@ -194,7 +194,7 @@
       ],
       "dtype": "fp16",
       "pattern": "large_logits",
-      "purpose": "D=64、FP16、logit 很大、N=513 比块的倍数多 1：最大值在后面的块里变化，TMEM 中的 O 必须乘 α 修正。"
+      "purpose": "D=64, FP16, large logits, N=513 is 1 more than a multiple of the block: the max changes in later blocks, so O in TMEM must be corrected by multiplying by α."
     },
     {
       "name": "peaked",
@@ -206,7 +206,7 @@
       ],
       "dtype": "bf16",
       "pattern": "large_logits",
-      "purpose": "D=128、7 个块、logit 很大：反复更新最大值。"
+      "purpose": "D=128, 7 blocks, large logits: the max is updated repeatedly."
     },
     {
       "name": "uniform",
@@ -218,7 +218,7 @@
       ],
       "dtype": "bf16",
       "pattern": "uniform",
-      "purpose": "Q=0、两个块：LSE = ln N，ℓ 的修正 ℓ·α 写错会偏离。"
+      "purpose": "Q=0, two blocks: LSE = ln N; a wrong ℓ correction ℓ·α makes it drift."
     },
     {
       "name": "ones_v",
@@ -230,7 +230,7 @@
       ],
       "dtype": "fp16",
       "pattern": "ones_v",
-      "purpose": "V=1、5 个块：O 修正与 ℓ 修正用的 α 必须相同，O 才等于 1。"
+      "purpose": "V=1, 5 blocks: the O correction and the ℓ correction must use the same α for O to equal 1."
     },
     {
       "name": "position",
@@ -242,7 +242,7 @@
       ],
       "dtype": "bf16",
       "pattern": "position",
-      "purpose": "V[j]=j/N、3 个块：K/V stage 下标或 parity 错会读到别的块的位置值。"
+      "purpose": "V[j]=j/N, 3 blocks: a wrong K/V stage index or parity reads the positional values of another block."
     },
     {
       "name": "ring",
@@ -254,7 +254,7 @@
       ],
       "dtype": "bf16",
       "pattern": "position",
-      "purpose": "10 个块、D=128（2 级 stage）：环形 buffer 绕 5 圈，full/empty 的 parity 错会读到旧块或挂起。"
+      "purpose": "10 blocks, D=128 (2 stages): the ring buffer wraps 5 times; a wrong full/empty parity reads an old block or hangs."
     },
     {
       "name": "medium",
@@ -265,7 +265,7 @@
         128
       ],
       "dtype": "bf16",
-      "purpose": "中等规模随机数据，D=128：8 个块的完整循环。"
+      "purpose": "Medium-size random data, D=128: the full loop over 8 blocks."
     },
     {
       "name": "medium_d64",
@@ -276,7 +276,7 @@
         64
       ],
       "dtype": "fp16",
-      "purpose": "中等规模随机数据，D=64、FP16（3 级 stage）。"
+      "purpose": "Medium-size random data, D=64, FP16 (3 stages)."
     },
     {
       "name": "multiwave",
@@ -287,7 +287,7 @@
         64
       ],
       "dtype": "bf16",
-      "purpose": "512 个 CTA（约 3.5 波，每 SM 一个 CTA）：同一 SM 上前后多个 CTA 复用 shared memory 与 TMEM，barrier 初始化、TMEM 释放或退出前的排空有问题时才会暴露。"
+      "purpose": "512 CTAs (about 3.5 waves, one CTA per SM): several CTAs run one after another on the same SM and reuse shared memory and TMEM; problems in barrier initialization, TMEM deallocation, or draining before exit show up only here."
     },
     {
       "name": "causal_n1",
@@ -299,7 +299,7 @@
       ],
       "dtype": "fp16",
       "causal": true,
-      "purpose": "causal 且 N=1：唯一的 query 只看见自己。"
+      "purpose": "causal and N=1: the only query sees only itself."
     },
     {
       "name": "causal_two_blocks",
@@ -312,7 +312,7 @@
       "dtype": "bf16",
       "pattern": "large_logits",
       "causal": true,
-      "purpose": "causal、两个 Q tile、logit 很大：第一个 tile 不能处理第二个 K 块，第二个 tile 的对角块要 mask。"
+      "purpose": "causal, two Q tiles, large logits: the first tile must not process the second K block; the diagonal block of the second tile must be masked."
     },
     {
       "name": "causal_tail",
@@ -324,7 +324,7 @@
       ],
       "dtype": "bf16",
       "causal": true,
-      "purpose": "causal 且 N 不是块的倍数：对角 mask 与尾部 mask 同时生效。"
+      "purpose": "causal and N not a multiple of the block: the diagonal mask and the tail mask apply at the same time."
     },
     {
       "name": "causal_position",
@@ -337,7 +337,7 @@
       "dtype": "fp16",
       "pattern": "position",
       "causal": true,
-      "purpose": "causal、V[j]=j/N、D=128：mask 偏一位就会读到未来的位置值。"
+      "purpose": "causal, V[j]=j/N, D=128: a mask off by one reads the positional values of the future."
     },
     {
       "name": "causal_peaked",
@@ -350,7 +350,7 @@
       "dtype": "fp16",
       "pattern": "large_logits",
       "causal": true,
-      "purpose": "causal 且 logit 很大：对角块中被 mask 的元素不能参与最大值，也不能留下 NaN。"
+      "purpose": "causal and large logits: masked elements of the diagonal block must not take part in the max, and must not leave NaN."
     },
     {
       "name": "causal_uniform",
@@ -363,7 +363,7 @@
       "dtype": "bf16",
       "pattern": "uniform",
       "causal": true,
-      "purpose": "causal 且 Q=0：O[i] 是 V[0..i] 的均值，LSE[i] = ln(i+1)。"
+      "purpose": "causal and Q=0: O[i] is the mean of V[0..i], LSE[i] = ln(i+1)."
     },
     {
       "name": "causal_ones_v",
@@ -376,7 +376,7 @@
       "dtype": "fp16",
       "pattern": "ones_v",
       "causal": true,
-      "purpose": "causal 且 V=1：O 必须等于 1，包括只有一个 key 的第 0 行。"
+      "purpose": "causal and V=1: O must equal 1, including row 0, which has only one key."
     },
     {
       "name": "causal_medium",
@@ -388,7 +388,7 @@
       ],
       "dtype": "bf16",
       "causal": true,
-      "purpose": "中等规模 causal，D=128：Q tile i 只处理块 0..i。"
+      "purpose": "Medium-size causal, D=128: Q tile i processes only blocks 0..i."
     },
     {
       "name": "causal_medium_d64",
@@ -400,7 +400,7 @@
       ],
       "dtype": "fp16",
       "causal": true,
-      "purpose": "中等规模 causal，D=64。"
+      "purpose": "Medium-size causal, D=64."
     },
     {
       "name": "causal_multiwave",
@@ -412,7 +412,7 @@
       ],
       "dtype": "fp16",
       "causal": true,
-      "purpose": "同上但 causal：各 CTA 的块数不同（1–8），提前结束的 CTA 与仍在运行的 CTA 交错。"
+      "purpose": "Same as above but causal: CTAs have different block counts (1–8); CTAs that finish early interleave with CTAs still running."
     },
     {
       "name": "perf",
@@ -424,7 +424,7 @@
       ],
       "dtype": "bf16",
       "perf": true,
-      "purpose": "B·H=64、N=4096、D=128：550 GFLOP，与 22 关同一 case。"
+      "purpose": "B·H=64, N=4096, D=128: 550 GFLOP, the same case as lab 22."
     },
     {
       "name": "perf_causal",
@@ -437,7 +437,7 @@
       "dtype": "bf16",
       "perf": true,
       "causal": true,
-      "purpose": "同上但 causal：跳块后工作量约一半，Q tile 之间负载不均衡。"
+      "purpose": "Same as above but causal: block skipping roughly halves the work; load is unbalanced across Q tiles."
     },
     {
       "name": "perf_d64",
@@ -449,7 +449,7 @@
       ],
       "dtype": "fp16",
       "perf": true,
-      "purpose": "D=64、FP16：每个 key 的 MMA 更少，softmax 所占比例更大。"
+      "purpose": "D=64, FP16: fewer MMAs per key, so softmax takes a larger share."
     }
   ],
   "perf_target": {

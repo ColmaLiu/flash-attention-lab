@@ -1,35 +1,35 @@
-# 10 · 分块 GEMM：数据复用与算术强度
+# 10 · Tiled GEMM: data reuse and arithmetic intensity
 
-> 部分 1 · FA1　｜　前置：[00_transpose](../00_transpose/README.md)　｜　代码：[`students/10_simt_gemm/kernel.cu`](../../students/10_simt_gemm/kernel.cu)
+> Part 1 · FA1 | Prerequisites: [00_transpose](../00_transpose/README.md) | Code: [`students/10_simt_gemm/kernel.cu`](../../students/10_simt_gemm/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-用 CUDA core（不用 Tensor Core）计算 FP32 矩阵乘
+Use CUDA cores (not Tensor Cores) to compute the FP32 matrix product
 
 ```
 C[M, N] = A[M, K] · B[N, K]ᵀ        C[m][n] = Σ_k A[m][k] · B[n][k]
 ```
 
-B 按 `[N, K]` 存储：A 和 B 都是 **K-major**（K 维连续），和 attention 中 `S = Q·Kᵀ` 的 Q、K 完全一样。本关用四个版本，把同一个 GEMM 从 cuBLAS 的约 1% 提到约 70%。做完后你应该能：
+B is stored as `[N, K]`: A and B are both **K-major** (the K dimension is contiguous), exactly like Q and K in attention's `S = Q·Kᵀ`. This lab builds four versions and raises the same GEMM from about 1% of cuBLAS to about 70%. When you finish, you should be able to:
 
-- 算出一个 kernel 的**算术强度**（每搬 1 字节做多少 FLOP），并用 roofline 判断它受计算还是受访存限制；
-- 说出每一级分块（block tile、K 切片、线程 micro-tile）把数据**复用了多少次**；
-- 估算 shared memory、寄存器的预算，并解释它们怎样限制 tile 大小；
-- 解释为什么 K-major 的操作数放进 shared memory 时要转置，才能用 128 位访存读出。
+- compute a kernel's **arithmetic intensity** (FLOP per byte moved), and use the roofline to decide whether it is compute-bound or memory-bound;
+- state **how many times** each level of tiling (block tile, K slice, thread micro-tile) reuses the data;
+- estimate the shared memory and register budgets, and explain how they limit the tile size;
+- explain why a K-major operand must be transposed when it is placed in shared memory, so that it can be read with 128-bit accesses.
 
-FlashAttention 论文用 IO 复杂度说明标准 attention 慢在哪里。下一关 [11_naive_attention](../11_naive_attention/README.md) 会用本关的“复用次数”和“算术强度”来数 attention 的 HBM 流量。
+The FlashAttention paper uses IO complexity to explain where standard attention is slow. The next lab, [11_naive_attention](../11_naive_attention/README.md), uses this lab's "reuse count" and "arithmetic intensity" to count the HBM traffic of attention.
 
-## 2. 动机：从“搬数据”到“算得够多”
+## 2. Motivation: from "moving data" to "computing enough"
 
-[00_transpose](../00_transpose/README.md) 只搬数据，不计算，所以只能追求带宽。GEMM 正好相反：每个输入元素要参与 `N` 次（A 的元素）或 `M` 次（B 的元素）乘加。只要每个元素从 HBM 读一次、在片上用很多次，GEMM 就能受**计算**限制，而不是受访存限制。
+[00_transpose](../00_transpose/README.md) only moves data and does no computation, so it can only chase bandwidth. GEMM is the opposite: each input element takes part in `N` (elements of A) or `M` (elements of B) multiply-adds. As long as each element is read from HBM once and used many times on chip, GEMM can be bound by **compute** rather than by memory access.
 
-难点在于片上存储很小：一个 SM 只有 228 KB shared memory 和 256 KB 寄存器，装不下整个矩阵。所以要**分块**：每次只把一小块 A、B 搬上来，在块内尽量多用几次。FlashAttention 对 attention 做的是同一件事：把 Q、K、V 分块搬进 SRAM，避免把 N×N 的中间矩阵写回 HBM（论文第 3.1 节，IO 复杂度分析见第 3.2 节和定理 2）。
+The difficulty is that on-chip storage is small: one SM has only 228 KB of shared memory and 256 KB of registers, which cannot hold a whole matrix. So we **tile**: bring only a small tile of A and B on chip at a time, and use it as many times as possible inside the tile. FlashAttention does the same thing for attention: it moves tiles of Q, K and V into SRAM and avoids writing the N×N intermediate matrix back to HBM (paper Section 3.1; the IO complexity analysis is in Section 3.2 and Theorem 2).
 
-## 3. 数学：复用与算术强度
+## 3. Math: reuse and arithmetic intensity
 
-### 3.1 一个手算小例
+### 3.1 A small worked example
 
-`M = 2, N = 2, K = 3`：
+`M = 2, N = 2, K = 3`:
 
 ```
 A = [1  2  0]     B = [1  0  1]     C[0][0] = 1·1 + 2·0 + 0·1 = 1
@@ -38,39 +38,39 @@ A = [1  2  0]     B = [1  0  1]     C[0][0] = 1·1 + 2·0 + 0·1 = 1
                                     C[1][1] = 0·2 + 1·1 - 1·0 = 1
 ```
 
-`C[m][n]` 是 **A 的第 m 行与 B 的第 n 行**的点积。两行都在内存中连续，这就是 K-major 的含义。
+`C[m][n]` is the dot product of **row m of A and row n of B**. Both rows are contiguous in memory; this is what K-major means.
 
-`tiny`、`one_tile`、`tail`、`tail_vec`、`k1` 这几个 case 使用 `int` 模式：输入是 −2…2 的小整数，所有乘积和部分和都能被 FP32 精确表示，所以容差为 0。出错时报告的数值可以直接手算核对。
+The cases `tiny`, `one_tile`, `tail`, `tail_vec` and `k1` use the `int` pattern: the inputs are small integers in −2…2, so every product and partial sum is exactly representable in FP32, and the tolerance is 0. When something fails, you can check the reported values by hand.
 
-### 3.2 FLOP 与最少字节数
+### 3.2 FLOP and minimum bytes
 
-GEMM 做 `M·N·K` 次乘加，`./lab bench` 按 **2 FLOP/乘加** 计算：
+GEMM does `M·N·K` multiply-adds, and `./lab bench` counts **2 FLOP per multiply-add**:
 
 ```
 FLOP          = 2·M·N·K
-最少 HBM 字节 = 4·(M·K + N·K + M·N)      （A、B 各读一次，C 写一次，FP32 4 字节）
-算术强度 AI   = FLOP / 字节
+min HBM bytes = 4·(M·K + N·K + M·N)      (A and B read once each, C written once, FP32 is 4 bytes)
+AI            = FLOP / bytes             (arithmetic intensity)
 ```
 
-| case | FLOP | 最少字节 | AI（FLOP/B） |
+| case | FLOP | Minimum bytes | AI (FLOP/B) |
 |---|---|---|---|
 | `square4k` 4096×4096×4096 | 137.4 G | 201 MB | 683 |
 | `wide` 8192×8192×2048 | 274.9 G | 403 MB | 683 |
 
 ### 3.3 Roofline
 
-B200 的两个“屋顶”：
+The two "roofs" of B200:
 
-- **FP32 CUDA core 峰值**：148 个 SM × 每 SM 128 条 FP32 通道 × 2 FLOP（一条 FFMA）× 1.965 GHz（`nvidia-smi -q -d CLOCK` 中的 Max Clocks，满载计时时实测仍为 1965 MHz）≈ **74.4 TFLOP/s**。`./lab bench` 的 `% peak` 用取整的 75 TFLOP/s。一个只做独立 FFMA 的微基准在本机能跑到这个值的约 97%。
-- **HBM 带宽**：标称 8 TB/s。
+- **FP32 CUDA core peak**: 148 SMs × 128 FP32 lanes per SM × 2 FLOP (one FFMA) × 1.965 GHz (Max Clocks in `nvidia-smi -q -d CLOCK`; the measured clock under full-load timing is still 1965 MHz) ≈ **74.4 TFLOP/s**. The `% peak` of `./lab bench` uses the rounded value of 75 TFLOP/s. A microbenchmark that does only independent FFMAs reaches about 97% of this value on this machine.
+- **HBM bandwidth**: nominal 8 TB/s.
 
-两者之比是**屋脊点**：`74.4 / 8 ≈ 9.3 FLOP/B`。AI 低于 9.3 的 kernel 受带宽限制，高于 9.3 的受计算限制。
+The ratio of the two is the **ridge point**: `74.4 / 8 ≈ 9.3 FLOP/B`. A kernel with AI below 9.3 is bandwidth-bound; one above 9.3 is compute-bound.
 
 ```
  TFLOP/s
-   74 ┤                 ____________________________  FP32 峰值
+   74 ┤                 ____________________________  FP32 peak
       │               /
-      │             /   斜率 = 8 TB/s
+      │             /   slope = 8 TB/s
       │           /
       │         /
       │       /
@@ -78,199 +78,199 @@ B200 的两个“屋顶”：
             9.3                                 683
 ```
 
-`square4k` 的 AI 是 683，比屋脊点高 70 多倍：只要数据真的“每个只读一次”，读 HBM 需要 0.025 ms，计算需要 1.85 ms。**问题是 kernel 实际上读了多少次。**
+The AI of `square4k` is 683, more than 70 times the ridge point: if each piece of data really is "read only once", reading HBM takes 0.025 ms and computing takes 1.85 ms. **The question is how many times the kernel actually reads it.**
 
-### 3.4 每一级分块的复用
+### 3.4 Reuse at each level of tiling
 
-设一个线程块负责 C 的 `BM × BN` 块，K 方向一次搬 `BK` 宽的切片。对 C 的这块来说，A 的 `BM` 行、B 的 `BN` 行都要完整读一遍，所以：
+Let one thread block own a `BM × BN` tile of C and move a K slice of width `BK` at a time. For this tile of C, the `BM` rows of A and the `BN` rows of B must each be read in full once, so:
 
 ```
-每个 block 从全局内存读的 float 数 = (BM + BN) · K
-全部 block 合计                     = M·N·K · (1/BN + 1/BM)
-A 的每个元素被读的次数               = N / BN   （理想是 1）
-全局读的算术强度                     = 2·M·N·K / (4·M·N·K·(1/BM + 1/BN)) = BM·BN / (2·(BM + BN))
+floats one block reads from global memory = (BM + BN) · K
+total over all blocks                     = M·N·K · (1/BN + 1/BM)
+times each element of A is read           = N / BN   (ideally 1)
+arithmetic intensity of global reads      = 2·M·N·K / (4·M·N·K·(1/BM + 1/BN)) = BM·BN / (2·(BM + BN))
 ```
 
-再往下一级，线程 `TM × TN` 的 micro-tile：在一个 `kk` 上，线程从 shared memory 读 `TM` 个 A 值和 `TN` 个 B 值，做 `TM·TN` 次乘加。
+One level further down, the thread's `TM × TN` micro-tile: for one `kk`, the thread reads `TM` values of A and `TN` values of B from shared memory and does `TM·TN` multiply-adds.
 
-| 版本 | block tile | 每线程输出 | 全局读 AI | 全局读总量（square4k） | 每次乘加的 shared load 数 |
+| Version | block tile | Outputs per thread | Global read AI | Total global reads (square4k) | Shared loads per multiply-add |
 |---|---|---|---|---|---|
-| 步骤 1 朴素 | — | 1 | 0.25 | 550 GB（主要来自 L1/L2） | —（直接读全局） |
-| 步骤 2 smem tile | 32×32 | 1 | 8 | 17 GB | 2 条指令（A 那条是广播） |
-| 步骤 3 寄存器分块 | 128×128 | 8×8 | 32 | 4.3 GB | (8 + 8) / 64 = 0.25 |
-| 步骤 4 向量化 | 128×128 | 8×8 | 32 | 4.3 GB | 同上，但 4 条 128 位指令代替 16 条 32 位指令 |
+| step 1 naive | — | 1 | 0.25 | 550 GB (mostly from L1/L2) | — (reads global directly) |
+| step 2 smem tile | 32×32 | 1 | 8 | 17 GB | 2 instructions (the A one is a broadcast) |
+| step 3 register tiling | 128×128 | 8×8 | 32 | 4.3 GB | (8 + 8) / 64 = 0.25 |
+| step 4 vectorized | 128×128 | 8×8 | 32 | 4.3 GB | same, but 4 128-bit instructions instead of 16 32-bit ones |
 
-在 `square` case（1024³）上用 `./lab profile` 实测：步骤 2 的全局 load sector 数正好是 8.4 M：A、B 各要读 `1024³ / 32` 个 float（每个元素被 `1024 / 32` 个 block 读一次），共 `2·1024³ / 32` 个 float，每个 sector 32 字节装 8 个 float，`2·1024³ / 32 / 8 = 8.4 M`，步骤 3 是它的 1/4。
+Measured with `./lab profile` on the `square` case (1024³): the number of global load sectors in step 2 is exactly 8.4 M. A and B each need `1024³ / 32` floats read (each element is read once by each of `1024 / 32` blocks), `2·1024³ / 32` floats in total, and each 32-byte sector holds 8 floats, so `2·1024³ / 32 / 8 = 8.4 M`. Step 3 is 1/4 of that.
 
-步骤 2 的全局读 AI 为 8，低于屋脊点 9.3：即使每次都命中 L2，要喂饱 74 TFLOP/s 也需要约 9.3 TB/s 的读带宽。步骤 3 只需要约 2.3 TB/s。**block tile 越大，越不受全局访存限制**，但它受 shared memory 和寄存器容量约束（第 5 节）。
+The global read AI of step 2 is 8, below the ridge point of 9.3: even if every read hits in L2, feeding 74 TFLOP/s needs about 9.3 TB/s of read bandwidth. Step 3 needs only about 2.3 TB/s. **The larger the block tile, the less the kernel is bound by global memory access**, but the block tile is constrained by shared memory and register capacity (Section 5).
 
-### 3.5 不变式
+### 3.5 Invariant
 
-所有分块版本都维护同一个不变式：处理完从 `k0` 开始的切片后，
+All tiled versions maintain the same invariant: after processing the slice that starts at `k0`,
 
 ```
 acc[i][j] = Σ_{k < k0 + BK} A[row(i)][k] · B[col(j)][k]
 ```
 
-越过 `K` 的位置在 shared memory 里填 0，乘出来是 0，不影响结果。所以尾部切片不需要特殊的循环，只需要在“搬进 shared memory”时判断越界。
+Positions past `K` are filled with 0 in shared memory, so their products are 0 and do not affect the result. The tail slice therefore needs no special loop; only the step "move into shared memory" needs a bounds check.
 
-## 4. 硬件与指令
+## 4. Hardware and instructions
 
-### 4.1 FFMA 与发射槽
+### 4.1 FFMA and issue slots
 
-一条 `FFMA d, a, b, c` 计算 `d = a·b + c`，就是 2 FLOP。B200 的每个 SM 有 4 个子分区（SMSP），每个子分区每周期最多**发射一条 warp 指令**，其中的 FP32 单元每周期执行一条 warp 的 FFMA（32 条通道）。所以：
+One `FFMA d, a, b, c` computes `d = a·b + c`, which is 2 FLOP. Each B200 SM has 4 sub-partitions (SMSPs). Each sub-partition **issues at most one warp instruction** per cycle, and its FP32 unit executes one warp's FFMA (32 lanes) per cycle. So:
 
-- FFMA 要占满，几乎每个周期发射的都得是 FFMA；
-- 每条 `LDS`（读 shared memory）、地址计算、`BAR`（`__syncthreads`）都会占用一个本该发 FFMA 的发射槽。
+- to keep the FFMA units busy, nearly every issued instruction must be an FFMA;
+- every `LDS` (shared memory read), address computation and `BAR` (`__syncthreads`) takes an issue slot that should have gone to an FFMA.
 
-这是寄存器分块最直接的收益：
+This is the most direct benefit of register tiling:
 
-| 版本 | 每个 `kk` 每线程的指令 | FFMA 在发射槽中的上限 |
+| Version | Instructions per thread per `kk` | Upper bound of FFMA share of issue slots |
 |---|---|---|
-| 步骤 2 | 1 FFMA + 2 LDS | ≤ 33% |
-| 步骤 3 | 64 FFMA + 16 LDS | ≤ 80% |
-| 步骤 4 | 64 FFMA + 4 LDS.128 | ≤ 94% |
+| step 2 | 1 FFMA + 2 LDS | ≤ 33% |
+| step 3 | 64 FFMA + 16 LDS | ≤ 80% |
+| step 4 | 64 FFMA + 4 LDS.128 | ≤ 94% |
 
-### 4.2 Shared memory 带宽
+### 4.2 Shared memory bandwidth
 
-shared memory 每 SM 每周期处理一个 **wavefront**：最多 32 个 bank 各 4 字节，即 128 B。warp 访问需要多少个 wavefront，取决于 bank 冲突（见 [00 §4.3](../00_transpose/README.md#43-shared-memory-与-bank-conflict)）和访问宽度。同一 SM 的 4 个 SMSP 共用这一个 shared memory 流水线。
+Shared memory processes one **wavefront** per SM per cycle: at most 4 bytes from each of the 32 banks, or 128 B. How many wavefronts a warp access needs depends on bank conflicts (see [00 §4.3](../00_transpose/README.md#43-shared-memory-and-bank-conflicts)) and on the access width. The 4 SMSPs of one SM share this one shared memory pipeline.
 
-一个 SM 每周期最多做 4 条 warp FFMA。步骤 3 中每个 warp 每个 `kk` 做 64 条 FFMA，需要 16 个 wavefront：`64 / 16 = 4`，正好是 FFMA 与 shared memory 吞吐的平衡点，任何冲突或停顿都会让 shared memory 成为瓶颈。步骤 4 实测每个 `kk` 需要 12 个 wavefront，留出了余量。
+An SM does at most 4 warp FFMAs per cycle. In step 3 each warp does 64 FFMAs per `kk` and needs 16 wavefronts: `64 / 16 = 4`, exactly the balance point between FFMA and shared memory throughput, so any conflict or stall makes shared memory the bottleneck. Step 4 measures 12 wavefronts per `kk`, which leaves some margin.
 
-### 4.3 128 位访存：`float4`
+### 4.3 128-bit access: `float4`
 
 ```cpp
-float4 v = *reinterpret_cast<const float4 *>(p);   // p 必须 16 字节对齐
+float4 v = *reinterpret_cast<const float4 *>(p);   // p must be 16-byte aligned
 ```
 
-编译成一条 `LDG.E.128`（全局）或 `LDS.128`（shared），一次读 4 个连续 float。好处是**指令数变成 1/4**，坏处是有两个前提：
+This compiles to one `LDG.E.128` (global) or `LDS.128` (shared), which reads 4 consecutive floats at once. The benefit is that **the instruction count drops to 1/4**; the cost is two preconditions:
 
-1. **地址对齐到 16 字节**。全局矩阵的第 `r` 行从基地址加 `r·K·4` 字节开始，只有基地址 16 字节对齐并且 `K % 4 == 0` 时每行都对齐。`run()` 检查这两个条件（沿 K 读 A、B 时看 `K` 和 A、B 的基地址，沿 N 写 C 时看 `N` 和 C 的基地址），算出 `k_vec`、`n_vec` 传给 kernel；不满足时 `load4`/`store4` 退回 4 次标量访问（`tail` case 专门测 `K % 4 != 0` 这条路径）。
-2. **4 个元素在内存中相邻**。这决定了 shared memory 里 tile 的布局（下一小节）。
+1. **The address is aligned to 16 bytes.** Row `r` of a global matrix starts at the base address plus `r·K·4` bytes, so every row is aligned only if the base address is 16-byte aligned and `K % 4 == 0`. `run()` checks these two conditions (for reading A and B along K it checks `K` and the base addresses of A and B; for writing C along N it checks `N` and the base address of C), computes `k_vec` and `n_vec`, and passes them to the kernel. When the conditions fail, `load4`/`store4` fall back to 4 scalar accesses (the `tail` case specifically tests the `K % 4 != 0` path).
+2. **The 4 elements are adjacent in memory.** This determines the layout of the tile in shared memory (next subsection).
 
-常见误用：对 `float tile[8][130]` 中的 `&tile[kk][4]` 做 `float4` 读：行长 130·4 = 520 字节不是 16 的倍数，`kk = 1` 的行就不对齐了，运行时报 misaligned address。本关用 `BM + 4 = 132`。
+A common misuse: a `float4` read of `&tile[kk][4]` in `float tile[8][130]`. The row length 130·4 = 520 bytes is not a multiple of 16, so the row `kk = 1` is no longer aligned, and the run reports a misaligned address. This lab uses `BM + 4 = 132`.
 
-### 4.4 为什么 K-major 的 tile 要转置后存放
+### 4.4 Why a K-major tile is stored transposed
 
-计算时，一个线程在固定的 `kk` 上需要 A 的一列中的 8 个值（8 个不同的 m）和 B 的一列中的 8 个值（8 个不同的 n）。
+During computation, for a fixed `kk`, a thread needs 8 values from one column of A (8 different m) and 8 values from one column of B (8 different n).
 
 ```
-按全局布局存（K-major）：as[m][kk]          转置后存：as[kk][m]
+stored as in global (K-major): as[m][kk]      stored transposed: as[kk][m]
         kk →                                        m →
    m  ┌ a00 a01 … a07 ┐                       kk ┌ a00 a10 a20 a30 … ┐
    ↓  │ a10 a11 … a17 │                        ↓ │ a01 a11 a21 a31 … │
       │ a20 a21 … a27 │                          │ …                 │
       └ …             ┘                          └                   ┘
-   一列（固定 kk）相隔 BK+1 个 float             一行（固定 kk）连续：可以 float4 读
+   column (fixed kk): BK+1 floats apart          row (fixed kk) is contiguous: float4 reads work
 ```
 
-K-major 存放时，同一个 `kk` 下相邻的 m 相隔一整行，只能一个一个读。把 tile **在搬进 shared memory 的同时转置**，固定 `kk` 的 128 个 m 就是连续的一行，可以用 `LDS.128` 一次读 4 个。转置不增加全局流量，代价是写 shared memory 时每个线程做 4 次标量 `STS`（写的次数远少于读：每个元素写 1 次、被读 16 次）。
+With K-major storage, adjacent m for the same `kk` are a whole row apart, so they can only be read one at a time. If the tile is **transposed while it is moved into shared memory**, the 128 m for a fixed `kk` form one contiguous row, and `LDS.128` reads 4 of them at once. The transpose adds no global traffic; the cost is that each thread does 4 scalar `STS` when writing shared memory (writes are far fewer than reads: each element is written once and read 16 times).
 
-如果 B 是 MN-major（`[K, N]`，attention 中 `P·V` 的 V 就是这样），全局的一行本来就是固定 k 的连续 n，直接拷贝即可，不用转置。Tensor Core 关卡会用 `ldmatrix` 和 smem descriptor 处理这两种布局。
+If B is MN-major (`[K, N]`, as V is in attention's `P·V`), a global row is already the contiguous n for a fixed k, so a direct copy works and no transpose is needed. The Tensor Core labs handle both layouts with `ldmatrix` and smem descriptors.
 
-## 5. 调度设计
+## 5. Schedule design
 
-### 步骤 1：一个线程一个输出
+### Step 1: one thread per output
 
 ```
-block = (32, 8)，grid = (ceil(N/32), ceil(M/8))
-col = blockIdx.x·32 + threadIdx.x       ← warp 内连续，写 C 合并
+block = (32, 8), grid = (ceil(N/32), ceil(M/8))
+col = blockIdx.x·32 + threadIdx.x       ← contiguous within a warp, C writes coalesced
 row = blockIdx.y·8  + threadIdx.y
 ```
 
-一个 warp 的 32 个线程有相同的 `row`、连续的 `col`：读 `A[row][k]` 是广播，读 `B[col][k]` 是 32 个相距 `K·4` 字节的地址，每次 load 要 32 个 sector。
+The 32 threads of a warp have the same `row` and consecutive `col`: reading `A[row][k]` is a broadcast, and reading `B[col][k]` touches 32 addresses `K·4` bytes apart, so each load needs 32 sectors.
 
-### 步骤 2：32×32 block tile，BK = 32
+### Step 2: 32×32 block tile, BK = 32
 
 ```
-block = (32, 32) = 1024 线程，线程 (tx, ty) 负责 C[m0+ty][n0+tx]
-每个 K 切片：
-  as[ty][tx] = A[m0+ty][k0+tx]      bs[ty][tx] = B[n0+ty][k0+tx]     ← 读全局：合并
+block = (32, 32) = 1024 threads, thread (tx, ty) handles C[m0+ty][n0+tx]
+for each K slice:
+  as[ty][tx] = A[m0+ty][k0+tx]      bs[ty][tx] = B[n0+ty][k0+tx]     ← global reads: coalesced
   __syncthreads()
-  acc += as[ty][kk] · bs[tx][kk]，kk = 0..31                         ← 读 smem
+  acc += as[ty][kk] · bs[tx][kk], kk = 0..31                         ← smem reads
   __syncthreads()
 ```
 
-计算时 warp 内 `ty` 相同、`tx = 0..31`：`as[ty][kk]` 是广播；`bs[tx][kk]` 是**按列读**，和 00 关一样需要 `+1` 的 padding，tile 声明为 `[32][33]`。
+During computation the warp has the same `ty` and `tx = 0..31`: `as[ty][kk]` is a broadcast, and `bs[tx][kk]` is a **column read**, which, as in lab 00, needs `+1` padding, so the tile is declared as `[32][33]`.
 
-### 步骤 3：128×128 block tile，8×8 micro-tile
+### Step 3: 128×128 block tile, 8×8 micro-tile
 
 ```
-block = 256 线程，看成 16×16：tx = tid % 16，ty = tid / 16
-BM = BN = 128，BK = 8，TM = TN = 8
-线程 (tx, ty) 拥有 acc[i][j] = C[m0 + ty + 16i][n0 + tx + 16j]       （间隔 16 的“跨步”分配）
+block = 256 threads, viewed as 16×16: tx = tid % 16, ty = tid / 16
+BM = BN = 128, BK = 8, TM = TN = 8
+thread (tx, ty) owns acc[i][j] = C[m0 + ty + 16i][n0 + tx + 16j]       (a "strided" assignment with stride 16)
 
         n0 → BN = 128
-   m0 ┌──┬──┬──┬── … ──┐      线程 (0,0) 拥有标 * 的 8×8 个位置：
-    ↓ │* │  │  │       │      行 0, 16, 32, …, 112
-      │  │  │  │       │      列 0, 16, 32, …, 112
+   m0 ┌──┬──┬──┬── … ──┐      thread (0,0) owns the 8×8 positions marked *:
+    ↓ │* │  │  │       │      rows 0, 16, 32, …, 112
+      │  │  │  │       │      cols 0, 16, 32, …, 112
       │* │  │  │       │
       └──┴──┴──┴── … ──┘
 
-每个 K 切片：
-  stage_kmajor(as) / stage_kmajor(bs)：128×8 的 A、B 切片原样拷进 smem（已提供）
+for each K slice:
+  stage_kmajor(as) / stage_kmajor(bs): copy the 128×8 slices of A and B into smem as is (provided)
   __syncthreads()
   for kk in 0..7:
       af[i] = as[ty + 16i][kk]   (i = 0..7)
       bf[j] = bs[tx + 16j][kk]   (j = 0..7)
-      acc[i][j] += af[i] · bf[j]            ← 8×8 外积：16 次 load，64 次乘加
+      acc[i][j] += af[i] · bf[j]            ← 8×8 outer product: 16 loads, 64 multiply-adds
   __syncthreads()
 ```
 
-**为什么是跨步分配 + `[BK + 1]` padding。** warp 是 tid 0..31，即 `tx = 0..15`、两个 `ty`。读 `bs[tx + 16j][kk]` 时，地址是 `(tx + 16j)·9 + kk`，bank 是 `(9·tx + 常数) % 32`。9 和 32 互素，16 个 `tx` 落在 16 个不同的 bank：无冲突。`as` 的两个地址（两个 `ty`）也在不同 bank。如果改成连续分配（`tx·8 + j`），bank 变成 `(72·tx + …) % 32 = (8·tx + …) % 32`，只有 4 个不同值：4 路冲突。
+**Why a strided assignment plus `[BK + 1]` padding.** A warp is tid 0..31, which is `tx = 0..15` and two values of `ty`. When reading `bs[tx + 16j][kk]`, the address is `(tx + 16j)·9 + kk`, and the bank is `(9·tx + constant) % 32`. 9 and 32 are coprime, so the 16 values of `tx` fall in 16 different banks: no conflict. The two addresses of `as` (the two values of `ty`) are also in different banks. With a contiguous assignment instead (`tx·8 + j`), the bank becomes `(72·tx + …) % 32 = (8·tx + …) % 32`, which has only 4 distinct values: a 4-way conflict.
 
-### 步骤 4：转置存放 + 128 位访存
+### Step 4: transposed storage + 128-bit access
 
 ```
-as[BK][BM + 4]，bs[BK][BN + 4]：as[kk][r] = A[m0 + r][k0 + kk]
-线程 (tx, ty) 拥有两组 4 行、两组 4 列：
+as[BK][BM + 4], bs[BK][BN + 4]: as[kk][r] = A[m0 + r][k0 + kk]
+thread (tx, ty) owns two groups of 4 rows and two groups of 4 columns:
   row(i) = m0 + (i/4)·64 + ty·4 + i%4        col(j) = n0 + (j/4)·64 + tx·4 + j%4
 
-装载：tid 读一个 float4：A[m0 + tid/2][k0 + (tid%2)·4 .. +3]，转置写进 as 的一列（4 次 STS）
-计算：af[0..3] = as[kk][ty·4 ..]，af[4..7] = as[kk][64 + ty·4 ..]    ← 2 条 LDS.128
-      bf[0..3] = bs[kk][tx·4 ..]，bf[4..7] = bs[kk][64 + tx·4 ..]    ← 2 条 LDS.128
-写回：每行两次 float4 store
+load:    tid reads one float4: A[m0 + tid/2][k0 + (tid%2)·4 .. +3], writes it transposed into one column of as (4 STS)
+compute: af[0..3] = as[kk][ty·4 ..], af[4..7] = as[kk][64 + ty·4 ..]    ← 2 LDS.128
+         bf[0..3] = bs[kk][tx·4 ..], bf[4..7] = bs[kk][64 + tx·4 ..]    ← 2 LDS.128
+store:   two float4 stores per row
 ```
 
-两处细节：
+Two details:
 
-- **为什么分两组、相隔 64。** 如果线程拥有连续 8 列 `tx·8 .. tx·8+7`，16 个 `tx` 的 `float4` 地址相隔 32 字节，散布在 512 字节里、只用其中一半，`tx` 与 `tx + 4` 落在同一组 bank 上。分成两组后，16 个 `tx` 读的第一组正好是连续的 64 个 float（256 字节），没有 bank 被两个不同地址占用。`./lab profile` 实测步骤 4 平均每条 `LDS.128` 需要 3 个 wavefront、无 bank 冲突：读 `bs` 的一条（16 个不同的 `float4`，共 256 字节）需要 4 个，读 `as` 的一条（每半个 warp 读同一个地址，广播）需要 2 个。一个 wavefront 最多 128 字节，32 个线程各读 16 字节的 128 位 load 至少要 4 个 wavefront，所以 4 已是理想值（Nsight Compute 的 source 页面中 `L1 Wavefronts Shared` 与 `Ideal` 两列相等）。每个 `kk` 2 × 4 + 2 × 2 = 12 个，与 4.2 节一致。
-- **为什么 padding 是 4。** 转置写入时，warp 内 `lr = tid/2` 取 16 个连续值，`lk` 取 0 或 4。行长为 128 时两组写入落在相同的 16 个 bank：2 路冲突。行长 132 时 bank 是 `(4·(lk + i) + lr) % 32`，`lk = 4` 那组偏移 16，32 个线程用满 32 个 bank。padding 必须是 4 的倍数，`float4` 读才保持 16 字节对齐。
+- **Why two groups, 64 apart.** If a thread owned 8 consecutive columns `tx·8 .. tx·8+7`, the `float4` addresses of the 16 values of `tx` would be 32 bytes apart, spread over 512 bytes with only half of them used, and `tx` and `tx + 4` would land on the same group of banks. With two groups, the first group that the 16 values of `tx` read is exactly 64 consecutive floats (256 bytes), and no bank is taken by two different addresses. `./lab profile` measures an average of 3 wavefronts per `LDS.128` in step 4, with no bank conflicts: one read of `bs` (16 different `float4`s, 256 bytes in total) needs 4, and one read of `as` (each half warp reads the same address, a broadcast) needs 2. One wavefront is at most 128 bytes, and a 128-bit load in which 32 threads each read 16 bytes needs at least 4 wavefronts, so 4 is already ideal (on the Nsight Compute source page, the `L1 Wavefronts Shared` and `Ideal` columns are equal). Each `kk` needs 2 × 4 + 2 × 2 = 12, matching Section 4.2.
+- **Why the padding is 4.** During the transposed write, `lr = tid/2` takes 16 consecutive values within a warp, and `lk` is 0 or 4. With a row length of 128, the two groups of writes land on the same 16 banks: a 2-way conflict. With a row length of 132, the bank is `(4·(lk + i) + lr) % 32`; the `lk = 4` group is offset by 16, and the 32 threads use all 32 banks. The padding must be a multiple of 4 so that `float4` reads stay 16-byte aligned.
 
-### 预算
+### Budget
 
-| 资源 | 步骤 2 | 步骤 3 | 步骤 4 | B200 每 SM |
+| Resource | step 2 | step 3 | step 4 | B200 per SM |
 |---|---|---|---|---|
-| 线程 / block | 1024 | 256 | 256 | 最多 2048 |
+| threads / block | 1024 | 256 | 256 | at most 2048 |
 | shared memory / block | 2·32·33·4 = 8448 B | 2·128·9·4 = 9216 B | 2·8·132·4 = 8448 B | 228 KB |
-| 寄存器 / 线程（`./lab sass`） | 32 | ≈ 100 | ≈ 127 | 每 SM 64 K 个，每线程最多 255 |
-| 驻留 block / SM | 2 | 2 | 2 | — |
+| registers / thread (`./lab sass`) | 32 | ≈ 100 | ≈ 127 | 64 K per SM, at most 255 per thread |
+| resident blocks / SM | 2 | 2 | 2 | — |
 
-- `./lab sass` 显示的 `SHARED` 比上表多 1 KB：每个 block 有 1 KB shared memory 留给系统。
-- 步骤 3、4 受**寄存器**限制：64 个累加器 + 16 个操作数 + 地址，约 128 个寄存器；256 线程 × 128 = 32 K，一个 SM 只能放 2 个 block（16 个 warp）。shared memory 只用了不到 10%。
-- micro-tile 不能无限放大：16×16 需要 256 个累加寄存器，超过每线程 255 个的上限，会 spill 到 local memory。
-- block tile 也不能无限放大：tile 越大，block 数越少。`square4k` 有 32×32 = 1024 个 128×128 block，148 个 SM × 2 = 296 个位置，3.5 轮，最后一轮只用了一半 SM。
+- The `SHARED` that `./lab sass` shows is 1 KB more than the table: each block has 1 KB of shared memory reserved for the system.
+- Steps 3 and 4 are limited by **registers**: 64 accumulators + 16 operands + addresses come to about 128 registers; 256 threads × 128 = 32 K, so one SM holds only 2 blocks (16 warps). Shared memory use is under 10%.
+- The micro-tile cannot grow without limit: 16×16 needs 256 accumulator registers, above the limit of 255 per thread, so it would spill to local memory.
+- The block tile cannot grow without limit either: the larger the tile, the fewer the blocks. `square4k` has 32×32 = 1024 blocks of 128×128, and 148 SMs × 2 = 296 slots, so it takes 3.5 waves, and the last wave uses only half the SMs.
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-所有命令在仓库根目录运行。每一步只要求对应的 TODO，其余代码已经写好。
+Run all commands from the repository root. Each step asks only for its own TODO; the rest of the code is already written.
 
-### 步骤 1 · TODO(1)：朴素 GEMM
+### Step 1 · TODO(1): naive GEMM
 
-在 `gemm_naive` 中算出 `(row, col)`、判断越界、做长度为 K 的点积。
+In `gemm_naive`, compute `(row, col)`, check bounds, and compute a dot product of length K.
 
 ```bash
 ./lab check 10 --step 1
-./lab bench 10 --step 1          # 很慢：比 cuBLAS 慢约 100 倍，要等一会儿
+./lab bench 10 --step 1          # very slow: about 100 times slower than cuBLAS, so wait a while
 ```
 
-- `tiny` 是 7×5×3 的整数输入，容差为 0。报告给出 `[m=…, n=…]` 处的值，用 3.1 节的方法手算核对。
-- `col` case（N = 1）失败而 `row` 通过：多半把 B 当成了 `[K, N]`。B 的第 n 行是 `b + n·K`。
-- 报告 “elements are NaN … never written”：grid 没覆盖到，或越界判断写反。
+- `tiny` is a 7×5×3 integer input with tolerance 0. The report gives the value at `[m=…, n=…]`; check it by hand with the method of Section 3.1.
+- The `col` case (N = 1) fails while `row` passes: most likely B was treated as `[K, N]`. Row n of B is `b + n·K`.
+- The report "elements are NaN … never written": the grid does not cover everything, or a bounds check is reversed.
 
-### 步骤 2 · TODO(2)：shared memory tile
+### Step 2 · TODO(2): shared memory tile
 
-在 `gemm_smem` 中实现“装载 → 同步 → 32 次乘加 → 同步”的 K 循环和最后的写回。
+In `gemm_smem`, implement the K loop "load → synchronize → 32 multiply-adds → synchronize" and the final write-back.
 
 ```bash
 ./lab check 10 --step 2
@@ -278,24 +278,24 @@ as[BK][BM + 4]，bs[BK][BN + 4]：as[kk][r] = A[m0 + r][k0 + kk]
 ./lab profile 10 --step 2 --case square
 ```
 
-在 profile 输出中对比 `smsp__inst_executed_op_shared_ld.sum`（shared load 指令数）和 `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum`（全局 load sector 数），和 3.4 节的公式对得上吗？
+In the profile output, compare `smsp__inst_executed_op_shared_ld.sum` (shared load instruction count) and `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` (global load sector count). Do they match the formulas in Section 3.4?
 
-### 步骤 3 · TODO(3)：寄存器分块
+### Step 3 · TODO(3): register tiling
 
-`stage_kmajor` 已经写好。你要写两段：每个 `kk` 的 8×8 外积，以及循环结束后的写回。
+`stage_kmajor` is already written. You write two parts: the 8×8 outer product for each `kk`, and the write-back after the loop.
 
 ```bash
 ./lab check 10 --step 3
 ./lab bench 10 --step 3
-./lab sass 10                    # gemm_regblock 的 REG 应在 100 左右，LOCAL 为 0
+./lab sass 10                    # REG of gemm_regblock should be around 100, LOCAL 0
 ```
 
-- 所有循环加 `#pragma unroll`。`acc[i][j]` 的下标必须在编译期确定，否则数组会被放进 local memory（`./lab sass` 中 `LOCAL` 不为 0），性能下降一个数量级。
-- `one_tile` 通过、`tail` 失败：写回时没判断 `row < M`、`col < N`。
+- Add `#pragma unroll` to every loop. The indices of `acc[i][j]` must be known at compile time; otherwise the array is put in local memory (`LOCAL` is nonzero in `./lab sass`), and performance drops by an order of magnitude.
+- `one_tile` passes, `tail` fails: the write-back does not check `row < M` and `col < N`.
 
-### 步骤 4 · TODO(4)：转置存放与向量化
+### Step 4 · TODO(4): transposed storage and vectorization
 
-在 `gemm_vec` 中写完整的 K 循环（`load4` → 转置写入 → 同步 → `float4` 读 → 外积 → 同步）和用 `store4` 的写回。
+In `gemm_vec`, write the full K loop (`load4` → transposed write → synchronize → `float4` reads → outer product → synchronize) and the write-back with `store4`.
 
 ```bash
 ./lab check 10
@@ -304,78 +304,78 @@ as[BK][BM + 4]，bs[BK][BN + 4]：as[kk][r] = A[m0 + r][k0 + kk]
 ./lab profile 10 --step 4 --case square
 ```
 
-对比步骤 3 和 4 的 `smsp__inst_executed_op_shared_ld.sum`（应变为 1/4）和 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum`（转置写入的冲突）。
+Compare `smsp__inst_executed_op_shared_ld.sum` (should drop to 1/4) and `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum` (conflicts of the transposed write) between steps 3 and 4.
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| Symptom | Likely cause |
 |---|---|
-| `int` 模式的 case 误差是整数，例如差 2 或 4 | 某个 K 切片被加了两次或漏了：检查 `k0` 的步长和第二个 `__syncthreads()` |
-| 偶尔失败、结果不稳定 | 缺少 `__syncthreads()`：下一切片的装载覆盖了别人还没读完的 tile |
-| `tail` 失败、`tail_vec` 通过 | `K % 4 != 0` 时还在用 `float4`，或越界的 K 列没有填 0 |
-| `misaligned address` | `float4` 指针不是 16 字节对齐：检查 padding 和 `vec` 参数 |
-| 步骤 3 比步骤 2 还慢 | `acc` 被放进 local memory（看 `./lab sass` 的 `LOCAL`），或 `bs` 读有 bank 冲突 |
-| `k1` 失败 | K = 1 时只有一个切片，且只有第 0 列有效：检查越界填 0 |
+| errors in `int` pattern cases are integers, for example off by 2 or 4 | some K slice is added twice or skipped: check the step of `k0` and the second `__syncthreads()` |
+| occasional failures, unstable results | missing `__syncthreads()`: the next slice's load overwrites a tile that others have not finished reading |
+| `tail` fails, `tail_vec` passes | `float4` is still used when `K % 4 != 0`, or out-of-bounds K columns are not filled with 0 |
+| `misaligned address` | the `float4` pointer is not 16-byte aligned: check the padding and the `vec` arguments |
+| step 3 is slower than step 2 | `acc` was put in local memory (see `LOCAL` in `./lab sass`), or reads of `bs` have bank conflicts |
+| `k1` fails | with K = 1 there is only one slice, and only column 0 is valid: check the zero fill past the bounds |
 
-## 7. 性能
+## 7. Performance
 
-本机实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS SGEMM（关闭 TF32）的耗时除以本版本耗时）：
+Measured on this machine (CUDA Graph timing; `vs cublas` is the time of cuBLAS SGEMM (TF32 off) divided by the time of this version):
 
-| 版本 | `square4k` vs cublas | `wide` vs cublas | `square4k` % FP32 峰值 |
+| Version | `square4k` vs cublas | `wide` vs cublas | `square4k` % FP32 peak |
 |---|---|---|---|
-| 步骤 1 | ≈ 0.01× | （太慢，未测） | ≈ 0.3% |
-| 步骤 2 | ≈ 0.14× | ≈ 0.13× | ≈ 5% |
-| 步骤 3 | ≈ 0.56× | ≈ 0.53× | ≈ 19% |
-| 步骤 4 | ≈ 0.72× | ≈ 0.68× | ≈ 25% |
+| step 1 | ≈ 0.01× | (too slow, not measured) | ≈ 0.3% |
+| step 2 | ≈ 0.14× | ≈ 0.13× | ≈ 5% |
+| step 3 | ≈ 0.56× | ≈ 0.53× | ≈ 19% |
+| step 4 | ≈ 0.72× | ≈ 0.68× | ≈ 25% |
 | cuBLAS | 1× | 1× | ≈ 35% |
 
-你的数字会因 GPU 状态略有不同，但比例关系应当一致。步骤 4 达到 cuBLAS 的 0.6× 以上即说明机制成立。
+Your numbers will differ slightly with GPU state, but the ratios should match. If step 4 reaches 0.6× cuBLAS or better, the mechanism works.
 
-`./lab profile` 中值得看的指标（在 `square` 上实测，步骤 2 → 3 → 4）：
+Metrics worth reading in `./lab profile` (measured on `square`, step 2 → 3 → 4):
 
-| 指标 | 步骤 2 | 步骤 3 | 步骤 4 | 解释 |
+| Metric | step 2 | step 3 | step 4 | Explanation |
 |---|---|---|---|---|
-| `smsp__inst_executed_op_shared_ld.sum` | 67 M | 8.4 M | 2.1 M | 每次乘加的 shared load 指令：2 → 1/4 → 1/16 |
-| `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` | 67 M | 8.4 M | 6.3 M | shared memory 流水线的实际工作量 |
-| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | ≈ 0 | 0 | 0 | padding 与线程分配的效果 |
-| `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` | 8.4 M | 2.1 M | 2.1 M | block tile 从 32 变 128，全局读变为 1/4 |
+| `smsp__inst_executed_op_shared_ld.sum` | 67 M | 8.4 M | 2.1 M | shared load instructions per multiply-add: 2 → 1/4 → 1/16 |
+| `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` | 67 M | 8.4 M | 6.3 M | actual work of the shared memory pipeline |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | ≈ 0 | 0 | 0 | effect of padding and thread assignment |
+| `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` | 8.4 M | 2.1 M | 2.1 M | block tile grows from 32 to 128, global reads drop to 1/4 |
 
-`sm__inst_executed_pipe_fma.avg.pct_of_peak_sustained_active` 在 `square4k` 上从步骤 3 到步骤 4 提高约四分之一，适合做相对比较。
+`sm__inst_executed_pipe_fma.avg.pct_of_peak_sustained_active` on `square4k` rises by about a quarter from step 3 to step 4; it is good for relative comparisons.
 
-**还差在哪里。**
+**Where the remaining gap is.**
 
-- 本关的 kernel 在一个切片上“先全部装载、再全部计算”，装载时 FFMA 单元空闲，只能靠同一 SM 上另一个 block 填补（每 SM 只有 16 个 warp）。cuBLAS 这里用的是 CUTLASS 的 3 级流水 SIMT kernel，在计算当前切片时已经在搬后面的切片。这正是 [21_pipeline_gemm](../21_pipeline_gemm/README.md) 的主题。
-- 连 cuBLAS 也只有峰值的约 35%，而只做独立 FFMA 的微基准能到约 97%。差距来自 GEMM 内层循环的其他开销（LDS、地址计算、同步、寄存器读端口的竞争）；具体占比本关没有逐项测量。
-- 更根本的是，B200 的 BF16 Tensor Core 稠密峰值约 2250 TFLOP/s，是 FP32 CUDA core 的 30 倍。真正的 attention kernel 都用 Tensor Core，从 [20_mma_gemm](../20_mma_gemm/README.md) 开始。本关的复用、分块和预算分析在那里原样适用。
+- On each slice, this lab's kernels "load everything first, then compute everything". During the load the FFMA units sit idle, and only another block on the same SM can fill the gap (each SM has only 16 warps). Here cuBLAS uses CUTLASS's 3-stage pipelined SIMT kernel, which is already moving later slices while it computes the current one. This is exactly the topic of [21_pipeline_gemm](../21_pipeline_gemm/README.md).
+- Even cuBLAS reaches only about 35% of peak, while a microbenchmark that does only independent FFMAs reaches about 97%. The gap comes from other overheads in the GEMM inner loop (LDS, address computation, synchronization, contention for register read ports); this lab did not measure the share of each item.
+- More fundamentally, the dense BF16 Tensor Core peak of B200 is about 2250 TFLOP/s, 30 times that of the FP32 CUDA cores. Real attention kernels all use Tensor Cores, starting with [20_mma_gemm](../20_mma_gemm/README.md). This lab's analysis of reuse, tiling and budgets applies there unchanged.
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. 一个 64×64 的 block tile，全局读的算术强度是多少？比屋脊点高还是低？
-2. 步骤 2 的 K 循环里，第二个 `__syncthreads()` 删掉会怎样？为什么 `int` 模式的 case 比随机 case 更容易发现这个问题？
-3. 步骤 3 如果改成连续分配（线程拥有列 `tx·8 .. tx·8+7`），保持 `bs[128][9]` 不变，读 `bs` 是几路 bank 冲突？
-4. 为什么不把 micro-tile 增大到 16×16？
-5. 如果 B 按 `[K, N]` 存储，步骤 4 装载 B 时还需要转置吗？
-6. `square4k` 的最少 HBM 流量和计算量各需要多少时间？步骤 2 的全局读总量（第 3.4 节表格）如果都来自 HBM，又需要多少时间？
+1. What is the global read arithmetic intensity of a 64×64 block tile? Is it above or below the ridge point?
+2. What happens if you delete the second `__syncthreads()` in the K loop of step 2? Why do `int` pattern cases expose this problem more easily than random cases?
+3. If step 3 used a contiguous assignment instead (a thread owns columns `tx·8 .. tx·8+7`) and kept `bs[128][9]`, how many ways would the bank conflict be when reading `bs`?
+4. Why not grow the micro-tile to 16×16?
+5. If B were stored as `[K, N]`, would step 4 still need to transpose B when loading it?
+6. How much time do the minimum HBM traffic and the computation of `square4k` each take? If the total global reads of step 2 (table in Section 3.4) all came from HBM, how much time would they take?
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. `64·64 / (2·(64 + 64)) = 16 FLOP/B`，高于 9.3，但只高出不到 2 倍：L2 命中率稍差就会受访存限制。
-2. 快的 warp 会进入下一个切片，在慢的 warp 还在读 `as`、`bs` 时把它们覆盖掉，部分乘积用错了切片的数据。`int` 模式的容差为 0，任何一项用错都会报错；随机数据下也会报错，但 `int` 模式下误差是整数，更容易看出是“某一项算错”。
-3. 地址 `(tx·8 + j)·9 + kk`，bank 为 `(72·tx + …) % 32 = (8·tx + …) % 32`，16 个 `tx` 只落在 4 个 bank，每个 bank 4 个不同地址：4 路冲突。
-4. 16×16 需要 256 个累加寄存器，加上操作数超过每线程 255 个寄存器的上限，会 spill 到 local memory。即使不 spill，每线程寄存器翻倍后一个 SM 只能驻留 1 个 block，更难掩盖装载的延迟。
-5. 不需要。`[K, N]` 中全局的一行就是固定 k、连续的 n，直接拷贝就得到 `bs[kk][n]`。A 仍是 K-major，仍需转置。
-6. 最少流量 201 MB / 8 TB/s ≈ 0.025 ms；计算 137.4 GFLOP / 74.4 TFLOP/s ≈ 1.85 ms。步骤 2 的全局读约 17 GB，如果都来自 HBM 需要约 2.1 ms，已经超过计算时间：这就是为什么 block tile 要足够大，并且要靠 L2 命中。
+1. `64·64 / (2·(64 + 64)) = 16 FLOP/B`, above 9.3 but by less than 2 times: a slightly worse L2 hit rate makes it memory-bound.
+2. A fast warp moves on to the next slice and overwrites `as` and `bs` while a slow warp is still reading them, so some products use data from the wrong slice. The `int` pattern has tolerance 0, so any wrong term is reported; random data also reports an error, but with the `int` pattern the error is an integer, which makes it easier to see that "some term is wrong".
+3. The address is `(tx·8 + j)·9 + kk` and the bank is `(72·tx + …) % 32 = (8·tx + …) % 32`. The 16 values of `tx` fall in only 4 banks, with 4 different addresses per bank: a 4-way conflict.
+4. 16×16 needs 256 accumulator registers; with the operands this exceeds the limit of 255 registers per thread, so it spills to local memory. Even without a spill, doubling the registers per thread means one SM holds only 1 block, which makes the load latency harder to hide.
+5. No. In `[K, N]`, a global row is the contiguous n for a fixed k, so a direct copy gives `bs[kk][n]`. A is still K-major and still needs the transpose.
+6. Minimum traffic: 201 MB / 8 TB/s ≈ 0.025 ms; computation: 137.4 GFLOP / 74.4 TFLOP/s ≈ 1.85 ms. The global reads of step 2 are about 17 GB; if they all came from HBM they would take about 2.1 ms, already more than the computation time. This is why the block tile must be large enough, and why the kernel relies on L2 hits.
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- FlashAttention 论文（Dao et al., 2022）第 2.1–2.2 节（GPU 内存层级、算术强度）和第 3.2 节（IO 复杂度）
-- CUDA C++ Programming Guide：[Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory)（含分块矩阵乘的例子）
-- CUDA C++ Best Practices Guide：[Shared Memory in Matrix Multiplication](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-in-matrix-multiplication-c-ab)
-- Samuel Williams et al., *Roofline: An Insightful Visual Performance Model for Multicore Architectures*（CACM 2009）
-- Simon Boehm，[How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance](https://siboehm.com/articles/22/CUDA-MMM)：本关步骤 1–4 的思路与该文的 kernel 1–6 对应
-- CUTLASS（`third_party/cutlass`，提交 `4370102`）：
-  - `media/docs/cpp/efficient_gemm.md`：分块层级（block tile、warp tile、thread tile）与流水
-  - `include/cutlass/gemm/warp/mma_simt.h`、`include/cutlass/gemm/threadblock/default_mma_core_simt.h`：SIMT GEMM 的线程分配与 shared memory 布局
-  - `include/cutlass/gemm/collective/builders/sm100_simt_builder.inl`：cuBLAS 在 B200 上选中的 SM100 SIMT kernel 的构建方式
+- FlashAttention paper (Dao et al., 2022), Sections 2.1–2.2 (GPU memory hierarchy, arithmetic intensity) and Section 3.2 (IO complexity)
+- CUDA C++ Programming Guide: [Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory) (includes a tiled matrix multiplication example)
+- CUDA C++ Best Practices Guide: [Shared Memory in Matrix Multiplication](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-in-matrix-multiplication-c-ab)
+- Samuel Williams et al., *Roofline: An Insightful Visual Performance Model for Multicore Architectures* (CACM 2009)
+- Simon Boehm, [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance](https://siboehm.com/articles/22/CUDA-MMM): steps 1–4 of this lab correspond to kernels 1–6 of that article
+- CUTLASS (`third_party/cutlass`, commit `4370102`):
+  - `media/docs/cpp/efficient_gemm.md`: the tiling hierarchy (block tile, warp tile, thread tile) and pipelining
+  - `include/cutlass/gemm/warp/mma_simt.h`, `include/cutlass/gemm/threadblock/default_mma_core_simt.h`: thread assignment and shared memory layout of the SIMT GEMM
+  - `include/cutlass/gemm/collective/builders/sm100_simt_builder.inl`: how the SM100 SIMT kernel that cuBLAS picks on B200 is built

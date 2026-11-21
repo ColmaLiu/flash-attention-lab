@@ -1,69 +1,69 @@
-# 32_ws_gemm 答案说明
+# 32_ws_gemm solution notes
 
-## 设计选择
+## Design choices
 
-- **支持域**：与 31 关相同。A、B 为 BF16，C 为 FP32；`K % 8 == 0`、`N % 4 == 0`，M 任意；尾部全部交给 TMA（load 填零，store 裁剪）。三个 step 都覆盖全部形状，所以每个 step 跑全部 correctness case。
-- **原语**：只用 `include/lab/{mbarrier,tma,tcgen05}.cuh`。epilogue 用 `tmem_ld_32x32b_x32_sync`（ld 与 `wait::ld` 在同一个 asm 块里，寄存器在返回时就有效）。没有在本地新增 PTX 封装。
-- **角色**：6 个 warp（192 线程）。warp 0–3 做 epilogue：warp w 只能访问 TMEM lane `32(w%4)..`，取 w = 0..3，与 31 关的“warp w ↔ C 的第 32w 行起”一致。warp 4 是 TMA producer，warp 5 是 MMA issuer，同时负责 TMEM alloc/dealloc（与 CUTLASS 一样，由 MMA warp 持有 TMEM）。producer 和 MMA 各用 `elect_one()` 选一个 lane 跑整个循环，其余 lane 在 `__syncwarp` 等待。CUTLASS（`sm100_gemm_tma_warpspecialized.hpp`）多一个 scheduler warp 和一个 epilogue-load warp；静态调度不需要前者，C 只写不读不需要后者。
-- **barrier**：`full[s]`（1 次到达 + tx）、`empty[s]`（1 次，tcgen05.commit）、`acc_full[a]`（1 次，tcgen05.commit）、`acc_empty[a]`（128 次：每个 epilogue 线程在自己最后一次 `tcgen05.ld` 完成后 `fence::before_thread_sync` + arrive；与 CUTLASS `consumer_arv_count = NumEpilogueThreads` 相同）。生产者一侧（producer 等 `empty`、MMA 等 `acc_empty`）首轮用 `phase ^ 1`，利用“新初始化 barrier 的前一相位视为已完成”。
-- **相位跨 tile**：每个角色各持一份 `RingPos`（index、phase），每用一次 advance 一次，跨 tile 不清零。三个角色按同一个静态 tile 序列走，用同样多次，因此无需通信就保持一致。
-- **未等待的 `empty` 到达**：CTA 最后一个 tile 的最后几个 K 块提交到 `empty[s]` 的 commit 没有人等待。单 CTA 时无害（只到达本 CTA 的 barrier，MMA 已由 `acc_full` 确认完成）；33 关用 cluster 时，CUTLASS 用 `producer_tail` 把它们排空，再让 CTA 退出。
-- **`K = 0`**：make_plan 拒绝（否则 MMA warp 直接 commit `acc_full`，epilogue 写出未初始化的 TMEM）。
-- **barrier 存放**：`Barriers<Cfg>`（各 barrier + TMEM 地址槽）是每个 kernel 里显式声明的静态 `__shared__` 变量，`carve()` 把动态 shared memory 切成 stage 与 staging；不用宏。
-- **早释放累加器**：epilogue 在读完 TMEM 后立即到达 `acc_empty`，此时 TMA store 仍在进行。安全，因为 store 读的是 staging（shared memory），不是 TMEM。
-- **epilogue staging**：persistent 时主循环同时在用 stage buffer，不能像 31 关那样复用。每个 epilogue warp 两个 32×32 FP32 box（4 KB，128B swizzle），共 32 KB；每个 box 一个 bulk group，重写 box 前由 lane 0 `bulk_wait_group_read<1>`（两次之前的 store 已读完），再 `__syncwarp`。
-- **资源**：BN = 256、4 级 stage（192 KB）+ 32 KB staging + 1 KB 对齐 = 225 KB 动态 shared memory，加约 1.1 KB 静态，在 227 KB 上限之内；TMEM 2 × 256 = 512 列，整块 TMEM。每 SM 一个 CTA，所以 512 列的 alloc 不会与本 kernel 的其他 CTA 竞争。5 级或 3 个累加器都放不下。
-- **step 1** 用独立的 `gemm_ws_tile`（grid = 全部 tile，单累加器，与 31 关 step 3 同 tile/同 stage 数），只改变“谁发 TMA、谁发 MMA、谁做 epilogue”。**step 2/3** 用 `gemm_ws_persistent`，grid = min(tile 数, SM 数)，tile `blockIdx.x + i·gridDim.x`。step 3 只改 tile 顺序（分组光栅化，`kGroupM = 8`）。
-- **没有用 `setmaxnreg`**：寄存器 56–72、无 spill；每 SM 只有 6 个 warp，寄存器文件远没用满，重分配没有收益。它留到 FA4（40 关），那里 softmax warpgroup 需要大量寄存器。
+- **Supported domain**: the same as lab 31. A and B are BF16, C is FP32; `K % 8 == 0`, `N % 4 == 0`, M arbitrary; all tails are left to TMA (loads fill zeros, stores clip). All three steps cover all shapes, so every step runs all correctness cases.
+- **Primitives**: only `include/lab/{mbarrier,tma,tcgen05}.cuh`. The epilogue uses `tmem_ld_32x32b_x32_sync` (ld and `wait::ld` are in the same asm block, so the registers are valid on return). No local PTX wrappers were added.
+- **Roles**: 6 warps (192 threads). Warps 0–3 run the epilogue: warp w can only access TMEM lanes `32(w%4)..`; taking w = 0..3 matches lab 31's "warp w ↔ C from row 32w". Warp 4 is the TMA producer; warp 5 is the MMA issuer and also handles TMEM alloc/dealloc (as in CUTLASS, the MMA warp owns TMEM). The producer and the MMA each use `elect_one()` to pick one lane that runs the whole loop; the other lanes wait at `__syncwarp`. CUTLASS (`sm100_gemm_tma_warpspecialized.hpp`) has one more scheduler warp and one epilogue-load warp; static scheduling does not need the former, and C is only written, never read, so the latter is not needed either.
+- **barriers**: `full[s]` (1 arrival + tx), `empty[s]` (1, tcgen05.commit), `acc_full[a]` (1, tcgen05.commit), `acc_empty[a]` (128: each epilogue thread does `fence::before_thread_sync` + arrive after its own last `tcgen05.ld` completes; the same as CUTLASS `consumer_arv_count = NumEpilogueThreads`). The producer side (the producer waiting on `empty`, the MMA waiting on `acc_empty`) uses `phase ^ 1` in the first round, relying on "the previous phase of a freshly initialized barrier counts as completed".
+- **Phases across tiles**: each role holds its own `RingPos` (index, phase) and advances it once per use, without resetting it across tiles. The three roles walk the same static tile sequence and use the same number of slots, so they stay consistent without communicating.
+- **`empty` arrivals that nobody waits for**: the commits to `empty[s]` for the last few K tiles of a CTA's last tile have no waiter. With a single CTA this is harmless (they only arrive on this CTA's barriers, and `acc_full` has already confirmed that the MMAs completed). With clusters in lab 33, CUTLASS drains them with `producer_tail` before letting the CTA exit.
+- **`K = 0`**: rejected by make_plan (otherwise the MMA warp commits `acc_full` directly, and the epilogue writes uninitialized TMEM).
+- **barrier storage**: `Barriers<Cfg>` (all barriers + the TMEM address slot) is a static `__shared__` variable declared explicitly in each kernel; `carve()` splits the dynamic shared memory into stages and staging. No macros.
+- **Early accumulator release**: the epilogue arrives on `acc_empty` right after it finishes reading TMEM, while the TMA store is still in progress. This is safe because the store reads staging (shared memory), not TMEM.
+- **epilogue staging**: in a persistent kernel the main loop uses the stage buffers at the same time, so they cannot be reused as in lab 31. Each epilogue warp has two 32×32 FP32 boxes (4 KB, 128B swizzle), 32 KB in total; each box is one bulk group. Before rewriting a box, lane 0 does `bulk_wait_group_read<1>` (the store from two rounds ago has finished reading), then `__syncwarp`.
+- **Resources**: BN = 256, 4 stages (192 KB) + 32 KB staging + 1 KB alignment = 225 KB of dynamic shared memory, plus about 1.1 KB static, within the 227 KB limit; TMEM 2 × 256 = 512 columns, all of TMEM. One CTA per SM, so the 512-column alloc never competes with other CTAs of this kernel. Neither 5 stages nor 3 accumulators fit.
+- **step 1** uses a separate `gemm_ws_tile` (grid = all tiles, single accumulator, the same tile and stage count as lab 31 step 3) and only changes "who issues TMA, who issues MMA, who runs the epilogue". **steps 2/3** use `gemm_ws_persistent`, grid = min(number of tiles, number of SMs), tiles `blockIdx.x + i·gridDim.x`. Step 3 only changes the tile order (grouped rasterization, `kGroupM = 8`).
+- **No `setmaxnreg`**: 56–72 registers, no spill; each SM has only 6 warps, the register file is far from full, and redistributing gives no benefit. It is left to FA4 (lab 40), where the softmax warpgroups need many registers.
 
-## 各 step 的性能（5 号卡，CUDA Graph，相对 cuBLAS BF16→FP32）
+## Performance per step (GPU 5, CUDA Graph, relative to cuBLAS BF16→FP32)
 
-| 版本 | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
+| Version | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
 |---|---|---|---|
-| 31 关答案（单线程 TMA+MMA，非 persistent） | ≈ 0.84× | ≈ 0.75× | — |
-| step 1：角色分工，一个 CTA 一个 tile | ≈ 0.89× | ≈ 0.80× | ≈ 0.78× |
-| 对照：persistent，单累加器（`Config<256,4,1,0>`） | ≈ 0.92× | ≈ 0.85× | ≈ 0.88–0.9× |
-| step 2：persistent + 累加器双缓冲 | ≈ 0.93× | ≈ 0.86–0.88× | ≈ 0.95–0.98× |
-| step 3：+ 分组光栅化 G = 8 | ≈ 0.92× | ≈ 0.91× | ≈ 0.95× |
+| Lab 31 solution (single-thread TMA+MMA, not persistent) | ≈ 0.84× | ≈ 0.75× | — |
+| step 1: role split, one tile per CTA | ≈ 0.89× | ≈ 0.80× | ≈ 0.78× |
+| Control: persistent, single accumulator (`Config<256,4,1,0>`) | ≈ 0.92× | ≈ 0.85× | ≈ 0.88–0.9× |
+| step 2: persistent + accumulator double buffering | ≈ 0.93× | ≈ 0.86–0.88× | ≈ 0.95–0.98× |
+| step 3: + grouped rasterization G = 8 | ≈ 0.92× | ≈ 0.91× | ≈ 0.95× |
 
-分组大小（step 3，绝对时间相对 step 2 的变化，3 次以内重复）：
+Group size (step 3, change in absolute time relative to step 2, at most 3 repetitions):
 
 | G | square | wide | flat |
 |---|---|---|---|
-| 0（行优先 = step 2） | 1 | 1 | 1 |
+| 0 (row-major = step 2) | 1 | 1 | 1 |
 | 8 | −1.5% | +6% | ≈ −1–2% |
 | 16 | −5% | +8% | −4% |
 | 32 | −3% | +10% | −4% |
 
-- NCU（时钟被锁定，只看比例）：`sm__pipe_tensor_cycles_active` square step 1 ≈ 80%，step 2/3 ≈ 85%（31 关 step 3 ≈ 68%）。wide 的 `dram__bytes_read`：行优先 ≈ 981 MB，G = 8 ≈ 507 MB，G = 32 ≈ 280 MB（A + B 本身 128 MB）。
-- 累加器双缓冲本身在 square 上只值约 1%，在 flat 上约 10%：K = 4096 时一个 tile 的主循环约为 epilogue 的 6–8 倍，而且单累加器也是“读完 TMEM 就释放”，MMA 只等 TMEM→寄存器那一段；K = 1024 时 epilogue 与主循环同量级，重叠才显出价值。为此增加了 `flat` perf case。
-- G > 0 在 A、B 都能放进 L2 的 case 上稍慢，原因未查明（推断与 B200 两个 die 各自的 L2 分区或同一 panel 被更多 CTA 同时读取有关，未验证）。G = 8 是三个 perf case 最差比值最高的选择。
-- `--cold`（每次迭代前清 L2）step 3：square ≈ 0.91×、wide ≈ 0.87×、flat ≈ 1.0×。
-- `selftest --perf` 门槛 0.85：实测最差约 0.91（square、wide），留约 6% 余量。本机 GPU 偶有整体降速时段（cuBLAS 同样变慢），比值基本不变。
-- 剩余差距（推断）：每个 128×256 tile 每 K 块从 L2 读 48 KB，148 个 SM 合计接近 L2 带宽；square 512 个 tile = 3.46 波，最后一波 46% 的 SM 空闲。前者由 33 关的 2-CTA MMA 与 TMA multicast 处理。
+- NCU (clocks locked, so only ratios matter): `sm__pipe_tensor_cycles_active` on square is ≈ 80% for step 1 and ≈ 85% for steps 2/3 (lab 31 step 3 ≈ 68%). `dram__bytes_read` on wide: row-major ≈ 981 MB, G = 8 ≈ 507 MB, G = 32 ≈ 280 MB (A + B itself is 128 MB).
+- Accumulator double buffering by itself is worth only about 1% on square and about 10% on flat: with K = 4096 the main loop of a tile is about 6–8 times the epilogue, and the single accumulator is also "released as soon as TMEM is read", so the MMA only waits for the TMEM→register part. With K = 1024 the epilogue and the main loop are of the same order, and only then does overlap show its value. The `flat` perf case was added for this.
+- G > 0 is slightly slower on cases where A and B both fit in L2; the reason has not been found (inferred to be related to the separate L2 partitions of the two B200 dies, or to the same panel being read by more CTAs at the same time; not verified). G = 8 is the choice with the best worst-case ratio across the three perf cases.
+- `--cold` (L2 flushed before each iteration) step 3: square ≈ 0.91×, wide ≈ 0.87×, flat ≈ 1.0×.
+- `selftest --perf` perf gate 0.85: the measured worst case is about 0.91 (square, wide), leaving about 6% margin. The GPU on this machine occasionally has periods of slowing down across the board (cuBLAS slows down too); the ratios stay basically the same.
+- Remaining gap (inferred): each 128×256 tile reads 48 KB from L2 per K tile, and the 148 SMs together approach the L2 bandwidth; square has 512 tiles = 3.46 waves, and 46% of the SMs are idle in the last wave. The former is handled by lab 33's 2-CTA MMA and TMA multicast.
 
-## 验证
+## Verification
 
-- `./lab check 32 --solution`：3 个 step × 10 个 case 通过（`int` case 精确相等，`random` 最大误差 1.9e-4）。`persistent` case（372 个 tile）让部分 CTA 处理 3 个 tile，累加器 0→1→0 轮换，每 tile 6 个 K 块使环形 buffer 位置跨 tile 错开，最后一组只有 7 行 tile。
-- compute-sanitizer memcheck / racecheck / synccheck：`tail` 上 3 个 step 均 0 错误；step 3 `persistent` 上三种工具均 0 错误。racecheck 不跟踪 TMA 与 tcgen05（async proxy）访问，所以 0 错误只覆盖 generic proxy（staging 写入）。async 部分的顺序按下表推理：
+- `./lab check 32 --solution`: 3 steps × 9 cases pass (`int` cases exactly equal, `random` max error 1.9e-4). The `persistent` case (372 tiles) makes some CTAs process 3 tiles, rotating accumulators 0→1→0; 6 K tiles per tile shift the ring buffer position across tiles, and the last group has only 7 rows of tiles.
+- compute-sanitizer memcheck / racecheck / synccheck: 0 errors on `tail` for all 3 steps; 0 errors from all three tools on step 3 `persistent`. racecheck does not track TMA and tcgen05 (async proxy) accesses, so 0 errors only covers the generic proxy (staging writes). The ordering of the async part is reasoned through in the table below:
 
-| 访问 | 先 | 后 | 保证 |
+| Access | Before | After | Guarantee |
 |---|---|---|---|
-| TMA 写 stage s → MMA 读 | `complete_tx` | MMA 发出 | `full[s]` wait + `fence::after_thread_sync` |
-| MMA 读 stage s → TMA 重写 | MMA 完成 | 下一轮 TMA | `tcgen05.commit → empty[s]`，producer wait |
-| MMA 写累加器 a → epilogue 读 | MMA 完成 | `tcgen05.ld` | `commit → acc_full[a]`，wait + `fence::after` |
-| epilogue 读累加器 a → MMA 重写 | `wait::ld` | 下一 tile 的 MMA | `fence::before` + 128 次 arrive `acc_empty[a]`，MMA wait + `fence::after` |
-| generic 写 staging → TMA store 读 | `st.shared` | `cp.async.bulk.tensor` | `fence.proxy.async` + `__syncwarp` |
-| TMA store 读 staging → 重写 | store 读完 | 下一次写 box | lane 0 `wait_group.read<1>` + `__syncwarp` |
-| 所有 TMEM 访问 → dealloc | MMA 完成（epilogue 已等 `acc_full`）、`wait::ld` | dealloc | `fence::before` + `__syncthreads` + `fence::after` |
-| staging 生命周期 | store 读完 | CTA 退出 | lane 0 `wait_group.read<0>` |
+| TMA writes stage s → MMA reads | `complete_tx` | MMA issued | `full[s]` wait + `fence::after_thread_sync` |
+| MMA reads stage s → TMA rewrites | MMA completes | next-round TMA | `tcgen05.commit → empty[s]`, producer wait |
+| MMA writes accumulator a → epilogue reads | MMA completes | `tcgen05.ld` | `commit → acc_full[a]`, wait + `fence::after` |
+| epilogue reads accumulator a → MMA rewrites | `wait::ld` | the next tile's MMA | `fence::before` + 128 arrivals on `acc_empty[a]`, MMA wait + `fence::after` |
+| generic write to staging → TMA store reads | `st.shared` | `cp.async.bulk.tensor` | `fence.proxy.async` + `__syncwarp` |
+| TMA store reads staging → rewrite | store finished reading | next write to the box | lane 0 `wait_group.read<1>` + `__syncwarp` |
+| all TMEM accesses → dealloc | MMA completes (the epilogue has waited on `acc_full`), `wait::ld` | dealloc | `fence::before` + `__syncthreads` + `fence::after` |
+| staging lifetime | store finished reading | CTA exits | lane 0 `wait_group.read<0>` |
 
-- `./lab sass 32 --solution`：56 / 70 / 72 寄存器，无 spill、无 local memory；有 `UTCHMMA`、`UTCBAR`、`UTMALDG`、`UTMASTG`、`LDTM`。
-- 骨架：在原位按 TODO(1)、(2)、(3) 逐步填入答案代码，`--step n` 依次通过，第 n 步只依赖前 n 组 TODO；填完后学生版与答案同速；骨架已恢复为逐字节相同。未填时 step 1 在 producer（TODO(1)）、step 2/3 在 persistent producer（TODO(2)）处 trap，不会死锁：每个角色在任何 mbarrier 等待之前先到达自己的 TODO。
+- `./lab sass 32 --solution`: 56 / 70 / 72 registers, no spill, no local memory; contains `UTCHMMA`, `UTCBAR`, `UTMALDG`, `UTMASTG`, `LDTM`.
+- Skeleton: the solution code was filled in place step by step for TODO(1), (2), (3); `--step n` passes in order, and step n depends only on the first n groups of TODOs. After filling, the student version runs at the same speed as the solution; the skeleton has been restored byte for byte. When unfilled, step 1 traps in the producer (TODO(1)) and steps 2/3 trap in the persistent producer (TODO(2)), without deadlock: every role reaches its own TODO before any mbarrier wait.
 
-## 已知局限
+## Known limitations
 
-- 静态 round-robin 调度：square 的波次尾部（3.46 波）没有处理（stream-K / split-K 不在本课程范围）。
-- `kGroupM` 是编译期常量，没有按形状自动选择。
-- epilogue 每个 32 列块 ld 后立即等待（`_sync`），没有把下一块的 ld 与本块的 smem 写重叠；epilogue 已与主循环重叠，测得不是瓶颈。
-- 只有 BF16 → FP32。
+- Static round-robin scheduling: the wave tail of square (3.46 waves) is not handled (stream-K / split-K are outside the scope of this course).
+- `kGroupM` is a compile-time constant and is not chosen automatically by shape.
+- The epilogue waits right after the ld of each 32-column block (`_sync`) and does not overlap the next block's ld with this block's smem writes; the epilogue already overlaps the main loop, and measurements show it is not the bottleneck.
+- BF16 → FP32 only.

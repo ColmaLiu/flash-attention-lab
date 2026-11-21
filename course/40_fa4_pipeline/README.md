@@ -1,84 +1,84 @@
-# 40 · FA4 的流水结构：两个 Q tile ping-pong、P 写回 TMEM、correction warpgroup
+# 40 · FA4 pipeline structure: two-Q-tile ping-pong, P written back to TMEM, correction warpgroup
 
-> 部分 4 · FA4 — Blackwell 上的完整优化　｜　前置：[34_fa3](../34_fa3/README.md)、[32_ws_gemm](../32_ws_gemm/README.md)　｜　代码：[`students/40_fa4_pipeline/kernel.cu`](../../students/40_fa4_pipeline/kernel.cu)
+> Part 4 · FA4 — full optimization on Blackwell | Prerequisites: [34_fa3](../34_fa3/README.md), [32_ws_gemm](../32_ws_gemm/README.md) | Code: [`students/40_fa4_pipeline/kernel.cu`](../../students/40_fa4_pipeline/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-34 关把 FA3 的思想搬到了 `tcgen05` 上：一个 TMA warp、一个 MMA warp、一个 softmax warpgroup，S 和 O 在 TMEM 里，P 经 shared memory。它最后停在 cuDNN 的约 0.55 倍，瓶颈是那一个 softmax warpgroup。
+Lab 34 moved the ideas of FA3 onto `tcgen05`: one TMA warp, one MMA warp, one softmax warpgroup; S and O in TMEM; P through shared memory. It ended at about 0.55× of cuDNN, and the bottleneck was that single softmax warpgroup.
 
-本关搭出 FlashAttention-4（FA4）在 B200 上的**流水结构**。接口不变：FP16/BF16 的 Q、K、V、O，`[B,N,H,D]`，D = 64 或 128，causal 与非 causal，输出 O 和 FP32 的 LSE。
+This lab builds the **pipeline structure** of FlashAttention-4 (FA4) on B200. The interface does not change: FP16/BF16 Q, K, V, O, `[B,N,H,D]`, D = 64 or 128, causal and non-causal, outputs O and an FP32 LSE.
 
-| | 34 关（FA3 思想） | 本关（FA4 结构） |
+| | Lab 34 (FA3 ideas) | This lab (FA4 structure) |
 |---|---|---|
-| 一个 CTA 算几行 query | 128（一个 Q tile） | **256（两个 Q tile）** |
-| softmax warpgroup | 1 个 | **2 个，ping-pong**：一个做 softmax 时，Tensor Core 在算另一个 tile 的 GEMM |
-| S 在 TMEM 的缓冲 | 2 个 S buffer（同一个 tile） | 每个 tile 1 个 S buffer |
-| P 怎样进入 P·V | 写 shared memory（SS MMA） | **写回 TMEM，覆盖本 tile S 的后 64 列**，P·V 的 A 操作数直接从 TMEM 读（**TS MMA**） |
-| O 的修正 | softmax 线程自己做，挡在 P·V 前面 | **独立的 correction warpgroup** |
-| 寄存器 | 每个线程一样多 | **`setmaxnreg`**：softmax 192，correction 80，其余 48 |
-| K/V 的 shared memory | K、V 各一个环 | K、V 共用**一个**环（K₀、V₀、K₁、V₁…） |
+| Query rows per CTA | 128 (one Q tile) | **256 (two Q tiles)** |
+| softmax warpgroups | 1 | **2, ping-pong**: while one does softmax, the Tensor Core computes the GEMMs of the other tile |
+| S buffers in TMEM | 2 S buffers (same tile) | 1 S buffer per tile |
+| How P enters P·V | Written to shared memory (SS MMA) | **Written back to TMEM, over the last 64 columns of this tile's S**; the A operand of P·V is read directly from TMEM (**TS MMA**) |
+| O correction | Done by the softmax threads themselves, in front of P·V | **A separate correction warpgroup** |
+| Registers | Same for every thread | **`setmaxnreg`**: softmax 192, correction 80, everyone else 48 |
+| K/V shared memory | One ring each for K and V | K and V share **one** ring (K₀, V₀, K₁, V₁, ...) |
 
-本关三步，每一步都支持 causal：
+This lab has three steps, and every step supports causal:
 
-1. **两个 Q tile、两个 softmax warpgroup ping-pong**（P 仍经 shared memory，softmax 自己修正 O），加上 causal 的块数；
-2. **P 别名写回 TMEM**，P·V 改成 TS 形式的 `tcgen05.mma`；
-3. **correction warpgroup 与 `setmaxnreg`**。
+1. **Two Q tiles, two softmax warpgroups ping-pong** (P still goes through shared memory, softmax still corrects O itself), plus the causal block count;
+2. **P aliased back into TMEM**; P·V becomes a TS-form `tcgen05.mma`;
+3. **correction warpgroup and `setmaxnreg`**.
 
-做完后你应该能：
+When you finish, you should be able to:
 
-- 画出六种角色（2 × softmax、correction、MMA、TMA、空闲）的时间线和每个 mbarrier 的生产者、消费者与 parity；
-- 说清为什么 `s_full` 一个 barrier 就同时保证了“S 已算好”“上一块的 P·V 已完成”“上一块的 P 已读完”；
-- 写出 A 操作数在 TMEM 中的布局，以及 TS MMA 的地址怎样逐 K 片前进；
-- 列出 512 列 TMEM、64K 个寄存器、227 KB shared memory 怎样在角色之间分配；
-- 用 `./lab sass` 和插桩时间线解释每一步的收益，并说出下一关（41）要解决的瓶颈：MUFU。
+- draw the timeline of the six roles (2 × softmax, correction, MMA, TMA, idle) and the producer, consumer and parity of every mbarrier;
+- explain why the single barrier `s_full` guarantees at once that "S is computed", "the P·V of the previous block is done", and "the P of the previous block has been read";
+- write the layout of an A operand in TMEM, and how the TS MMA address advances per K slice;
+- list how 512 TMEM columns, 64K registers and 227 KB of shared memory are split among the roles;
+- use `./lab sass` and an instrumented timeline to explain the gain of each step, and name the bottleneck the next lab (41) attacks: MUFU.
 
-## 2. 动机：34 关卡在哪里
+## 2. Motivation: where lab 34 stalls
 
-34 关 §7.2 的结论：S 双缓冲之后 Tensor Core 仍有约 60% 的时间空闲，它在等**唯一的** softmax warpgroup。一个块里 softmax warpgroup 要依次做：读 S、求最大值、128×128 次 `exp2`、写 32 KB 的 P、把 O 读出来乘 α 再写回。
+The conclusion of lab 34 §7.2: after S double buffering, the Tensor Core is still idle about 60% of the time, waiting for the **only** softmax warpgroup. In one block, the softmax warpgroup has to do, in order: read S, find the max, 128×128 `exp2`, write 32 KB of P, and read O, multiply by α and write it back.
 
-FA4（Tri Dao 等，2025，代码在 `flash_attn/cute/flash_fwd_sm100.py`）给出的办法正好对应 34 关 §7.2 表中的前三行：
+The remedies of FA4 (Zadouri et al., 2026; code in `flash_attn/cute/flash_fwd_sm100.py`) match the first three rows of the table in lab 34 §7.2:
 
-| 34 关剩下的问题 | FA4 的办法 | 本关步骤 |
+| Remaining problem from lab 34 | FA4's solution | Step in this lab |
 |---|---|---|
-| 一个 softmax warpgroup 在等 MMA 时没人填补，MMA 在等 softmax 时也闲着 | 两个 Q tile、两个 softmax warpgroup ping-pong（FA3 论文 §3.2 的 inter-warpgroup ping-pong，换成 `tcgen05`） | 1 |
-| P 写 shared memory 又被 MMA 读回，还要 `fence.proxy.async`；P 占 64 KB shared memory | P 写回 TMEM，覆盖 S；TS MMA | 2 |
-| O 的修正在 softmax 的关键路径上 | 独立的 correction warpgroup | 3 |
-| 一个 CTA 里角色多了，寄存器不够分 | `setmaxnreg` 按角色重新分配 | 3 |
-| MUFU 吞吐、每块都修正 O | 多项式 `exp2`、条件 rescale | 41 关 |
+| Nobody fills in while the one softmax warpgroup waits for the MMA, and the MMA is idle while it waits for softmax | Two Q tiles, two softmax warpgroups ping-pong (the inter-warpgroup ping-pong of FA3 paper §3.2, moved onto `tcgen05`) | 1 |
+| P is written to shared memory and read back by the MMA, which also needs `fence.proxy.async`; P takes 64 KB of shared memory | P written back to TMEM over S; TS MMA | 2 |
+| The O correction is on the critical path of softmax | A separate correction warpgroup | 3 |
+| With more roles in one CTA, there are not enough registers to go around | `setmaxnreg` redistributes them by role | 3 |
+| MUFU throughput, O corrected every block | Polynomial `exp2`, conditional rescale | Lab 41 |
 
-## 3. 数学
+## 3. Math
 
-online softmax 的公式与 22、34 关完全相同（m 存原始分数，`scale_log2 = scale·log₂e`）：
+The online softmax formulas are exactly the same as in labs 22 and 34 (m stores raw scores, `scale_log2 = scale·log₂e`):
 
 ```
 m'  = max(m, max_c s_c)
-α   = 2^(m·scale_log2 − m'·scale_log2)        块 0：m = −∞，α = 0
+α   = 2^(m·scale_log2 − m'·scale_log2)         block 0: m = −∞, α = 0
 p_c = 2^(s_c·scale_log2 − m'·scale_log2)
 ℓ   ← α·ℓ + Σ_c p_c
-O   ← α·O + P·V_j                              最后 O/ℓ，LSE = m·scale + ln ℓ
+O   ← α·O + P·V_j                              finally O/ℓ, LSE = m·scale + ln ℓ
 ```
 
-两个 tile 互不相关：tile 0 是 query 行 `q0 .. q0+127`，tile 1 是 `q0+128 .. q0+255`，它们共用同一个 K_j、V_j，各有自己的 m、ℓ、S、P、O。本关新的数学只有一个：**一个块要多少时间**。
+The two tiles are independent: tile 0 is query rows `q0 .. q0+127`, tile 1 is `q0+128 .. q0+255`. They share the same K_j and V_j, and each has its own m, ℓ, S, P, O. The only new math in this lab is **how long one block takes**.
 
-### 3.1 一个 tile 的“链”
+### 3.1 The "chain" of one tile
 
-对一个 tile，下面四件事必须按顺序发生（箭头是数据依赖）：
-
-```
-softmax_j（读 S_j，写 P_j）→ P_j·V_j → S_{j+1} = Q·K_{j+1}ᵀ → softmax_{j+1} → …
-```
-
-为什么 `S_{j+1}` 必须排在 `P_j·V_j` 之后？因为每个 tile 只有一块 S 的 TMEM（§5.1 的列预算），而 P_j 就写在这块 S 的后半；`S_{j+1}` 一写，P_j 就没了。于是一个 tile 每块的周期至少是
+For one tile, these four things must happen in order (arrows are data dependencies):
 
 ```
-T_tile ≥ SM + PV + QK      （SM = softmax 一块所需时间）
+softmax_j (reads S_j, writes P_j) → P_j·V_j → S_{j+1} = Q·K_{j+1}ᵀ → softmax_{j+1} → …
 ```
 
-D = 128 时 PV、QK 各 8 条 128×128×16 的 MMA，每条约 64 周期（B200 每 SM 每周期约 8192 FLOP），合计约 1024 周期；`exp2` 每 SM 每周期 16 个，一个 tile 一块 128×128 个，约 1024 周期。
+Why must `S_{j+1}` come after `P_j·V_j`? Because each tile has only one S region in TMEM (the column budget of §5.1), and P_j is written into the second half of that S; as soon as `S_{j+1}` is written, P_j is gone. So the period per block of one tile is at least
 
-### 3.2 两个 tile ping-pong
+```
+T_tile ≥ SM + PV + QK      (SM = time for the softmax of one block)
+```
 
-34 关只有一个 tile：Tensor Core 在 softmax 期间（除了提前算的下一个 S）基本闲着。两个 tile 时，tile 0 在做 softmax 的那段时间，Tensor Core 可以做 tile 1 的 PV 和 QK，反过来也一样：
+At D = 128, PV and QK are each 8 MMAs of 128×128×16, each about 64 cycles (B200 does about 8192 FLOP per SM per cycle), about 1024 cycles in total; `exp2` runs at 16 per SM per cycle, and one block of one tile has 128×128 of them, about 1024 cycles.
+
+### 3.2 Two tiles ping-pong
+
+Lab 34 has only one tile: during softmax the Tensor Core is mostly idle (apart from computing the next S early). With two tiles, while tile 0 does softmax, the Tensor Core can do the PV and QK of tile 1, and the other way around:
 
 ```
 Tensor Core │PV¹ QK¹│PV⁰ QK⁰│PV¹ QK¹│PV⁰ QK⁰│
@@ -86,277 +86,277 @@ softmax 0   │ SM⁰_j │       │SM⁰_j+1│       │
 softmax 1   │       │ SM¹_j │       │SM¹_j+1│
 ```
 
-理想情况下两条链错开半个周期，`T = max(2·(PV+QK), 2·SM, SM + PV + QK)`。D = 128 时三项都约 2048 周期：Tensor Core 和 MUFU 同时满载。实际 SM 比 1024 长得多（§7.2 实测约 1900–2200），所以 `T ≈ SM + PV + QK + 交接延迟`，链长决定一切。这就是本关每一步都在缩短的东西。
+Ideally the two chains are offset by half a period, and `T = max(2·(PV+QK), 2·SM, SM + PV + QK)`. At D = 128 all three terms are about 2048 cycles: the Tensor Core and MUFU are both fully loaded. In practice SM is much longer than 1024 (measured about 1900–2200 in §7.2), so `T ≈ SM + PV + QK + handoff latency`, and the chain length decides everything. This is what every step of this lab shortens.
 
-### 3.3 手算：每 SM 一块要多久
+### 3.3 By hand: how long one block takes per SM
 
-`perf` case（B·H = 64，N = 4096，D = 128）：每个 CTA 两个 tile、32 个 K/V 块，共 1024 个 CTA、148 个 SM，约 7 轮。用周期来算（不依赖频率）：
+The `perf` case (B·H = 64, N = 4096, D = 128): each CTA has two tiles and 32 K/V blocks; 1024 CTAs on 148 SMs is about 7 rounds. Counting in cycles (independent of the clock frequency):
 
-| | 每块 T | 每 SM 合计（7 轮 × 32 块 × T） |
+| | T per block | Total per SM (7 rounds × 32 blocks × T) |
 |---|---|---|
-| 理想（§3.2） | 2048 | ≈ 46 万周期 |
-| 本关步骤 3（Nsight Compute 不锁频时测得 `sm__cycles_elapsed.avg` ≈ 83 万） | ≈ 3700（含每个 CTA 的序幕、收尾） | ≈ 83 万周期 |
+| Ideal (§3.2) | 2048 | ≈ 0.46 M cycles |
+| Step 3 of this lab (`sm__cycles_elapsed.avg` ≈ 0.83 M, measured with Nsight Compute without locked clocks) | ≈ 3700 (including the prologue and epilogue of each CTA) | ≈ 0.83 M cycles |
 
-满载时 SM 时钟约 1.64 GHz（同一次测量的 `sm__cycles_elapsed.avg.per_second`，低于标称最高频率），83 万周期 ≈ 0.50 ms（bench 测得约 0.55 ms，含 kernel 之间的间隙）。§7.2 用插桩把稳态的一块（≈ 3450 周期）拆开。
+At full load the SM clock is about 1.64 GHz (`sm__cycles_elapsed.avg.per_second` from the same measurement, lower than the nominal maximum frequency), so 0.83 M cycles ≈ 0.50 ms (bench measures about 0.55 ms, including the gaps between kernels). §7.2 uses instrumentation to break down one steady-state block (≈ 3450 cycles).
 
-## 4. 硬件与指令
+## 4. Hardware and instructions
 
-### 4.1 P 写回 TMEM：`tcgen05.st` 打包的 16 位数据
+### 4.1 Writing P back to TMEM: packed 16-bit data with `tcgen05.st`
 
-softmax 线程 r 拥有 S 的第 r 行（TMEM lane r，34 关 §4.1）。读完整行 S（128 个 FP32，128 列）之后，S 就不需要了，于是把 P 写回**同一行的后 64 列**：
+Softmax thread r owns row r of S (TMEM lane r, lab 34 §4.1). After reading the whole row of S (128 FP32 values, 128 columns), S is no longer needed, so P is written back into **the last 64 columns of the same row**:
 
 ```
-TMEM 列：  S^t 的 128 列           c = 0 .. 127
-           P^t 的 64 列            c = 64 .. 127（覆盖 S 的后半）
-P^t 第 c' 列（c' = 0..63）的 32 位 = { 低 16 位: p[2c'], 高 16 位: p[2c'+1] }
+TMEM columns:  S^t: 128 columns          c = 0 .. 127
+               P^t: 64 columns           c = 64 .. 127 (overwrites the second half of S)
+32 bits of P^t column c' (c' = 0..63) = { low 16 bits: p[2c'], high 16 bits: p[2c'+1] }
 ```
 
-32x32b 形状的 `tcgen05.st` 不关心数据类型，它只写 32 位的格子。头文件新增了 `uint32_t` 版本：
+A `tcgen05.st` with the 32x32b shape does not care about the data type; it only writes 32-bit cells. The header adds a `uint32_t` version:
 
 ```cpp
 uint32_t w[16];
 for (int c = 0; c < 16; ++c) w[c] = pack2<T>(p[32h + 2c], p[32h + 2c + 1]);
 lab::tmem_st_32x32b_x16(p_addr + 16 * h, w);      // h = 0..3
-lab::tmem_wait_st();                               // 全部写完再交给 MMA
+lab::tmem_wait_st();                               // finish all writes before handing off to the MMA
 ```
 
-为什么覆盖 S 的后半是安全的：同一个线程在写 P 之前已经把整行 S 读进了寄存器（`tcgen05.ld` + `wait::ld`），而 S 的这一行只有这个线程读。为什么不用 `x32`：一次 32 个字再加 128 个 float 的 S 行，会让 168 个寄存器（步骤 2 的上限，§4.5）溢出。
+Why overwriting the second half of S is safe: before writing P, the same thread has already read the whole row of S into registers (`tcgen05.ld` + `wait::ld`), and only this thread reads this row of S. Why not `x32`: 32 words at once, plus the S row of 128 floats, would spill past 168 registers (the limit in step 2, §4.5).
 
-### 4.2 TS 形式的 `tcgen05.mma`：A 从 TMEM 读
+### 4.2 TS-form `tcgen05.mma`: A read from TMEM
 
 ```
 tcgen05.mma.cta_group::1.kind::f16 [d_tmem], [a_tmem], b_desc, idesc, enable_input_d;
 ```
 
-和 31 关的 SS 形式比，只是 A 由 shared memory 描述符换成了 **TMEM 地址**（头文件 `lab::mma_f16_ts`）。A 在 TMEM 中的布局要求（PTX ISA “tcgen05.mma”，`cta_group::1`，M = 128）：
+Compared with the SS form of lab 31, the only change is that A is a **TMEM address** instead of a shared memory descriptor (header `lab::mma_f16_ts`). Layout requirements for A in TMEM (PTX ISA "tcgen05.mma", `cta_group::1`, M = 128):
 
-| 要求 | 本关的 P |
+| Requirement | P in this lab |
 |---|---|
-| A 的第 i 行在 lane i（128 行占满 128 个 lane），地址的 lane 字段为 0 | P^t 第 r 行 = softmax 线程 r 写的 lane r |
-| K 方向沿列排列，16 位数据**每列两个**，偶数下标在低 16 位 | `pack2(p[2c], p[2c+1])` |
-| 必须是 K-major：idesc 的 A-major 位为 0 | 与 Q、P（34 关）相同 |
-| 一条 MMA 的 K = 16，即 8 列 | 第 kk 个 K 片从 `p_tmem + 8·kk` 开始 |
+| Row i of A is in lane i (128 rows fill all 128 lanes); the lane field of the address is 0 | Row r of P^t = lane r, written by softmax thread r |
+| The K direction runs along columns, 16-bit data **two per column**, even index in the low 16 bits | `pack2(p[2c], p[2c+1])` |
+| Must be K-major: the A-major bit of idesc is 0 | Same as Q and P (lab 34) |
+| One MMA has K = 16, i.e. 8 columns | The kk-th K slice starts at `p_tmem + 8·kk` |
 
-B（V，MN-major）完全不变，还是 34 关 §4.3 的描述符。交接 P 的同步也变简单了：
+B (V, MN-major) does not change at all; it is still the descriptor from lab 34 §4.3. The synchronization for handing off P also becomes simpler:
 
-| | 34 关 / 本关步骤 1（P 在 shared memory） | 步骤 2（P 在 TMEM） |
+| | Lab 34 / step 1 of this lab (P in shared memory) | Step 2 (P in TMEM) |
 |---|---|---|
-| 写 P | 普通 store + `fence.proxy.async` | `tcgen05.st` + `tcgen05.wait::st` |
-| 交给 MMA | `tcgen05.fence::before_thread_sync` + `mbarrier.arrive` | 同左 |
-| shared memory 中 P 的 64 KB | 需要 | **不需要**：K/V 环从 3 级增到 4 级（D = 128） |
+| Write P | Ordinary store + `fence.proxy.async` | `tcgen05.st` + `tcgen05.wait::st` |
+| Hand off to the MMA | `tcgen05.fence::before_thread_sync` + `mbarrier.arrive` | Same as left |
+| 64 KB of P in shared memory | Needed | **Not needed**: the K/V ring grows from 3 to 4 stages (D = 128) |
 
-### 4.3 同一个线程的 MMA 按发射顺序执行
+### 4.3 MMAs from the same thread execute in issue order
 
-步骤 2 的 MMA warp 对同一个 tile 依次发出：
-
-```
-PV^t_j  ：读 P^t（TMEM 列 128t+64 .. 128t+127）
-QK^t_{j+1}：写 S^t（TMEM 列 128t .. 128t+127）   ← 覆盖了 PV^t_j 还要读的 P^t
-```
-
-两条 MMA 之间没有任何 barrier。这依赖于：**同一个线程发出的 `tcgen05.mma` 在 Tensor Core 中按发射顺序执行**，后一条写 TMEM 时前一条已经读完了它的操作数。FA4（`flash_fwd_sm100.py` 的 `mma()`：“this gemm is scheduled after the PV gemm, which guaranteed that Si has been read”）和 CUTLASS 的 SM100 FMHA（`sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp`，P 与 S 共用 TMEM，PV 之后直接发下一个 QK）都这样做。
-
-要诚实地说明：PTX ISA 8.7 的 “tcgen05 Memory Consistency Model” 只把“**相同 accumulator、相同形状**”的两条 `tcgen05.mma` 列为保证按序的 pipelined 对；PV（accumulator 是 O）和 QK（accumulator 是 S）不属于这一条。本关和上游一样依赖硬件的实际行为；本关全部 correctness case（含大规模随机数据）都通过，但这不是规范给出的保证。严格按规范的做法是在 QK 之前等 PV 的 commit 完成，代价是每块两次 Tensor Core 排空。
-
-另一个**有规范保证**的事实本关大量使用：`tcgen05.commit` 让 mbarrier 跟踪**该线程此前发出的全部** `tcgen05` 异步操作。所以 QK^t_{j+1} 后面的 commit 一旦到达，PV^t_j 也一定完成了（§5.4）。
-
-### 4.4 `setmaxnreg`：在 warpgroup 之间挪寄存器
-
-每个 SM 有 64K 个 32 位寄存器。512 个线程的 CTA 启动时每个线程最多 128 个（`__launch_bounds__(512, 1)`）。但 softmax 线程要把一整行 S（128 个 float）放在寄存器里，再加上地址、m、ℓ、8 个部分和，34 关量出来要约 164 个；MMA、TMA 线程只要几十个。
+In step 2 the MMA warp issues, for the same tile, in order:
 
 ```
-setmaxnreg.inc.sync.aligned.u32 N;   // 把本 warp 每个线程的上限提高到 N，从 CTA 的池里取
-setmaxnreg.dec.sync.aligned.u32 N;   // 降到 N，多出来的还回池里
+PV^t_j    : reads  P^t (TMEM columns 128t+64 .. 128t+127)
+QK^t_{j+1}: writes S^t (TMEM columns 128t .. 128t+127)      ← overwrites the P^t that PV^t_j still reads
 ```
 
-- N 是 8 的倍数，24 ≤ N ≤ 256；
-- 一个 warpgroup 的 4 个 warp 必须执行同一条 `setmaxnreg`，所以 MMA warp、TMA warp 和两个空闲 warp 凑成一个完整的 warpgroup 3（block 为 16 个 warp）；
-- `dec` 立即生效；`inc` 会等到池里有足够的寄存器。本关先 `dec` 的角色（correction、MMA/TMA）不依赖任何 `inc`，不会死锁；
-- ptxas 按 `setmaxnreg` 之后的 N 给那段代码分配寄存器：在 N = 48 的 MMA 代码里，如果编译器把两个 tile 的 16 个描述符都提到循环外，就会溢出到 local memory。答案中 MMA 的 tile 循环写了 `#pragma unroll 1`。`./lab sass` 的 `STACK` 一栏必须为 0。
+There is no barrier between the two MMAs. This relies on: **`tcgen05.mma`s issued by the same thread execute in issue order in the Tensor Core**, so when the later one writes TMEM, the earlier one has already read its operands. FA4 (`mma()` in `flash_fwd_sm100.py`: "this gemm is scheduled after the PV gemm, which guaranteed that Si has been read") and the SM100 FMHA of CUTLASS (`sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp`, where P and S share TMEM and the next QK is issued right after PV) both do this.
 
-头文件新增 `lab::setmaxnreg_inc<N>()` / `lab::setmaxnreg_dec<N>()`。
+To be honest about it: the "tcgen05 Memory Consistency Model" in PTX ISA 8.7 lists as guaranteed-in-order pipelined pairs only two `tcgen05.mma`s with "**the same accumulator and the same shape**"; PV (accumulator O) and QK (accumulator S) are not such a pair. This lab, like upstream, relies on the actual behavior of the hardware; all correctness cases of this lab (including large random data) pass, but this is not a guarantee from the specification. The strictly-by-the-spec approach is to wait for the commit of PV to complete before QK, at the cost of draining the Tensor Core twice per block.
 
-### 4.5 寄存器和线程预算
+This lab relies heavily on another fact that **is guaranteed by the specification**: `tcgen05.commit` makes the mbarrier track **all** `tcgen05` asynchronous operations **previously issued by that thread**. So once the commit after QK^t_{j+1} arrives, PV^t_j has certainly completed too (§5.4).
 
-| 版本 | warp 数 | 角色 | 每线程寄存器上限 | 合计 |
+### 4.4 `setmaxnreg`: moving registers between warpgroups
+
+Each SM has 64K 32-bit registers. When a 512-thread CTA launches, each thread gets at most 128 (`__launch_bounds__(512, 1)`). But a softmax thread keeps a whole row of S (128 floats) in registers, plus addresses, m, ℓ and 8 partial sums; lab 34 measured about 164 for it. MMA and TMA threads need only a few dozen.
+
+```
+setmaxnreg.inc.sync.aligned.u32 N;   // raise the limit of every thread in this warp to N, taking from the CTA's pool
+setmaxnreg.dec.sync.aligned.u32 N;   // lower it to N, returning the surplus to the pool
+```
+
+- N is a multiple of 8, 24 ≤ N ≤ 256;
+- all 4 warps of a warpgroup must execute the same `setmaxnreg`, so the MMA warp, the TMA warp and two idle warps together form a complete warpgroup 3 (the block has 16 warps);
+- `dec` takes effect immediately; `inc` waits until the pool has enough registers. In this lab the roles that `dec` first (correction, MMA/TMA) do not depend on any `inc`, so there is no deadlock;
+- ptxas allocates registers for a code region according to the N after its `setmaxnreg`: in the MMA code with N = 48, if the compiler hoists all 16 descriptors of the two tiles out of the loop, they spill to local memory. The solution writes `#pragma unroll 1` on the tile loop of the MMA. The `STACK` column of `./lab sass` must be 0.
+
+The header adds `lab::setmaxnreg_inc<N>()` / `lab::setmaxnreg_dec<N>()`.
+
+### 4.5 Register and thread budget
+
+| Version | Warps | Role | Register limit per thread | Total |
 |---|---|---|---|---|
-| 步骤 1–2 | 10（320 线程） | 2 × softmax、MMA、TMA | ptxas 给出 168（SM 的 64K 寄存器分在 4 个子分区，每个 16K；warp i 在子分区 i % 4，10 个 warp 时有的子分区要放 3 个 warp：16384 / (3·32) ≈ 170，按 8 取整为 168） | — |
-| 步骤 3 | 16（512 线程） | softmax ×2 | 192 | 2 × 128 × 192 = 49152 |
+| Steps 1–2 | 10 (320 threads) | 2 × softmax, MMA, TMA | ptxas gives 168 (the 64K registers of an SM are split into 4 subpartitions of 16K each; warp i is in subpartition i % 4, so with 10 warps some subpartitions hold 3 warps: 16384 / (3·32) ≈ 170, rounded down to a multiple of 8 gives 168) | — |
+| Step 3 | 16 (512 threads) | softmax ×2 | 192 | 2 × 128 × 192 = 49152 |
 | | | correction | 80 | 128 × 80 = 10240 |
-| | | MMA、TMA、2 个空闲 warp | 48 | 128 × 48 = 6144 |
+| | | MMA, TMA, 2 idle warps | 48 | 128 × 48 = 6144 |
 | | | | | **65536 = 64K** |
 
-步骤 3 如果不写 `setmaxnreg`，softmax 代码只能用 128 个寄存器，`./lab sass` 会显示上百字节的 `STACK`（溢出）。
+In step 3 without `setmaxnreg`, the softmax code can use only 128 registers, and `./lab sass` shows hundreds of bytes of `STACK` (spills).
 
-### 4.6 让整个 warp 跑 MMA 调度
+### 4.6 Running the MMA schedule on the whole warp
 
-34 关的 MMA warp 只有 lane 0 在跑（`if (lane == 0)`），其余 31 个 lane 直接走到 kernel 末尾的 `__syncthreads` 等着。本关把 MMA warp 改成 CUTLASS/FA4 的写法：**32 个 lane 一起等 barrier，`elect.sync` 选出的一个 lane 发 MMA 和 commit**：
+In lab 34 only lane 0 of the MMA warp runs (`if (lane == 0)`); the other 31 lanes go straight to the `__syncthreads` at the end of the kernel and wait. This lab switches the MMA warp to the CUTLASS/FA4 style: **all 32 lanes wait on the barrier together, and one lane chosen by `elect.sync` issues the MMA and the commit**:
 
 ```cpp
 const bool leader = lab::elect_one();
-lab::mbar_wait(&bar.p_ready[t], j & 1);       // 整个 warp 等
+lab::mbar_wait(&bar.p_ready[t], j & 1);       // the whole warp waits
 lab::tcgen05_fence_after_thread_sync();
 if (leader) { mma...; lab::tcgen05_commit(...); }
 __syncwarp();
 ```
 
-本机插桩（§7.2）：只有 lane 0 在跑时，MMA 线程在 `p_ready` 已经完成之后还要几百个周期才能发出下一条 MMA；改成整个 warp 之后降到几十个周期，整体快约 5–8%。这个现象是实测的；它的硬件原因（发散的 warp 如何被调度）我们没有进一步验证。TMA warp 提前好几级装数据，反应慢一点无所谓，保留 lane 0 的写法。
+Instrumentation on this machine (§7.2): with only lane 0 running, the MMA thread takes several hundred cycles after `p_ready` has completed to issue the next MMA; with the whole warp, this drops to a few dozen cycles, and the whole kernel is about 5–8% faster. This is a measured effect; we have not verified its hardware cause (how a divergent warp is scheduled). The TMA warp loads several stages ahead, so a slower reaction does not matter there, and it keeps the lane-0 style.
 
-### 4.7 常见误用
+### 4.7 Common misuses
 
-| 误用 | 后果 |
+| Misuse | Consequence |
 |---|---|
-| P 写到 S 的前 64 列，但还没读完整行 S | 读到自己刚写的 P：结果错 |
-| TS MMA 的 A 地址每个 K 片前进 16 列 | 只用到一半的 P，另一半读到 S 的残余：O 错 |
-| `pack2` 两个参数顺序反了 | 相邻两个 key 的 P 交换：`causal_position`、`position` 错 |
-| `tcgen05.st` 之后没有 `wait::st` 就 arrive | MMA 偶尔读到旧 P |
-| 一个 warpgroup 只有部分 warp 执行 `setmaxnreg` | 未定义行为（PTX ISA 的要求；本关没有测试具体表现） |
-| `setmaxnreg` 的总和超过 512 | `inc` 永远等不到寄存器：挂起 |
-| `p_ready` 的 count 在步骤 3 仍是 128 | correction 和 softmax 的 arrive 超出一个阶段：parity 错乱，挂起或结果错 |
-| 把最终的 m、ℓ 也用 `stats_full` 交给 correction | 两个阶段可能连着完成，correction 等的 parity 永远不来（§5.6） |
+| P written to the first 64 columns of S before the whole row of S is read | Reads back its own freshly written P: wrong results |
+| The A address of the TS MMA advances 16 columns per K slice | Only half of P is used; the other half reads leftovers of S: O wrong |
+| The two arguments of `pack2` swapped | The P values of two adjacent keys are swapped: `causal_position`, `position` fail |
+| arrive after `tcgen05.st` without `wait::st` | The MMA occasionally reads a stale P |
+| Only some warps of a warpgroup execute `setmaxnreg` | Undefined behavior (a PTX ISA requirement; this lab did not test what actually happens) |
+| `setmaxnreg` totals more than 512 | `inc` never gets its registers: hang |
+| The count of `p_ready` is still 128 in step 3 | The arrives of correction and softmax overflow one phase: parity gets scrambled, hang or wrong results |
+| Handing the final m and ℓ to correction through `stats_full` as well | Two phases may complete back to back, and the parity correction waits for never comes (§5.6) |
 
-## 5. 调度设计
+## 5. Schedule design
 
-### 5.1 角色、存储预算
+### 5.1 Roles and storage budget
 
 ```
-grid  = (⌈N/256⌉, H, B)，一个 CTA = 一对 Q tile（256 行）× 一个 head × 一个 batch
-block = 步骤 1–2：10 个 warp；步骤 3：16 个 warp
-  warp 0–3   softmax WG 0：线程 r ↔ tile 0 的第 r 行 ↔ TMEM lane r
-  warp 4–7   softmax WG 1：线程 r ↔ tile 1 的第 r 行 ↔ TMEM lane r（warp 4 访问 lane 0–31）
-  warp 8–11  correction WG（步骤 3）：线程 r 负责两个 tile 的 O 第 r 行
-  MMA warp   warp 8（步骤 1–2）或 12（步骤 3）
+grid  = (⌈N/256⌉, H, B), one CTA = one pair of Q tiles (256 rows) × one head × one batch
+block = steps 1–2: 10 warps; step 3: 16 warps
+  warp 0–3   softmax WG 0: thread r ↔ row r of tile 0 ↔ TMEM lane r
+  warp 4–7   softmax WG 1: thread r ↔ row r of tile 1 ↔ TMEM lane r (warp 4 accesses lanes 0–31)
+  warp 8–11  correction WG (step 3): thread r handles row r of O for both tiles
+  MMA warp   warp 8 (steps 1–2) or 12 (step 3)
   TMA warp   MMA warp + 1
 ```
 
-**TMEM**（512 列 × 128 lane × 32 位），两个 tile 各一份 S/P 和 O：
+**TMEM** (512 columns × 128 lanes × 32 bits), one S/P and one O for each of the two tiles:
 
-| 列 | D = 128 | D = 64 |
+| Columns | D = 128 | D = 64 |
 |---|---|---|
-| S⁰（P⁰ 在其中 64–127） | 0–127 | 0–127 |
-| S¹（P¹ 在其中 192–255） | 128–255 | 128–255 |
+| S⁰ (P⁰ in 64–127 of it) | 0–127 | 0–127 |
+| S¹ (P¹ in 192–255 of it) | 128–255 | 128–255 |
 | O⁰ | 256–383 | 256–319 |
 | O¹ | 384–511 | 320–383 |
-| 合计 / 分配 | **512 / 512** | 384 / 512 |
+| Used / allocated | **512 / 512** | 384 / 512 |
 
-D = 128 时正好用满。这就是为什么每个 tile 只能有一块 S：34 关的“S 双缓冲”在这里放不下，重叠改由**两个 tile 之间**来提供。
+At D = 128 it is exactly full. This is why each tile can have only one S region: the "S double buffering" of lab 34 does not fit here, and the overlap comes instead from **the two tiles**.
 
-**shared memory**（全部是 128B swizzle 的 `[panel][行][64]`，34 关 §4.6）：
+**shared memory** (all in 128B swizzle `[panel][row][64]`, lab 34 §4.6):
 
-| | 步骤 1，D = 128 | 步骤 2–3，D = 128 | 步骤 1，D = 64 | 步骤 2–3，D = 64 |
+| | Step 1, D = 128 | Steps 2–3, D = 128 | Step 1, D = 64 | Steps 2–3, D = 64 |
 |---|---|---|---|---|
-| Q⁰、Q¹（结束时作 O 的暂存区） | 64 KB | 64 KB | 32 KB | 32 KB |
-| P⁰、P¹ | 64 KB | — | 64 KB | — |
-| K/V 环 | 3 × 32 KB | 4 × 32 KB | 6 × 16 KB | 8 × 16 KB |
-| correction 的统计量（步骤 3） | — | 3 KB | — | 3 KB |
-| 合计 | ≈ 224 KB | ≈ 195 KB | ≈ 192 KB | ≈ 163 KB |
+| Q⁰, Q¹ (the O staging area at the end) | 64 KB | 64 KB | 32 KB | 32 KB |
+| P⁰, P¹ | 64 KB | — | 64 KB | — |
+| K/V ring | 3 × 32 KB | 4 × 32 KB | 6 × 16 KB | 8 × 16 KB |
+| correction statistics (step 3) | — | 3 KB | — | 3 KB |
+| Total | ≈ 224 KB | ≈ 195 KB | ≈ 192 KB | ≈ 163 KB |
 
-### 5.2 一个 K/V 环
+### 5.2 One K/V ring
 
-K_j 和 V_j 不再各有一个环，而是按 MMA warp 使用它们的顺序排成一个序列，**item u**：
+K_j and V_j no longer have a ring each. Instead they form one sequence in the order the MMA warp uses them, **item u**:
 
 ```
 u = 0    1    2    3    4    5   …
-    K₀   V₀   K₁   V₁   K₂   V₂  …       item u 放在 stage u % S，第 ⌊u/S⌋ 次使用该 stage
+    K₀   V₀   K₁   V₁   K₂   V₂  …       item u goes in stage u % S, the ⌊u/S⌋-th use of that stage
 ```
 
-TMA warp 对每个 item：等 `kv_empty[u%S]` 的 parity `((u/S)&1)^1`（30 关的标准环形 buffer），arm `kv_full`，装 K 或 V。MMA warp 用完 K_j（两个 tile 的 QK 都发完后）和 V_j（两个 tile 的 PV 都发完后）各 commit 一次 `kv_empty`。
+For each item, the TMA warp waits on `kv_empty[u%S]` with parity `((u/S)&1)^1` (the standard ring buffer of lab 30), arms `kv_full`, and loads K or V. The MMA warp commits `kv_empty` once after it is done with K_j (after the QKs of both tiles are issued) and once after it is done with V_j (after the PVs of both tiles are issued).
 
-### 5.3 MMA warp 的发射顺序
+### 5.3 Issue order of the MMA warp
 
 ```
-序幕： 等 K₀；对 t = 0, 1：等 Q^t，QK^t_0 → S^t，commit s_full[t]；commit kv_empty(K₀)
-块 j： 等 V_j、K_{j+1}
-       对 t = 0, 1：
-         等 p_ready[t]（parity j&1）
-         PV^t_j：O^t [+]= P^t_j · V_j            （j = 0 时不累加）
-         t = 1：commit kv_empty(V_j)
-         还有下一块：QK^t_{j+1} → S^t，commit s_full[t]
-         否则：     commit o_full[t]
-       还有下一块：commit kv_empty(K_{j+1})
+Prologue: wait K₀; for t = 0, 1: wait Q^t, QK^t_0 → S^t, commit s_full[t]; commit kv_empty(K₀)
+Block j:  wait V_j, K_{j+1}
+          for t = 0, 1:
+            wait p_ready[t] (parity j&1)
+            PV^t_j: O^t [+]= P^t_j · V_j            (no accumulation when j = 0)
+            t = 1: commit kv_empty(V_j)
+            if there is a next block: QK^t_{j+1} → S^t, commit s_full[t]
+            otherwise:                commit o_full[t]
+          if there is a next block: commit kv_empty(K_{j+1})
 ```
 
-Tensor Core 上的序列是 `PV⁰_j QK⁰_{j+1} PV¹_j QK¹_{j+1} PV⁰_{j+1} …`。tile 0 的 softmax 在算 S⁰_{j+1} 的时候，Tensor Core 在做 PV¹_j 和 QK¹_{j+1}——这就是 ping-pong。两个 tile 的相位差是在序幕里自然形成的：S⁰_0 比 S¹_0 早一条 QK 完成，之后每个 tile 的链各自循环（§3.2）。
+The sequence on the Tensor Core is `PV⁰_j QK⁰_{j+1} PV¹_j QK¹_{j+1} PV⁰_{j+1} …`. While the softmax of tile 0 works on S⁰_{j+1}, the Tensor Core does PV¹_j and QK¹_{j+1}: this is the ping-pong. The phase offset between the two tiles forms naturally in the prologue: S⁰_0 completes one QK earlier than S¹_0, and after that each tile's chain loops on its own (§3.2).
 
-### 5.4 `s_full` 一个 barrier 保证三件事
+### 5.4 One barrier, `s_full`, guarantees three things
 
-softmax WG t 在块 j 开始时只等 `s_full[t]` 的第 j 个阶段。它到达时：
+At the start of block j, softmax WG t waits only for phase j of `s_full[t]`. When it arrives:
 
-1. S^t_j 已在 TMEM 中（commit 跟在 QK^t_j 后面）；
-2. PV^t_{j−1} 已完成，O^t 含块 0..j−1：PV^t_{j−1} 在 QK^t_j **之前**由同一线程发出，commit 跟踪此前全部 MMA（§4.3）；
-3. P^t_{j−1} 已被读完（同 2）。
+1. S^t_j is in TMEM (the commit follows QK^t_j);
+2. PV^t_{j−1} has completed and O^t includes blocks 0..j−1: PV^t_{j−1} was issued by the same thread **before** QK^t_j, and the commit tracks all earlier MMAs (§4.3);
+3. P^t_{j−1} has been fully read (same as 2).
 
-所以和 34 关不同，softmax 写 P^t_j、修正 O^t 之前**不需要再等 `o_ready`**。
+So unlike lab 34, softmax **does not need to wait for `o_ready`** before writing P^t_j and correcting O^t.
 
 ### 5.5 causal
 
-一对 tile 的最后一行是 `q0 + 255`，所以块数是 `min(⌈N/128⌉, ⌈(q0 + 256)/128⌉)`，两个 tile 走**同样多**的块（MMA 调度不用分 tile）。代价：tile 0 的最后一块全部被 mask（行 `q0..q0+127` 看不到 key `q0+128..q0+255`）。全被 mask 的块里 `m' = m`（不是 −∞，因为块 0 总含 key 0），`α = 1`，P 全为 0，结果不变。FA4 同样如此；43 关的调度会处理这类浪费。
+The last row of a tile pair is `q0 + 255`, so the block count is `min(⌈N/128⌉, ⌈(q0 + 256)/128⌉)`, and both tiles go through **the same number** of blocks (the MMA schedule does not need to distinguish tiles). The cost: the last block of tile 0 is fully masked (rows `q0..q0+127` cannot see keys `q0+128..q0+255`). In a fully masked block, `m' = m` (not −∞, because block 0 always contains key 0), `α = 1`, P is all 0, and the result does not change. FA4 does the same; the schedule of lab 43 deals with this kind of waste.
 
-需要 mask 的块和每行可见的 key 数与 34 关相同，只是 `q0` 换成本 tile 的首行 `qt = q0 + 128t`。
+The blocks that need a mask and the number of visible keys per row are the same as in lab 34, except that `q0` is replaced by the first row of this tile, `qt = q0 + 128t`.
 
-### 5.6 correction warpgroup（步骤 3）
+### 5.6 correction warpgroup (step 3)
 
-softmax 线程算出 m' 和 α 之后**立刻**把 α 交给 correction，然后才做 128 个 `exp2`：
+As soon as a softmax thread has m' and α, it **immediately** hands α to correction, and only then does the 128 `exp2`:
 
 ```
-softmax WG t（块 j）                         correction WG（对 j，对 t = 0, 1）
-──────────────────                          ─────────────────────────────
+softmax WG t (block j)                      correction WG (for each j, for t = 0, 1)
+──────────────────────                      ────────────────────────────────────────
 wait s_full[t]; ld S; mask; max
-α → st.alpha[t][r]; arrive stats_full[t] ─▶ wait stats_full[t]（parity j&1）
-exp2, ℓ, 写 P（TMEM）                         j > 0：O^t 第 r 行 ×= α（ld/×/st，wait::st）
-fence::before; arrive p_ready[t] ──┐         fence::before; arrive p_ready[t] ─┐
-                                   └──────────────▶ MMA：wait p_ready[t]（count 256）
-（全部块之后）m, ℓ → st.fin_*; arrive final_full[t] ─▶ wait final_full[t], o_full[t]
-                                                   O/ℓ → smem → TMA store；LSE
+α → st.alpha[t][r]; arrive stats_full[t] ─▶ wait stats_full[t] (parity j&1)
+exp2, ℓ, write P (TMEM)                     j > 0: O^t row r ×= α (ld/×/st, wait::st)
+fence::before; arrive p_ready[t] ──┐        fence::before; arrive p_ready[t] ─┐
+                                   └───▶ MMA: wait p_ready[t] (count 256) ◀───┘
+(after all blocks) m, ℓ → st.fin_*; arrive final_full[t] ─▶ wait final_full[t], o_full[t]
+                                                            O/ℓ → smem → TMA store; LSE
 ```
 
-correction 能安全地读 O^t：softmax 是在 `s_full[t]` 第 j 阶段之后才 arrive `stats_full` 的，此时 PV^t_{j−1} 已完成（§5.4）。修正与 `exp2` 并行，不再在 softmax 的关键路径上。
+correction can read O^t safely: softmax arrives on `stats_full` only after phase j of `s_full[t]`, and at that point PV^t_{j−1} has completed (§5.4). The correction runs in parallel with `exp2` and is no longer on the critical path of softmax.
 
-**`stats_full` 为什么不需要 empty barrier**：softmax 写 α^t_{j+1} 之前要等 `s_full[t]` 的第 j+1 阶段，它需要 MMA 等到 `p_ready[t]` 的第 j 阶段，而这需要每个 correction 线程在读完 α^t_j 之后 arrive。
+**Why `stats_full` needs no empty barrier**: before writing α^t_{j+1}, softmax must wait for phase j+1 of `s_full[t]`, which requires the MMA to have waited for phase j of `p_ready[t]`, which in turn requires every correction thread to arrive after reading α^t_j.
 
-**为什么最终的 m、ℓ 要用另一个 barrier `final_full`**：softmax 在最后一块 arrive `stats_full` 之后不再等任何 correction 相关的事，如果它马上再 arrive 一次 `stats_full`，这个 barrier 可能连着完成两个阶段，parity 回到原值，correction 等的那一阶段就“永远”看不到了。
+**Why the final m and ℓ use another barrier, `final_full`**: after its arrive on `stats_full` in the last block, softmax no longer waits for anything related to correction. If it arrived on `stats_full` again right away, this barrier could complete two phases back to back, the parity would return to its old value, and correction would "never" see the phase it is waiting for.
 
-**每个 mbarrier**（S = 环的级数）：
+**Every mbarrier** (S = number of ring stages):
 
-| barrier | count | 谁 arrive | 谁 wait | 块 j / item u 的 parity | 保护什么 |
+| barrier | count | Who arrives | Who waits | Parity for block j / item u | What it protects |
 |---|---|---|---|---|---|
-| `q_full[t]` | 1 + tx | TMA | MMA | 0 | Q^t 已到达 |
-| `kv_full[s]` | 1 + tx | TMA | MMA | `(u/S)&1` | item u 已到达 |
-| `kv_empty[s]` | 1 | `tcgen05.commit`（K：两个 QK 后；V：两个 PV 后） | TMA | `((u/S)&1)^1` | stage 可以覆盖 |
-| `s_full[t]` | 1 | commit（QK^t_j 后） | softmax WG t | `j&1` | §5.4 的三件事 |
-| `p_ready[t]` | 128（步骤 1–2）/ 256（步骤 3） | softmax WG t 每个线程（+ correction 每个线程） | MMA | `j&1` | P^t_j 已写好、S^t_j 已读完、O^t 已修正 |
-| `o_full[t]` | 1 | commit（最后一个 PV^t 后） | epilogue | 0 | O^t 最终值；读 Q^t 的 MMA 全部完成（Q^t 可作暂存区） |
-| `stats_full[t]` | 128 | softmax WG t | correction | `j&1` | α^t_j 在 `st.alpha[t]` |
-| `final_full[t]` | 128 | softmax WG t | correction | 0 | 最终 m、ℓ |
+| `q_full[t]` | 1 + tx | TMA | MMA | 0 | Q^t has arrived |
+| `kv_full[s]` | 1 + tx | TMA | MMA | `(u/S)&1` | item u has arrived |
+| `kv_empty[s]` | 1 | `tcgen05.commit` (K: after both QKs; V: after both PVs) | TMA | `((u/S)&1)^1` | The stage can be overwritten |
+| `s_full[t]` | 1 | commit (after QK^t_j) | softmax WG t | `j&1` | The three things of §5.4 |
+| `p_ready[t]` | 128 (steps 1–2) / 256 (step 3) | Every thread of softmax WG t (+ every correction thread) | MMA | `j&1` | P^t_j is written, S^t_j has been read, O^t is corrected |
+| `o_full[t]` | 1 | commit (after the last PV^t) | epilogue | 0 | Final value of O^t; all MMAs that read Q^t have completed (Q^t can be the staging area) |
+| `stats_full[t]` | 128 | softmax WG t | correction | `j&1` | α^t_j is in `st.alpha[t]` |
+| `final_full[t]` | 128 | softmax WG t | correction | 0 | Final m, ℓ |
 
-parity 不会追尾的理由和 34 关相同：每个 barrier 的第 j+1 阶段都要求等待者先看到第 j 阶段（例如 `p_ready` 的第 j+1 阶段需要 softmax 先拿到 `s_full` 的第 j+1 阶段，而它只能在 MMA 等到 `p_ready` 第 j 阶段之后出现）。`final_full` 和 `o_full` 只有一个阶段。
+Parity never laps for the same reason as in lab 34: phase j+1 of every barrier requires the waiter to have seen phase j first (for example, phase j+1 of `p_ready` requires softmax to have received phase j+1 of `s_full`, which can only appear after the MMA has waited for phase j of `p_ready`). `final_full` and `o_full` have only one phase.
 
-**racecheck 看不见 TMA 和 TMEM 的访问**：上面的表就是本关同步正确性的全部论证，请逐行核对。
+**racecheck cannot see TMA and TMEM accesses**: the table above is the entire argument for the synchronization correctness of this lab, so check it row by row.
 
-### 5.7 全部角色的时间线（D = 128，稳态，示意，不按比例）
+### 5.7 Timeline of all roles (D = 128, steady state, schematic, not to scale)
 
 ```
-TMA          │K₂ V₂ ……（提前 2 块）…………………………………………………………………………
-MMA/TC       │PV⁰₀ QK⁰₁│PV¹₀ QK¹₁│  ·  │PV⁰₁ QK⁰₂│PV¹₁ QK¹₂│  ·  │
-softmax 0    │         │ld max exp exp exp P│         │ld max exp exp exp P│
-softmax 1    │ld max exp exp exp P│         │ld max exp exp exp P│
-correction   │   ×α¹   │   ×α⁰   │         │   ×α¹   │   ×α⁰   │
-              ↑p_ready⁰          ↑p_ready¹
+TMA          │K₂ V₂ …… (2 blocks ahead) …………………………………………………………………………………………………………
+MMA/TC       │ PV⁰₀ QK⁰₁ │ PV¹₀ QK¹₁ │   ·    │ PV⁰₁ QK⁰₂ │ PV¹₁ QK¹₂ │   ·    │
+softmax 0    │           │ld max exp exp exp P│           │ld max exp exp exp P│
+softmax 1    │… exp exp P│           │ld max exp exp exp P│           │ld max …
+correction   │           │    ×α⁰    │  ×α¹   │           │    ×α⁰    │  ×α¹   │
+                         ↑p_ready¹            ↑p_ready⁰   ↑p_ready¹
 ```
 
-每个 tile 的周期 = 自己的 softmax + 自己的 PV、QK + 交接延迟；两个 tile 错开约半个周期（§3.2）。
+Each tile's period = its own softmax + its own PV and QK + handoff latency; the two tiles are offset by about half a period (§3.2).
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-骨架中 host 端（tensor map、launch、dispatch）、barrier 初始化、TMEM 分配、34 关学过的全部辅助函数（`mma_qk`、`mma_pv_ss`、`load_s_row`、mask、`row_max`/`exp_and_sum`、`write_p_smem`、`rescale_o_row`、`store_o_and_lse`）都已写好。`p.step` 选择三个配置之一（`Config<D, 1|2|3>`）；三步是**同一个 kernel 逐步补全**，后面的步骤依赖前面的 TODO。
+The skeleton already contains the host side (tensor maps, launch, dispatch), barrier initialization, TMEM allocation, and every helper learned in lab 34 (`mma_qk`, `mma_pv_ss`, `load_s_row`, mask, `row_max`/`exp_and_sum`, `write_p_smem`, `rescale_o_row`, `store_o_and_lse`). `p.step` selects one of three configurations (`Config<D, 1|2|3>`); the three steps **complete the same kernel incrementally**, and later steps depend on earlier TODOs.
 
-### 步骤 1 · TODO(1a)–(1e)：两个 tile ping-pong（含 causal）
+### Step 1 · TODO(1a)–(1e): two-tile ping-pong (including causal)
 
-- 1a：TMA warp 装两个 Q tile，以及 K/V 环（§5.2）；
-- 1b：MMA warp 的序幕（§5.3）；
-- 1c：MMA warp 每块对每个 tile 的 PV、QK 与各个 commit（§5.3、§4.3）；
-- 1d：softmax WG 选自己的 tile、TMEM 地址，等 `s_full`（§5.1、§5.4）；
-- 1e：causal 的块数（§5.5）。
+- 1a: the TMA warp loads the two Q tiles and the K/V ring (§5.2);
+- 1b: the prologue of the MMA warp (§5.3);
+- 1c: per block and per tile, the PV, QK and commits of the MMA warp (§5.3, §4.3);
+- 1d: each softmax WG picks its tile and TMEM addresses, and waits on `s_full` (§5.1, §5.4);
+- 1e: the causal block count (§5.5).
 
 ```bash
 ./lab check 40 --step 1 --case two_tiles
@@ -364,119 +364,119 @@ correction   │   ×α¹   │   ×α⁰   │         │   ×α¹   │   ×�
 ./lab bench 40 --step 1 --case perf
 ```
 
-### 步骤 2 · TODO(2a)–(2b)：P 写回 TMEM
+### Step 2 · TODO(2a)–(2b): P written back to TMEM
 
-- 2a：`write_p_tmem`（§4.1）；2b：`mma_pv_ts`（§4.2）。kernel 中调用它们的分支（`C::kPInTmem`）已经写好。
+- 2a: `write_p_tmem` (§4.1); 2b: `mma_pv_ts` (§4.2). The branch of the kernel that calls them (`C::kPInTmem`) is already written.
 
 ```bash
 ./lab check 40 --step 2 --case position
 ./lab check 40 --step 2
-./lab sass 40           # UTCHMMA 的 A 操作数变成 tmem[...]
+./lab sass 40           # the A operand of UTCHMMA becomes tmem[...]
 ```
 
-### 步骤 3 · TODO(3a)–(3d)：correction warpgroup 与 setmaxnreg
+### Step 3 · TODO(3a)–(3d): correction warpgroup and setmaxnreg
 
-- 3a：`Config` 中的三个寄存器数，以及每个角色开头的 `setmaxnreg`（§4.4、§4.5）；
-- 3b：softmax 交出 α 和最终的 m、ℓ；3c：correction 的主循环；3d：correction 的 epilogue（§5.6）。
+- 3a: the three register counts in `Config`, and the `setmaxnreg` at the start of each role (§4.4, §4.5);
+- 3b: softmax hands off α and the final m, ℓ; 3c: the main loop of correction; 3d: the epilogue of correction (§5.6).
 
 ```bash
 ./lab check 40 --step 3
-./lab sass 40           # 步骤 3 的 kernel：REG 128、STACK 0
+./lab sass 40           # step 3 kernel: REG 128, STACK 0
 ./lab bench 40 --case perf
 ./lab bench 40 --case perf_causal
 ./lab bench 40 --case perf_d64
 ./lab bench 40 --case perf_8k
 ```
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| Symptom | Likely cause |
 |---|---|
-| `TIMEOUT`（步骤 1） | 环的 parity；MMA 和 TMA 对 item 的编号不一致（K 是偶数、V 是奇数）；`p_ready` 的 parity；忘了 TODO(1b)/(1c) 的 “continued” 部分——序幕后释放 K₀、每块末释放 K_{j+1}（这两处没有 `LAB_TODO`，漏掉时 TMA warp 永远等不到空 stage） |
-| 只有 tile 1 的行错（N > 128 的 case） | Q¹ 的坐标（`q0 + 128`）；S¹/O¹ 的 TMEM 列；softmax WG 1 的 `qt` |
-| `n1`、`one_block` 对，`two_tiles` 错 | 同上；或 tile 1 用了 tile 0 的 P 或 S |
-| `ring`、`position` 错，单块 case 对 | K/V 的 item 下标或 stage |
-| causal 只有第二对以后的 tile 错 | 块数用了 `q0 + 128` 而不是 `q0 + 256` |
-| 步骤 2 O 全错、LSE 对 | P 的打包顺序或列偏移；TS MMA 的 A 地址步长（8 列） |
-| 步骤 3 `TIMEOUT` | `setmaxnreg` 总和 > 512；或某个 warpgroup 没有全部执行；`stats_full` 的 parity |
-| 步骤 3 `peaked*` 错、`uniform` 对 | correction 用错 tile 的 α，或在 j = 0 也乘了 α（此时 α = 0） |
-| 步骤 3 正确但比步骤 2 慢很多 | `./lab sass` 看 STACK：寄存器数没设，softmax 溢出 |
+| `TIMEOUT` (step 1) | Ring parity; MMA and TMA number the items differently (K is even, V is odd); `p_ready` parity; forgot the "continued" parts of TODO(1b)/(1c): releasing K₀ after the prologue and releasing K_{j+1} at the end of each block (these two places have no `LAB_TODO`; if you miss them, the TMA warp never gets an empty stage) |
+| Only rows of tile 1 are wrong (cases with N > 128) | Coordinates of Q¹ (`q0 + 128`); TMEM columns of S¹/O¹; `qt` of softmax WG 1 |
+| `n1`, `one_block` right, `two_tiles` wrong | Same as above; or tile 1 uses the P or S of tile 0 |
+| `ring`, `position` wrong, single-block cases right | K/V item index or stage |
+| causal: only tiles from the second pair on are wrong | Block count uses `q0 + 128` instead of `q0 + 256` |
+| Step 2: O all wrong, LSE right | Packing order or column offset of P; A address stride of the TS MMA (8 columns) |
+| Step 3 `TIMEOUT` | `setmaxnreg` totals > 512; or some warpgroup did not all execute it; `stats_full` parity |
+| Step 3 `peaked*` wrong, `uniform` right | correction uses the α of the wrong tile, or multiplies by α also at j = 0 (where α = 0) |
+| Step 3 correct but much slower than step 2 | Check STACK in `./lab sass`: register counts not set, softmax spills |
 
-## 7. 性能
+## 7. Performance
 
-### 7.1 相对库基线
+### 7.1 Against the library baselines
 
-7 号卡实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好；每项 3 次运行的范围）：
+Measured on GPU 7 (CUDA Graph; `vs cudnn` = cuDNN time / this version's time, higher is better; each entry is the range over 3 runs):
 
-| 版本 | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
+| Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|
-| 34 关步骤 5（对照） | ≈ 0.54–0.59× | ≈ 0.70× | ≈ 0.57–0.59× | — |
-| 步骤 1（ping-pong，P 经 smem） | ≈ 0.77–0.78× | ≈ 0.88–0.89× | ≈ 0.80× | ≈ 0.75–0.76× |
-| 步骤 2（P 在 TMEM，TS MMA） | ≈ 0.80× | ≈ 0.89–0.90× | ≈ 0.73–0.75× | ≈ 0.77–0.78× |
-| 步骤 3（correction WG + setmaxnreg） | ≈ 0.84× | ≈ 0.93–0.94× | ≈ 0.79–0.81× | ≈ 0.82× |
-| FA4（`flash_attn.cute`） | ≈ 1.15× | ≈ 1.33× | ≈ 1.13× | ≈ 1.10× |
+| Lab 34 step 5 (for comparison) | ≈ 0.54–0.59× | ≈ 0.70× | ≈ 0.57–0.59× | — |
+| Step 1 (ping-pong, P through smem) | ≈ 0.77–0.78× | ≈ 0.88–0.89× | ≈ 0.80× | ≈ 0.75–0.76× |
+| Step 2 (P in TMEM, TS MMA) | ≈ 0.80× | ≈ 0.89–0.90× | ≈ 0.73–0.75× | ≈ 0.77–0.78× |
+| Step 3 (correction WG + setmaxnreg) | ≈ 0.84× | ≈ 0.93–0.94× | ≈ 0.79–0.81× | ≈ 0.82× |
+| FA4 (`flash_attn.cute`) | ≈ 1.15× | ≈ 1.33× | ≈ 1.13× | ≈ 1.10× |
 
-你的步骤 3 在四个 perf case 上都达到 cuDNN 的约 0.72 倍以上，就说明本关的机制成立；cuDNN 本身在多次运行之间有几个百分点的波动，请看范围。达到 cuDNN 0.9 倍是 43 关的目标。
+If your step 3 reaches at least about 0.72× of cuDNN on all four perf cases, the mechanisms of this lab work; cuDNN itself varies by a few percent between runs, so look at the range. Reaching 0.9× of cuDNN is the goal of lab 43.
 
-- **ping-pong**（34 关 → 步骤 1）：约 1.35–1.45 倍，这是本关最大的一步。`perf` 上 Tensor Core 忙碌的比例（`sm__pipe_tensor_cycles_active`）从 34 关的约 38% 升到约 53%。
-- **P 写回 TMEM**（步骤 1 → 2）和 **correction warpgroup**（步骤 2 → 3）：各只有几个百分点（步骤 3 的 `perf` 上 Tensor Core 约 57%）。原因见下一节：它们缩短的是 softmax 链上的几百个周期，而链上最长的一段——128 个 `exp2`——没有变。
-- `perf_d64` 上步骤 2 反而比步骤 1 慢约 7%，步骤 3 又回到步骤 1 的水平。D = 64 时 GEMM 只有 D = 128 的一半，Tensor Core 只忙约 30%，瓶颈完全在 softmax 一侧（MUFU 约 57–61%）。我们没有查明步骤 2 变慢的具体原因（K/V 环的级数 4、6、8 结果相同），这是一个留给你用 `./lab profile` 研究的现象。
-- 步骤 3 的另一个收益是寄存器：correction 和 MMA/TMA 让出来的寄存器给了 softmax，以后（41 关）softmax 还要再加多项式 `exp2` 的代码。
+- **ping-pong** (lab 34 → step 1): about 1.35–1.45×, the biggest step of this lab. On `perf`, the fraction of time the Tensor Core is busy (`sm__pipe_tensor_cycles_active`) rises from about 38% in lab 34 to about 53%.
+- **P written back to TMEM** (step 1 → 2) and **correction warpgroup** (step 2 → 3): only a few percent each (in step 3 the Tensor Core is about 57% busy on `perf`). The next section explains why: they shorten the softmax chain by a few hundred cycles, but the longest segment of the chain, the 128 `exp2`, does not change.
+- On `perf_d64`, step 2 is actually about 7% slower than step 1, and step 3 returns to the level of step 1. At D = 64 the GEMMs are only half of those at D = 128, the Tensor Core is only about 30% busy, and the bottleneck is entirely on the softmax side (MUFU about 57–61%). We have not found the specific reason step 2 slows down (K/V ring depths of 4, 6 and 8 give the same result); this is an effect left for you to study with `./lab profile`.
+- Another gain of step 3 is registers: the registers given up by correction and MMA/TMA go to softmax, which later (lab 41) also has to hold the code of the polynomial `exp2`.
 
-### 7.2 瓶颈在哪：插桩时间线
+### 7.2 Where the bottleneck is: an instrumented timeline
 
-在一个 CTA 里用 `clock64()` 记下每个事件的时间（维护者实验，代码不在仓库中；`perf` case，稳态块，单位是 SM 周期）：
+Record the time of each event inside one CTA with `clock64()` (a maintainer experiment; the code is not in the repository; `perf` case, steady-state blocks, in SM cycles):
 
-| 段 | 步骤 3，MMA 只用 lane 0 | 步骤 3（答案） |
+| Segment | Step 3, MMA on lane 0 only | Step 3 (solution) |
 |---|---|---|
-| 一块的周期 T | ≈ 3700 | ≈ 3450 |
-| softmax WG：拿到 S → arrive `p_ready` | ≈ 1900 | ≈ 1900–2200 |
-| 　其中 128 个 `exp2`（含求和） | ≈ 1450 | ≈ 1450–1700 |
-| 最后一个线程 arrive → MMA 发出 PV | ≈ 250–550 | ≈ 40 |
-| PV + QK（一个 tile）在 Tensor Core 上 | ≈ 1100–1300 | ≈ 1100 |
+| Period T of one block | ≈ 3700 | ≈ 3450 |
+| softmax WG: S received → arrive `p_ready` | ≈ 1900 | ≈ 1900–2200 |
+| &emsp;of which: 128 `exp2` (including the sum) | ≈ 1450 | ≈ 1450–1700 |
+| Last thread arrives → MMA issues PV | ≈ 250–550 | ≈ 40 |
+| PV + QK (one tile) on the Tensor Core | ≈ 1100–1300 | ≈ 1100 |
 
-结论：
+Conclusions:
 
-1. 一个 tile 的链 ≈ softmax + 交接 + PV + QK，正是 §3.1 的模型；
-2. softmax 的大头是 `exp2`：一个 warp 128 条 `MUFU.EX2`，按每 SM 每周期 16 个的吞吐至少 1024 周期，实测约 1450——**MUFU 现在是瓶颈**；
-3. Tensor Core 约 57% 时间在工作（`ncu` 的 `sm__pipe_tensor_cycles_active`），MUFU（`sm__inst_executed_pipe_xu`）也只有约 57%：两者都没满，是链太长。
+1. The chain of one tile ≈ softmax + handoff + PV + QK, exactly the model of §3.1;
+2. Most of softmax is `exp2`: one warp issues 128 `MUFU.EX2`; at a throughput of 16 per SM per cycle that is at least 1024 cycles, and about 1450 are measured: **MUFU is now the bottleneck**;
+3. The Tensor Core works about 57% of the time (`sm__pipe_tensor_cycles_active` in `ncu`), and MUFU (`sm__inst_executed_pipe_xu`) is also only about 57%: neither is saturated; the chain is too long.
 
-缩短链的下一步是让 `exp2` 更快：41 关把一部分 `exp2` 换成 FMA 上的多项式（FMA 的吞吐是 MUFU 的 8 倍），并只在最大值明显变化时才修正 O。
+The next step in shortening the chain is a faster `exp2`: lab 41 replaces part of the `exp2` with a polynomial on the FMA units (FMA throughput is 8× that of MUFU), and corrects O only when the maximum changes significantly.
 
 ```bash
 ./lab profile 40 --case perf
 ```
 
-看 `sm__pipe_tensor_cycles_active`、`sm__inst_executed_pipe_xu` 和 Warp State 中 softmax 等 `s_full` 的 `long_sb` 停顿（mbarrier 等待）。Nsight Compute 锁定时钟，只用它比较指标。
+Look at `sm__pipe_tensor_cycles_active`, `sm__inst_executed_pipe_xu`, and in Warp State the `long_sb` stalls of softmax waiting on `s_full` (mbarrier waits). Nsight Compute locks the clocks; use it only to compare metrics.
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. D = 64 时 TMEM 用了多少列？如果想在 D = 64 时给每个 tile 两块 S（像 34 关那样），够不够？
-2. softmax WG 1 的 warp 6 读 S¹ 的第 32–63 列，`tcgen05.ld` 的 taddr（相对 TMEM base）是多少？写 P¹ 的第 16–31 个字（`tmem_st_32x32b_x16`）呢？
-3. 步骤 2 中 PV^t_j 的第 kk = 5 个 MMA，A 的 TMEM 地址（相对 base，t = 1）是多少？它对应哪些 key？
-4. 为什么 softmax 不需要像 34 关那样等 `o_ready` 就可以写 P^t_j、修正 O^t？如果 MMA 把 QK^t_{j+1} 放在 PV^t_j **之前**发，会出什么问题？
-5. 步骤 3 的 `p_ready` count 为什么是 256？如果 correction 只在 j > 0 时 arrive 会怎样？
-6. 把 `setmaxnreg` 改成 softmax 200、correction 64、其余 48，总和是多少？会发生什么？
+1. How many TMEM columns are used at D = 64? If you wanted to give each tile two S regions at D = 64 (as in lab 34), would there be enough?
+2. Warp 6 of softmax WG 1 reads columns 32–63 of S¹. What is the taddr of `tcgen05.ld` (relative to the TMEM base)? What about writing words 16–31 of P¹ (`tmem_st_32x32b_x16`)?
+3. In step 2, for the kk = 5 MMA of PV^t_j, what is the TMEM address of A (relative to the base, t = 1)? Which keys does it cover?
+4. Why can softmax write P^t_j and correct O^t without waiting for `o_ready` as in lab 34? What goes wrong if the MMA issues QK^t_{j+1} **before** PV^t_j?
+5. Why is the count of `p_ready` 256 in step 3? What happens if correction arrives only when j > 0?
+6. If you change `setmaxnreg` to softmax 200, correction 64, everyone else 48, what is the total? What happens?
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. S⁰、S¹ 256 列 + O⁰、O¹ 各 64 列 = 384 列（分配 512）。每个 tile 再加一块 S 要再 256 列，共 640 > 512，不够。
-2. warp 6 在 warpgroup 中是第 2 个 warp，lane 段从 64 开始；S¹ 从第 128 列开始：`(64 << 16) | (128 + 32)`。P¹ 从 S¹ 的第 64 列开始，第 16 个字：`(64 << 16) | (128 + 64 + 16)`。
-3. `128 + 64 + 8·5 = 232`（lane 字段 0），对应 key 80–95。
-4. §5.4：softmax 等到的 `s_full[t]` 第 j 阶段由 QK^t_j 之后的 commit 完成，而 PV^t_{j−1} 在 QK^t_j 之前由同一线程发出，commit 跟踪它。反过来先发 QK^t_{j+1}，它会覆盖 PV^t_j 还没读的 P^t_j（P 在 S 的列里），结果错。
-5. 每个 softmax 线程（128）和每个 correction 线程（128）每块各 arrive 一次，MMA 要同时确认“P 已写好”和“O 已修正”。如果 correction 在 j = 0 不 arrive，第 0 阶段永远凑不够 256：挂起。
-6. 2·200 + 64 + 48 = 512，合法。correction 降到 64 可能溢出（看 `./lab sass`），softmax 多 8 个寄存器对本关没有好处。超过 512 时 `inc` 永远等不到寄存器而挂起。
+1. S⁰ and S¹ take 256 columns + O⁰ and O¹ take 64 columns each = 384 columns (512 allocated). One more S region per tile needs another 256 columns, 640 > 512 in total: not enough.
+2. Warp 6 is warp 2 of its warpgroup (counting from 0), whose lane range starts at 64; S¹ starts at column 128: `(64 << 16) | (128 + 32)`. P¹ starts at column 64 of S¹, and word 16 is: `(64 << 16) | (128 + 64 + 16)`.
+3. `128 + 64 + 8·5 = 232` (lane field 0), covering keys 80–95.
+4. §5.4: phase j of `s_full[t]`, which softmax waits for, is completed by the commit after QK^t_j, and PV^t_{j−1} was issued by the same thread before QK^t_j, so the commit tracks it. If QK^t_{j+1} were issued first instead, it would overwrite the P^t_j that PV^t_j has not read yet (P lives in the columns of S): wrong results.
+5. Every softmax thread (128) and every correction thread (128) arrives once per block; the MMA must confirm both "P is written" and "O is corrected". If correction did not arrive at j = 0, phase 0 would never collect 256 arrivals: hang.
+6. 2·200 + 64 + 48 = 512, which is legal. Lowering correction to 64 may cause spills (check `./lab sass`), and 8 more registers for softmax do not help in this lab. Above 512, `inc` never gets its registers and hangs.
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- Tri Dao 等，FlashAttention-4（2025）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
-  - `__init__`：warp 角色（`softmax0_warp_ids` … `empty_warp_ids`）、`tmem_s_offset` / `tmem_o_offset` / `tmem_s_to_p_offset = n_block_size // 2`（本关 §5.1 的表）、`num_regs_softmax` 等寄存器预算；
-  - `mma()`：两个 Q stage 的发射顺序（本关 §5.3）与 “PV 之后才写 S” 的注释；
-  - `softmax_step()`：读 S、最大值、把 `acc_scale` 交给 correction、写 P 回 TMEM；
-  - `correction_loop()`：`sm_stats_barrier`、rescale、epilogue（本关 §5.6，FA4 还有条件 rescale：41 关）。
-- Jay Shah 等，*FlashAttention-3*（2024）§3.2：inter-warpgroup ping-pong 调度。
-- `third_party/cutlass/examples/77_blackwell_fmha/collective/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp`：`TmemAllocation`（S0、S1、P0、P1、O0、O1）、`mma()` 中 QK/PV 的交替、`softmax()` 与 `correction()`；`kernel/sm100_fmha_fwd_kernel_tma_warpspecialized.hpp`：`NumRegsSoftmax` 等。
-- PTX ISA 8.7：[tcgen05.mma](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma)（A 在 TMEM 的形式）、[tcgen05.st](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instructions-tcgen05-st)、[tcgen05 Memory Consistency Model](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model)（pipelined 指令对）、[setmaxnreg](https://docs.nvidia.com/cuda/parallel-thread-execution/#miscellaneous-instructions-setmaxnreg)、[elect.sync](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-elect-sync)。
-- 后续：41 关（softmax 吞吐：多项式 `exp2`、条件 rescale）。
+- Zadouri et al., [FlashAttention-4](https://arxiv.org/abs/2603.05451v1) (2026); upstream implementation `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`:
+  - `__init__`: warp roles (`softmax0_warp_ids` … `empty_warp_ids`), `tmem_s_offset` / `tmem_o_offset` / `tmem_s_to_p_offset = n_block_size // 2` (the table in §5.1 of this lab), register budgets such as `num_regs_softmax`;
+  - `mma()`: the issue order of the two Q stages (§5.3 of this lab) and the comment "S is written only after PV";
+  - `softmax_step()`: read S, max, hand `acc_scale` to correction, write P back to TMEM;
+  - `correction_loop()`: `sm_stats_barrier`, rescale, epilogue (§5.6 of this lab; FA4 also has conditional rescale: lab 41).
+- Jay Shah et al., *FlashAttention-3* (2024) §3.2: inter-warpgroup ping-pong scheduling.
+- `third_party/cutlass/examples/77_blackwell_fmha/collective/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp`: `TmemAllocation` (S0, S1, P0, P1, O0, O1), the alternation of QK/PV in `mma()`, `softmax()` and `correction()`; `kernel/sm100_fmha_fwd_kernel_tma_warpspecialized.hpp`: `NumRegsSoftmax` and related.
+- PTX ISA 8.7: [tcgen05.mma](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma) (the form with A in TMEM), [tcgen05.st](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instructions-tcgen05-st), [tcgen05 Memory Consistency Model](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-consistency-model) (pipelined instruction pairs), [setmaxnreg](https://docs.nvidia.com/cuda/parallel-thread-execution/#miscellaneous-instructions-setmaxnreg), [elect.sync](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-elect-sync).
+- Next: lab 41 (softmax throughput: polynomial `exp2`, conditional rescale).

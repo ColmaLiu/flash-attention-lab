@@ -189,15 +189,21 @@ def _default_perf_case(lab):
 def _list():
     from .progress import summary
 
-    part_names = {0: "预备", 1: "FA1", 2: "FA2", 3: "FA3 @ SM100", 4: "FA4"}
+    part_names = {
+        0: "Preliminaries",
+        1: "FA1",
+        2: "FA2",
+        3: "FA3 ideas on SM100",
+        4: "FA4",
+    }
     current = None
     for lab in spec.labs().values():
         if lab.part != current:
             current = lab.part
-            print(f"\n部分 {lab.part} · {part_names.get(lab.part, '')}")
+            print(f"\nPart {lab.part} · {part_names.get(lab.part, '')}")
         state, stale = summary(lab)
         flag = " (code changed since last check)" if stale else ""
-        print(f"  {lab.id:<20} {lab.title:<24} steps {state}{flag}")
+        print(f"  {lab.id:<20} steps {state:<5}  {lab.title}{flag}")
     print(
         "\nStart with: ./lab check 00 --step 1   (lesson: course/00_transpose/README.md)"
     )

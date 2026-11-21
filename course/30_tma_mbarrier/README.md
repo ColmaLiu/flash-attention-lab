@@ -1,97 +1,97 @@
-# 30 · TMA 与 mbarrier：异步搬运的转置
+# 30 · TMA and mbarrier: transpose with asynchronous copies
 
-> 部分 3 · FA3 的思想在 SM100 上　｜　前置：[00_transpose](../00_transpose/README.md)、[21_pipeline_gemm](../21_pipeline_gemm/README.md)　｜　代码：[`students/30_tma_mbarrier/kernel.cu`](../../students/30_tma_mbarrier/kernel.cu)
+> Part 3 · FA3 ideas on SM100 | Prerequisites: [00_transpose](../00_transpose/README.md), [21_pipeline_gemm](../21_pipeline_gemm/README.md) | Code: [`students/30_tma_mbarrier/kernel.cu`](../../students/30_tma_mbarrier/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-再做一次 00 关的 FP32 转置 `y[c][r] = x[r][c]`，但这次不再让每个线程自己去搬数据，而是交给 **TMA**（Tensor Memory Accelerator）这个专用的拷贝引擎。线程之间用 **mbarrier** 交接：数据到了没有、buffer 空了没有。本关分三步：
+Do lab 00's FP32 transpose `y[c][r] = x[r][c]` once more, but this time the threads do not move the data themselves; a dedicated copy engine, the **TMA** (Tensor Memory Accelerator), does. Threads hand off to each other with **mbarrier**: has the data arrived, is the buffer free. This lab has three steps:
 
-1. **单 tile**：一个线程发出 TMA load，用 mbarrier 等数据到达，全体线程在 shared memory 里转置，再由一个线程发出 TMA store；
-2. **persistent 环形 buffer**：一个 producer 线程不停地发 load，consumer warp 消费，`full`/`empty` 两组 barrier 管理 S 个 buffer；
-3. **128B swizzle**：让 TMA 按交错的布局写 shared memory，配合 4×4 寄存器转置消除 bank conflict，再调 tile 形状和级数。
+1. **Single tile**: one thread issues a TMA load and waits on an mbarrier for the data to arrive, all threads transpose in shared memory, then one thread issues a TMA store;
+2. **Persistent ring buffer**: one producer thread keeps issuing loads, consumer warps consume them, and two sets of barriers, `full`/`empty`, manage S buffers;
+3. **128B swizzle**: have the TMA write shared memory in an interleaved layout and combine it with a 4×4 register transpose to remove bank conflicts, then tune the tile shape and stage count.
 
-做完后你应该能：
+When you finish, you should be able to:
 
-- 用 `cuTensorMapEncodeTiled` 编码 tensor map，说清 box、越界填零、swizzle 模式各自的含义；
-- 写出 `cp.async.bulk.tensor` load/store、`mbarrier` 的 init / arrive.expect_tx / try_wait.parity 封装，并画出 phase 时间线；
-- 解释 generic proxy 与 async proxy，知道 `fence.proxy.async` 必须放在哪里、由谁执行；
-- 把转置推到约 6.2 TB/s，接近同机 `y.copy_(x)`（无转置的连续拷贝）约 6.4 TB/s 的上限；而每个 SM 只用 9 个 warp，全部 load 由 1 个线程发起。
+- encode a tensor map with `cuTensorMapEncodeTiled`, and explain what the box, out-of-bounds zero fill and swizzle mode each mean;
+- write wrappers for `cp.async.bulk.tensor` load/store and for `mbarrier` init / arrive.expect_tx / try_wait.parity, and draw the phase timeline;
+- explain the generic proxy and the async proxy, and know where `fence.proxy.async` must go and which threads execute it;
+- push the transpose to about 6.2 TB/s, close to the upper bound of about 6.4 TB/s of `y.copy_(x)` (a contiguous copy without transpose) on the same machine, while using only 9 warps per SM, with all loads issued by 1 thread.
 
-本关写的封装从 31 关起由 [`include/lab/mbarrier.cuh`](../../include/lab/mbarrier.cuh) 和 [`include/lab/tma.cuh`](../../include/lab/tma.cuh) 提供。这是 transpose 的最后一关。
+From lab 31 on, [`include/lab/mbarrier.cuh`](../../include/lab/mbarrier.cuh) and [`include/lab/tma.cuh`](../../include/lab/tma.cuh) provide the wrappers you write in this lab. This is the last transpose lab.
 
-## 2. 动机：让搬运不再占用线程
+## 2. Motivation: free the threads from moving data
 
-00 关步骤 4 在本机同一张卡上约 5.9 TB/s，已经接近连续拷贝。但它付出的代价是：每个 SM 驻留 32 个 CTA（每个 64 线程）、共 2048 个线程，每一个字节都要经过线程：
-
-```
-LDG（global → 寄存器） → STS（寄存器 → shared） → __syncthreads → LDS → STG
-```
-
-要让足够多的字节同时在路上（00 关 §4.5 的 Little 定律），只能靠更多线程、每线程更多 load，代价是寄存器、地址计算和 `__syncthreads()` 的等待。转置没有别的事可做，可以把整个 SM 都用来搬运；GEMM 和 attention 不行：线程要算 MMA、softmax，寄存器要放累加器。21 关的 `cp.async` 省掉了寄存器这一跳，但每个线程仍要为每 16 字节发一条指令、算一个地址。
-
-Hopper 起，GPU 有一个独立的拷贝单元 TMA：**一个线程**用一条指令说“把这个张量中以 (x, y) 为原点的一个 box 搬进 shared memory”，硬件自己生成全部地址、处理越界，完成后把字节数报告给一个 mbarrier。线程发完指令就可以去做别的事。
-
-FlashAttention-3 论文第 3.1 节的第一个思想就是这件事：**生产者–消费者异步**。专门的 producer warp 只负责发 TMA，consumer warp 只负责计算，二者通过 shared memory 中的环形 buffer 和 barrier 交接，搬运与计算完全重叠。本关在最简单的算子（转置）上把这套机制练熟；31 关把它接到 Tensor Core 上，34 关用进 attention。
-
-## 3. 数学：字节、box 与 parity
-
-### 3.1 下界与在途字节
-
-转置读写各 `rows·cols·4` 字节。`big`（8192×8192）共 512 MiB，按 8 TB/s 标称峰值的下界约 0.067 ms，按本机 `y.copy_(x)` 实测的约 6.4 TB/s 约 0.083 ms。
-
-Little 定律（00 关 §4.5）：要跑 6.4 TB/s、延迟按约 700 ns 估算，全 GPU 需要约 4.5 MB 在路上，即每个 SM 约 30 KB。TMA 下，在途的读取字节数直接由 buffer 数决定：
+On the same GPU of this machine, lab 00 step 4 reaches about 5.9 TB/s, already close to a contiguous copy. But it pays a price: 32 CTAs (64 threads each) are resident per SM, 2048 threads in total, and every byte passes through a thread:
 
 ```
-每 SM 在途读取 ≈ 每 CTA 的 stage 数 × 每个 stage 的字节数 × 每 SM 的 CTA 数
+LDG (global → registers) → STS (registers → shared) → __syncthreads → LDS → STG
 ```
 
-步骤 3 的答案是 2 个 stage × 32 KB × 1 个 CTA = 64 KB，加上正在写回的 store，足够覆盖延迟。
+To keep enough bytes in flight (Little's law, lab 00 §4.5), the only option is more threads and more loads per thread, at the cost of registers, address arithmetic and waiting in `__syncthreads()`. A transpose has nothing else to do, so it can devote the whole SM to moving data; GEMM and attention cannot: threads must compute MMA and softmax, and registers must hold accumulators. Lab 21's `cp.async` removes the hop through registers, but each thread still issues one instruction and computes one address per 16 bytes.
 
-### 3.2 box 与越界
+Since Hopper, the GPU has a separate copy unit, the TMA: **one thread** says with one instruction "move a box of this tensor with origin (x, y) into shared memory", and the hardware generates all the addresses, handles out-of-bounds accesses, and reports the byte count to an mbarrier when it is done. After issuing the instruction, the thread can go do other work.
 
-TMA 以 **box** 为单位搬运。box 是张量中一个固定大小的矩形，起点坐标由指令给出，可以是任意整数（包括让 box 伸出张量边界）：
+The first idea of section 3.1 of the FlashAttention-3 paper is exactly this: **producer–consumer asynchrony**. Dedicated producer warps only issue TMA, consumer warps only compute, and the two hand off through a ring buffer in shared memory and barriers, so data movement and compute overlap completely. This lab drills the mechanism on the simplest operator (transpose); lab 31 connects it to the Tensor Cores, and lab 34 uses it in attention.
+
+## 3. Math: bytes, boxes and parity
+
+### 3.1 Lower bound and bytes in flight
+
+A transpose reads and writes `rows·cols·4` bytes each. `big` (8192×8192) totals 512 MiB; the lower bound is about 0.067 ms at the nominal 8 TB/s peak, and about 0.083 ms at the ≈6.4 TB/s measured for `y.copy_(x)` on this machine.
+
+Little's law (lab 00 §4.5): to run at 6.4 TB/s with an estimated latency of about 700 ns, the whole GPU needs about 4.5 MB in flight, about 30 KB per SM. With TMA, the number of read bytes in flight is set directly by the number of buffers:
 
 ```
-x: [rows = 36, cols = 68]，box = 32 行 × 32 列，坐标写作 (x = 列, y = 行)
-
-        x=0        x=32       x=64  68
-   y=0  ┌──────────┬──────────┬────┐┄┄┄┄┄┄┐
-        │ box(0,0) │ box(32,0)│    │ 越界   ┆   越界部分：load 填 0，store 跳过
-  y=32  ├──────────┼──────────┼────┤ 填 0   ┆
-   36   └──────────┴──────────┴────┘┄┄┄┄┄┄┘
-        ┆ 越界 填 0                          ┆
-  y=64  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘
+reads in flight per SM ≈ stages per CTA × bytes per stage × CTAs per SM
 ```
 
-- 一次 load **总是**向 shared memory 写满整个 box（32×32×4 = 4096 字节），越界的元素写 0，并且**这 4096 字节全部计入 mbarrier 的 tx-count**。所以 `expect_tx` 永远是 box 的字节数，与是否越界无关。
-- 一次 store 只写张量内的元素，越界的部分直接丢弃。
+The reference solution for step 3 uses 2 stages × 32 KB × 1 CTA = 64 KB; together with the stores being written back, this is enough to cover the latency.
 
-所以本关的 kernel 里没有任何 `if (r < rows)`：尾部完全由 TMA 处理。
+### 3.2 Box and out of bounds
 
-### 3.3 phase 与 parity：手算一个环
+The TMA moves data in units of a **box**. A box is a fixed-size rectangle of the tensor; its origin coordinates come from the instruction and can be any integers (including ones that make the box stick out of the tensor):
 
-mbarrier 的每一轮叫一个 **phase**，编号 0、1、2、…；等待时只给 phase 编号的奇偶（parity）。环形 buffer 中，第 `it` 个 tile 用 buffer `s = it % S`，是这个 buffer 的第 `n = it / S` 次装填。于是：
+```
+x: [rows = 36, cols = 68], box = 32 rows × 32 cols, coordinates written as (x = col, y = row)
 
-- consumer 等 `full[s]` 的第 n 个 phase 完成：parity = `n & 1`；
-- producer 装第 n 次之前，要等 consumer 对第 n−1 次装填的释放，即 `empty[s]` 的第 n−1 个 phase：parity = `(n − 1) & 1 = (n & 1) ^ 1`。
+        x=0        x=32       x=64 68    x=96
+   y=0  ┌──────────┬──────────┬────┐┄┄┄┄┄┐
+        │ box(0,0) │ box(32,0)│    │ OOB ┆   out-of-bounds part: load fills 0, store skips it
+  y=32  ├──────────┼──────────┼────┤ = 0 ┆
+   36   └──────────┴──────────┴────┘     ┆
+        ┆ OOB, filled with 0             ┆
+  y=64  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘
+```
 
-n = 0 时“第 −1 个 phase”并不存在。PTX 规定：**当前 phase 的前一个 phase 视为已完成**。新初始化的 barrier 处在 phase 0，等 parity 1 会立刻返回，于是 producer 第一圈不用特判。S = 2 时：
+- A load **always** writes the whole box to shared memory (32×32×4 = 4096 bytes), writes 0 for out-of-bounds elements, and **counts all 4096 bytes toward the mbarrier's tx-count**. So `expect_tx` is always the byte size of the box, whether or not it is out of bounds.
+- A store writes only the elements inside the tensor; the out-of-bounds part is dropped.
 
-| it | s | n | producer 等 `empty[s]` 的 parity | consumer 等 `full[s]` 的 parity |
+So the kernel of this lab has no `if (r < rows)` at all: the TMA handles the tail completely.
+
+### 3.3 Phase and parity: one ring by hand
+
+Each round of an mbarrier is called a **phase**, numbered 0, 1, 2, …; a wait gives only the parity (odd or even) of the phase number. In a ring buffer, tile number `it` uses buffer `s = it % S`, and it is fill number `n = it / S` of that buffer. So:
+
+- the consumer waits for phase n of `full[s]` to complete: parity = `n & 1`;
+- before fill n, the producer must wait for the consumer to release fill n−1, that is, phase n−1 of `empty[s]`: parity = `(n − 1) & 1 = (n & 1) ^ 1`.
+
+For n = 0, "phase −1" does not exist. The PTX rule is: **the phase before the current phase counts as complete**. A freshly initialized barrier is in phase 0, so a wait for parity 1 returns immediately, and the producer's first lap needs no special case. With S = 2:
+
+| it | s | n | parity the producer waits for on `empty[s]` | parity the consumer waits for on `full[s]` |
 |---|---|---|---|---|
-| 0 | 0 | 0 | 1（新 barrier，立即通过） | 0 |
-| 1 | 1 | 0 | 1（立即通过） | 0 |
-| 2 | 0 | 1 | 0（consumer 第一次释放 buffer 0） | 1 |
+| 0 | 0 | 0 | 1 (new barrier, passes immediately) | 0 |
+| 1 | 1 | 0 | 1 (passes immediately) | 0 |
+| 2 | 0 | 1 | 0 (consumer's first release of buffer 0) | 1 |
 | 3 | 1 | 1 | 0 | 1 |
 | 4 | 0 | 2 | 1 | 0 |
 
-parity 只有 1 位：等待者必须在 barrier 前进两个 phase 之前来等，否则 parity 会“绕回”，把还没发生的 phase 当成完成。环形 buffer 天然保证了这一点：producer 不等到 `empty` 就不会再装同一个 buffer，`full[s]` 不可能领先 consumer 两个 phase。
+Parity has only 1 bit: a waiter must start waiting before the barrier advances two phases, otherwise the parity "wraps around" and a phase that has not happened yet is taken as complete. The ring buffer guarantees this by construction: the producer does not refill the same buffer before `empty` completes, so `full[s]` can never be two phases ahead of the consumer.
 
-## 4. 硬件与指令
+## 4. Hardware and instructions
 
-### 4.1 tensor map：在 host 上描述张量
+### 4.1 Tensor map: describing the tensor on the host
 
-`CUtensorMap` 是一个 128 字节的不透明结构，在 host 端用 Driver API 编码一次（不计时，放在 `make_plan`），作为 `const __grid_constant__ CUtensorMap` kernel 参数传进去，TMA 指令取它的地址。
+`CUtensorMap` is an opaque 128-byte structure. It is encoded once on the host with the Driver API (untimed, in `make_plan`), passed into the kernel as a `const __grid_constant__ CUtensorMap` parameter, and TMA instructions take its address.
 
 ```cpp
 cuTensorMapEncodeTiled(&map, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, /*rank=*/2, base,
@@ -101,53 +101,53 @@ cuTensorMapEncodeTiled(&map, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, /*rank=*/2, base,
                        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
 ```
 
-| 参数 | 本关的值（x: [rows, cols]） | 规则 |
+| Parameter | Value in this lab (x: [rows, cols]) | Rule |
 |---|---|---|
-| `dims` | `{cols, rows}` | **最内层（连续）维在前**，单位是元素 |
-| `strides` | `{cols * 4}` | rank − 1 个，单位字节；第 0 维的步长隐含为元素大小。**必须是 16 的倍数** |
-| `box` | `{32, 32}` 或 `{32, 256}` | 每维 ≤ 256；`box[0] × 元素大小` 是 16 的倍数，有 swizzle 时不超过 swizzle 宽度 |
-| `element_strides` | `{1, 1}` | 每隔几个元素取一个，本课程总是 1 |
-| `swizzle` | `NONE` 或 `128B` | 见 §4.3 |
-| `OOB_FILL_NONE` | | 越界填 0（另一选项填 NaN） |
-| `base` | | 16 字节对齐 |
+| `dims` | `{cols, rows}` | **Innermost (contiguous) dimension first**, in elements |
+| `strides` | `{cols * 4}` | rank − 1 entries, in bytes; the stride of dimension 0 is implicitly the element size. **Must be a multiple of 16** |
+| `box` | `{32, 32}` or `{32, 256}` | Each dimension ≤ 256; `box[0] × element size` is a multiple of 16, and with swizzle it is at most the swizzle width |
+| `element_strides` | `{1, 1}` | Take one element every so many; always 1 in this course |
+| `swizzle` | `NONE` or `128B` | See §4.3 |
+| `OOB_FILL_NONE` | | Out of bounds filled with 0 (the other option fills NaN) |
+| `base` | | 16-byte aligned |
 
-**支持域由第二行来**：x 的行距 `cols·4` 字节和 y 的行距 `rows·4` 字节都必须是 16 的倍数，所以本关要求 `rows % 4 == 0`、`cols % 4 == 0`。00 关的 7×11 在这里不合法。
+**The supported domain comes from the second row**: the row pitch of x, `cols·4` bytes, and the row pitch of y, `rows·4` bytes, must both be multiples of 16, so this lab requires `rows % 4 == 0` and `cols % 4 == 0`. Lab 00's 7×11 is not legal here.
 
-TMA 指令里的坐标顺序和 `dims` 一样：`(x, y)` = (列, 行)。这是本关最容易犯的错误之一。
+The coordinate order in TMA instructions is the same as in `dims`: `(x, y)` = (column, row). This is one of the most common mistakes in this lab.
 
-### 4.2 TMA load 与 mbarrier 的配合
+### 4.2 TMA load working with an mbarrier
 
 ```
 cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes
     [dst], [map, {x, y}], [bar];
 ```
 
-| 部分 | 含义 |
+| Part | Meaning |
 |---|---|
-| `.2d` | 张量维数（1d–5d） |
-| `.shared::cluster.global` | 目的地 shared、源 global。CTA 自己的 shared 地址也是合法的 cluster 地址 |
-| `.mbarrier::complete_tx::bytes` | 数据写完后，对 `bar` 执行 complete_tx（box 的字节数） |
-| `dst` | shared 地址；无 swizzle 时 128 字节对齐，128B swizzle 时 **1024 字节对齐** |
+| `.2d` | Tensor rank (1d–5d) |
+| `.shared::cluster.global` | Destination shared, source global. The CTA's own shared address is also a legal cluster address |
+| `.mbarrier::complete_tx::bytes` | After the data is written, performs complete_tx (the byte size of the box) on `bar` |
+| `dst` | Shared address; 128-byte aligned without swizzle, **1024-byte aligned** with 128B swizzle |
 
-发出后，线程不等待。数据是否到达只能通过 mbarrier 得知。
+After issuing it, the thread does not wait. The only way to know whether the data has arrived is through the mbarrier.
 
-### 4.3 swizzle：为什么、是什么
+### 4.3 Swizzle: why and what
 
-TMA 只能写**稠密**的 box，不能像 00 关那样每行补一个 float 来错开 bank。一个 32×32 FP32 tile 每行正好 128 字节 = 32 个 bank，按列读时 32 个线程落在同一个 bank：32 路冲突。
+The TMA can only write a **dense** box; it cannot pad each row with one float to shift the banks, as lab 00 did. A 32×32 FP32 tile has exactly 128 bytes = 32 banks per row, so when reading a column, all 32 threads land in the same bank: a 32-way conflict.
 
-swizzle 让 TMA 在写入时把每行的 16 字节 chunk 换个位置。规则作用在 shared memory **字节地址**上（地址 bit 4 起是 chunk 号，bit 7 起是 128 字节“行”号）：
+Swizzle makes the TMA move each row's 16-byte chunks to different positions as it writes. The rule acts on shared memory **byte addresses** (address bits from bit 4 are the chunk number, bits from bit 7 are the 128-byte "row" number):
 
-| 模式 | 规则（字节地址） | 重复周期 | box 内层最多 |
+| Mode | Rule (byte address) | Repeat period | Max box inner size |
 |---|---|---|---|
-| `NONE` | 不变 | — | 256 个元素 |
+| `NONE` | unchanged | — | 256 elements |
 | `32B` | bit 4 ^= bit 7 | 256 B | 32 B |
 | `64B` | bits[4:5] ^= bits[7:8] | 512 B | 64 B |
 | `128B` | bits[4:6] ^= bits[7:9] | 1024 B | 128 B |
 
-对 128 字节一行的 tile，`128B` 就是：**第 r 行的第 q 个 chunk 存在 chunk 位置 `q ^ (r % 8)`**。表中的数字是存在该位置上的逻辑 chunk 号：
+For a tile with 128-byte rows, `128B` means: **chunk q of row r is stored at chunk position `q ^ (r % 8)`**. The numbers in the table are the logical chunk numbers stored at each position:
 
 ```
-            物理 chunk 位置（每格 16 B = 4 个 float = 4 个 bank）
+            physical chunk position (each cell 16 B = 4 floats = 4 banks)
              0   1   2   3   4   5   6   7
    row 0:    0   1   2   3   4   5   6   7
    row 1:    1   0   3   2   5   4   7   6
@@ -157,72 +157,72 @@ swizzle 让 TMA 在写入时把每行的 16 字节 chunk 换个位置。规则�
    row 5:    5   4   7   6   1   0   3   2
    row 6:    6   7   4   5   2   3   0   1
    row 7:    7   6   5   4   3   2   1   0
-   row 8:    同 row 0（每 8 行 = 1024 B 重复一次）
+   row 8:    same as row 0 (repeats every 8 rows = 1024 B)
 ```
 
-逻辑 chunk 0（第 0–3 列）在 8 行中分别位于 8 个不同的物理位置，覆盖全部 32 个 bank。只要访问方式让同一波（wavefront）的线程读“不同行的同一列”，就不再冲突。重复周期是 1024 字节，所以 buffer 必须 1024 字节对齐，否则 TMA 与你的下标公式对不上。
+Logical chunk 0 (columns 0–3) sits at 8 different physical positions in the 8 rows, covering all 32 banks. As long as the access pattern makes the threads of one wave (wavefront) read "the same column of different rows", there are no more conflicts. The repeat period is 1024 bytes, so the buffer must be 1024-byte aligned; otherwise the TMA and your index formula disagree.
 
-为什么硬件要支持 32B/64B 三种宽度？box 内层只有 32 或 64 字节时（例如 16 个 BF16），一行放不满 128 字节，用对应宽度的 swizzle。31 关的 Tensor Core 描述符也认识同一套模式，TMA 写出的布局可以直接交给 MMA 读。
+Why does the hardware also support the 32B/64B widths (three widths in all)? When the box inner dimension is only 32 or 64 bytes (for example 16 BF16 values), a row does not fill 128 bytes, and the swizzle of the matching width is used. The Tensor Core descriptors of lab 31 understand the same set of modes, so the layout written by the TMA can be handed directly to the MMA.
 
 ### 4.4 mbarrier
 
-mbarrier 是 shared memory 中一个 8 字节对象，内部有：
+An mbarrier is an 8-byte object in shared memory. Internally it has:
 
-- 当前 **phase**；
-- **待到达计数**（每个 phase 开始时重置为 init 时给的 count）；
-- **tx-count**（以字节计的待完成事务）。
+- the current **phase**;
+- the **pending arrival count** (reset at the start of each phase to the count given at init);
+- the **tx-count** (pending transactions, in bytes).
 
-**待到达计数为 0 且 tx-count 为 0** 时，当前 phase 完成，barrier 进入下一个 phase。
+When **the pending arrival count is 0 and the tx-count is 0**, the current phase completes and the barrier moves to the next phase.
 
-| 封装 | PTX | 作用 |
+| Wrapper | PTX | Effect |
 |---|---|---|
-| `mbar_init(bar, count)` | `mbarrier.init.shared::cta.b64 [bar], count;` | phase 0，每个 phase 期望 count 次到达。一个线程执行 |
-| `fence_barrier_init()` | `fence.mbarrier_init.release.cluster;` | 让 init 对 async proxy（TMA）可见；之后 `__syncthreads()` 让其他线程可见 |
-| `mbar_arrive_expect_tx(bar, bytes)` | `mbarrier.arrive.expect_tx.shared::cta.b64 _, [bar], bytes;` | tx-count += bytes，再到达一次 |
-| `mbar_arrive(bar)` | `mbarrier.arrive.shared::cta.b64 _, [bar];` | 到达一次（release 语义） |
-| `mbar_wait(bar, parity)` | 循环 `mbarrier.try_wait.parity.shared::cta.b64 p, [bar], parity;` | 等到该 parity 的 phase 完成（acquire 语义） |
-| （TMA 完成时） | complete_tx | tx-count −= bytes |
+| `mbar_init(bar, count)` | `mbarrier.init.shared::cta.b64 [bar], count;` | Phase 0; each phase expects count arrivals. Executed by one thread |
+| `fence_barrier_init()` | `fence.mbarrier_init.release.cluster;` | Makes the init visible to the async proxy (TMA); a later `__syncthreads()` makes it visible to the other threads |
+| `mbar_arrive_expect_tx(bar, bytes)` | `mbarrier.arrive.expect_tx.shared::cta.b64 _, [bar], bytes;` | tx-count += bytes, then arrive once |
+| `mbar_arrive(bar)` | `mbarrier.arrive.shared::cta.b64 _, [bar];` | Arrive once (release semantics) |
+| `mbar_wait(bar, parity)` | loop over `mbarrier.try_wait.parity.shared::cta.b64 p, [bar], parity;` | Wait until the phase with that parity completes (acquire semantics) |
+| (when the TMA completes) | complete_tx | tx-count −= bytes |
 
-一个 `full` barrier（count = 1）在一个 phase 内的时间线：
+Timeline of one phase of a `full` barrier (count = 1):
 
 ```
-时间 →
- producer:   arrive.expect_tx(4096) ──► 发出 TMA
+time →
+ producer:   arrive.expect_tx(4096) ──► issue TMA
                    │
- barrier:   phase 0 [待到达 1→0, tx 0→4096] ··· TMA 写完 complete_tx(4096): tx→0 ⇒ phase 0 完成，进入 phase 1
-                                                                │
- consumer:   try_wait.parity(0) 返回 false … false … ───────────┴─► true，开始读 tile
+ barrier:   phase 0 [pending 1→0, tx 0→4096] ··· TMA done, complete_tx(4096): tx→0 ⇒ phase 0 complete, enter phase 1
+                                                                                   │
+ consumer:   try_wait.parity(0) returns false … false … ───────────────────────────┴─► true, start reading the tile
 ```
 
-`expect_tx` 和 complete_tx 的先后不重要：tx-count 可以暂时为负，只要 phase 结束时到达数和字节数都对上。但 **arrive 必须在 phase 结束前发生**，所以惯例是先 `arrive.expect_tx` 再发 TMA。
+The order of `expect_tx` and complete_tx does not matter: the tx-count may be temporarily negative, as long as both the arrival count and the byte count match by the end of the phase. But **the arrive must happen before the phase ends**, so by convention you do `arrive.expect_tx` first and then issue the TMA.
 
-`try_wait` 与 `test_wait` 的区别：`try_wait` 可能让线程挂起一小段时间再返回 false，不必占满发射槽，比空转的 `test_wait` 更省；仍然要放在循环里。
+The difference between `try_wait` and `test_wait`: `try_wait` may suspend the thread for a short time before returning false, so it does not have to fill the issue slots, and it is cheaper than spinning on `test_wait`; it still has to sit in a loop.
 
-### 4.5 两个 proxy 与 TMA store
+### 4.5 The two proxies and TMA store
 
-GPU 的内存模型把访问分成不同的 **proxy**：普通的 `ld`/`st` 走 **generic proxy**，TMA 和 tcgen05 走 **async proxy**。同一块 shared memory 被两个 proxy 访问时，普通的同步（`__syncthreads`、mbarrier）**不保证**一个 proxy 的写对另一个 proxy 可见，必须加 proxy fence：
+The GPU memory model divides accesses into different **proxies**: ordinary `ld`/`st` go through the **generic proxy**, TMA and tcgen05 go through the **async proxy**. When the same shared memory is accessed by both proxies, ordinary synchronization (`__syncthreads`, mbarrier) does **not guarantee** that one proxy's writes are visible to the other; a proxy fence is required:
 
 ```
-所有写 out 的线程:   st.shared out[...]       (generic proxy 写)
-                     fence.proxy.async.shared::cta   ← 每个写线程自己执行
-                     __syncthreads / __syncwarp
-发 store 的线程:     cp.async.bulk.tensor ... [out]  (async proxy 读)
+threads that write out:    st.shared out[...]       (generic proxy write)
+                           fence.proxy.async.shared::cta   ← executed by every writing thread itself
+                           __syncthreads / __syncwarp
+thread that issues store:  cp.async.bulk.tensor ... [out]  (async proxy read)
 ```
 
-只有发 store 的那一个线程执行 fence 是**不够的**：fence 只对执行它的线程自己的写生效。
+A fence executed only by the one thread that issues the store is **not enough**: a fence applies only to the writes of the thread that executes it.
 
-TMA store 与它的完成：
+TMA store and its completion:
 
 ```
 cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [map, {x, y}], [src];
-cp.async.bulk.commit_group;           把本线程未提交的 store 打包成一组
-cp.async.bulk.wait_group.read N;      最多 N 组还在读 src → 更早组的 src 可以覆盖
-cp.async.bulk.wait_group N;           最多 N 组尚未完成（包括写 global）
+cp.async.bulk.commit_group;           packs this thread's uncommitted stores into one group
+cp.async.bulk.wait_group.read N;      at most N groups still reading src → src of older groups may be overwritten
+cp.async.bulk.wait_group N;           at most N groups not yet complete (including the global writes)
 ```
 
-和 21 关的 `cp.async.wait_group` 一样，计数只针对发起的线程。`.read` 版本只等“读完 shared memory”，用于 buffer 复用；CTA 退出前也必须等到 store 读完源 buffer，因为 CTA 的 shared memory 随它一起释放。
+As with lab 21's `cp.async.wait_group`, the count covers only the issuing thread. The `.read` version waits only until "shared memory has been read", which is what buffer reuse needs; before the CTA exits, it must also wait until the stores have read their source buffers, because the CTA's shared memory is freed with it.
 
-反方向（generic 读之后由 TMA 覆盖）在本关不需要 fence：consumer 读完 `in[s]` 后 arrive `empty[s]`，producer 等到后才发 load，mbarrier 的 release/acquire 已经排好了顺序（CUTLASS 的 `PipelineTmaAsync` 也是这样做的）。
+The opposite direction (a generic read, then a TMA overwrite) needs no fence in this lab: the consumer arrives on `empty[s]` after reading `in[s]`, and the producer issues the load only after its wait succeeds, so the mbarrier's release/acquire already orders them (CUTLASS's `PipelineTmaAsync` does the same).
 
 ### 4.6 elect.sync
 
@@ -230,111 +230,111 @@ cp.async.bulk.wait_group N;           最多 N 组尚未完成（包括写 globa
 elect.sync %r|%p, 0xffffffff;
 ```
 
-warp 中所有活跃线程一起执行，恰好一个得到 `p = true`。用它选出 producer 线程，比 `lane == 0` 更明确地表达“warp 内选一个”。
+All active threads of the warp execute it together, and exactly one gets `p = true`. Using it to pick the producer thread expresses "pick one in the warp" more clearly than `lane == 0`.
 
-### 4.7 常见误用
+### 4.7 Common misuses
 
-| 误用 | 后果 |
+| Misuse | Consequence |
 |---|---|
-| 坐标写成 `(row, col)` | 读到转置位置的 box；方阵上可能“碰巧”对，`tail`、`tall` 会错 |
-| `expect_tx` 按有效元素数计算 | 尾部 tile 永远等不到剩下的字节：**挂起**（`TIMEOUT`） |
-| `mbar_init` 后没有 `fence_barrier_init` + `__syncthreads` | 其他线程或 TMA 看到未初始化的 barrier，偶发挂起或错误 |
-| 等 `full` 用了错误的 parity | 第一圈就挂起（等一个不会来的 phase），或立刻通过、读到旧数据 |
-| producer 第一圈没有用 `(n & 1) ^ 1` | 挂起：没有人会对 `empty` 做第 −1 次释放 |
-| 写完 `out` 没有 `fence.proxy.async` | TMA store 可能读到旧值。**本机测试和 racecheck 都没有发现这个错误**，所以要靠推理而不是测试来保证 |
-| 只有 lane 0 执行 fence | 同上：其他 lane 的写没有被 fence |
-| CTA 退出前没有 `wait_group` | store 还没读完 shared memory，buffer 已被释放 |
-| 128B swizzle 的 buffer 没有 1024 字节对齐 | TMA 报错或 swizzle 下标对不上 |
+| Coordinates written as `(row, col)` | Reads the box at the transposed position; may "happen" to work on square matrices, but `tail` and `tall` fail |
+| `expect_tx` computed from the number of valid elements | The tail tile never receives the remaining bytes: **hang** (`TIMEOUT`) |
+| No `fence_barrier_init` + `__syncthreads` after `mbar_init` | Other threads or the TMA see an uninitialized barrier; occasional hangs or wrong results |
+| Wrong parity when waiting on `full` | Hangs on the first lap (waiting for a phase that never comes), or passes immediately and reads stale data |
+| Producer's first lap does not use `(n & 1) ^ 1` | Hang: nobody will perform release number −1 on `empty` |
+| No `fence.proxy.async` after writing `out` | The TMA store may read stale values. **Neither the tests on this machine nor racecheck found this bug**, so correctness here must come from reasoning, not testing |
+| Only lane 0 executes the fence | Same as above: the writes of the other lanes are not fenced |
+| No `wait_group` before the CTA exits | The store has not finished reading shared memory when the buffer is freed |
+| 128B swizzle buffer not 1024-byte aligned | TMA error, or swizzle indices that do not match |
 
-## 5. 调度设计
+## 5. Schedule design
 
-### 5.1 步骤 1：一个 CTA 一个 tile
+### 5.1 Step 1: one tile per CTA
 
 ```
-grid = (ceil(cols/32), ceil(rows/32))，block = 128 线程（4 warp）
-shared: in[32][32]、out[32][32]（各 4 KB，128 B 对齐）、full（8 B）
+grid = (ceil(cols/32), ceil(rows/32)), block = 128 threads (4 warps)
+shared: in[32][32], out[32][32] (4 KB each, 128 B aligned), full (8 B)
 
 thread 0:  mbar_init(full, 1); fence_barrier_init
 all:       __syncthreads
 thread 0:  arrive_expect_tx(full, 4096); tma_load(in ← x box (c0, r0))
 all:       mbar_wait(full, 0)
-all:       out[i][j] = in[j][i]          （4 个 warp 各做 8 行）
+all:       out[i][j] = in[j][i]          (4 warps, 8 rows each)
 all:       fence_proxy_async; __syncthreads
 thread 0:  tma_store(y box (r0, c0) ← out); commit; wait_group 0
 ```
 
-每个 CTA 只搬 4 KB，且 load、转置、store 串行，延迟完全暴露；SM 上同时驻留的多个 CTA 是唯一的重叠来源。
+Each CTA moves only 4 KB, and load, transpose and store run serially, so the latency is fully exposed; the multiple CTAs resident on an SM are the only source of overlap.
 
-### 5.2 步骤 2：persistent + 环形 buffer
+### 5.2 Step 2: persistent + ring buffer
 
 ```
-block = 32 × (1 + C) 线程，C = kRows / 32 个 consumer warp
-grid  = min(tile 数, SM 数 × 每 SM 能放的 CTA 数)      ← persistent
-tile  = x 的 kRows × 32 块；CTA 处理 t = blockIdx.x, +gridDim.x, ...
+block = 32 × (1 + C) threads, C = kRows / 32 consumer warps
+grid  = min(number of tiles, number of SMs × CTAs that fit per SM)      ← persistent
+tile  = a kRows × 32 block of x; a CTA processes t = blockIdx.x, +gridDim.x, ...
 
-           ┌──────── shared memory ───────────────────────────────┐
-           │ in[0] in[1] ... in[S-1]      每个 kRows×32×4 B        │
- warp 0    │   ▲  TMA load                                         │
- producer ─┼───┘  full[s] ◄── complete_tx      empty[s] ◄── C 次 arrive
- (elect 1) │                                                       │
- warp 1..C │ out[cw][0], out[cw][1]  每个 warp 两个 32×32 输出 buffer │
- consumer ─┼── 读 in[s] 的 32 行 → 写 out → TMA store（各 warp 独立） │
-           └───────────────────────────────────────────────────────┘
+           ┌──────── shared memory ────────────────────────────────────────────────────┐
+           │ in[0] in[1] ... in[S-1]      each kRows×32×4 B                            │
+ warp 0    │   ▲  TMA load                                                             │
+ producer ─┼───┘  full[s] ◄── complete_tx      empty[s] ◄── C arrives                  │
+ (elect 1) │                                                                           │
+ warp 1..C │ out[cw][0], out[cw][1]  two 32×32 output buffers per warp                 │
+ consumer ─┼── read 32 rows of in[s] → write out → TMA store (each warp independently) │
+           └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-| 角色 | 每个 tile 做的事 |
+| Role | Work per tile |
 |---|---|
-| producer（warp 0 中 elect 出的 1 个线程） | `wait(empty[s], (n&1)^1)` → `arrive_expect_tx(full[s], kRows·128)` → TMA load |
-| consumer warp cw | lane 0 `bulk_wait_group_read<1>` + `__syncwarp`（它的 out buffer 已被两轮前的 store 读完）→ `wait(full[s], n&1)` → 转置自己的 32×32 片 → `fence_proxy_async` + `__syncwarp` → lane 0：`arrive(empty[s])`、TMA store、commit |
+| producer (1 thread elected in warp 0) | `wait(empty[s], (n&1)^1)` → `arrive_expect_tx(full[s], kRows·128)` → TMA load |
+| consumer warp cw | lane 0 `bulk_wait_group_read<1>` + `__syncwarp` (the store from two rounds ago has finished reading its out buffer) → `wait(full[s], n&1)` → transpose its own 32×32 slice → `fence_proxy_async` + `__syncwarp` → lane 0: `arrive(empty[s])`, TMA store, commit |
 
-整个 kernel 只有初始化后的一个 `__syncthreads()`。consumer warp 之间完全不互相等待：每个 warp 自己存自己的 32×32 box，用自己的 bulk group 管理自己的两个 out buffer。`empty[s]` 的 count 是 C：C 个 consumer warp 都读完了，buffer 才能重装。
+The whole kernel has only one `__syncthreads()`, after initialization. Consumer warps never wait for each other: each warp stores its own 32×32 box and manages its own two out buffers with its own bulk group. The count of `empty[s]` is C: a buffer can be refilled only after all C consumer warps have read it.
 
-时序（S = 4）：
+Timeline (S = 4):
 
 ```
 producer: L0 L1 L2 L3 ·wait e0· L4 ·wait e1· L5 ...
-consumer:    ·wait f0· T0 S0 ·f1· T1 S1 ·f2· T2 S2 ...     L = load, T = 转置, S = store
+consumer:    ·wait f0· T0 S0 ·f1· T1 S1 ·f2· T2 S2 ...     L = load, T = transpose, S = store
                          └ arrive e0 ┘
 ```
 
-步骤 2 的 smem 预算（kRows = 128，S = 4）：in 4 × 16 KB + out 4 warp × 2 × 4 KB = 96 KB，每 SM 2 个 CTA。
+The step 2 smem budget (kRows = 128, S = 4): in 4 × 16 KB + out 4 warps × 2 × 4 KB = 96 KB, 2 CTAs per SM.
 
-### 5.3 步骤 3：无冲突的 4×4 寄存器转置
+### 5.3 Step 3: conflict-free 4×4 register transpose
 
-步骤 2 的标量转置中，lane j 读 `in[j][i]`：32 个 lane 落在同一个 bank，每条 LDS 被拆成 32 次。改成：
+In the scalar transpose of step 2, lane j reads `in[j][i]`: all 32 lanes land in the same bank, and each LDS is split into 32 accesses. Instead:
 
-1. x 和 y 的 tensor map 都用 `128B` swizzle，`in` 和 `out` 都是 §4.3 的布局；
-2. 把一个 warp 的 32×32 片看成 8×8 个 4×4 小块。lane l 处理两个小块 `(R, C) = (l % 8, (l % 8 + l / 8 + 4t) % 8)`，t = 0, 1，正好覆盖 64 个小块各一次；
-3. 每个小块：读 `in` 的第 4R..4R+3 行、chunk C（4 个 float4），在寄存器里转置，写 `out` 的第 4C..4C+3 行、chunk R（4 个 float4）。
+1. Use `128B` swizzle in both the x and y tensor maps, so `in` and `out` both have the layout of §4.3;
+2. Treat a warp's 32×32 slice as 8×8 small blocks of 4×4. Lane l handles two small blocks `(R, C) = (l % 8, (l % 8 + l / 8 + 4t) % 8)`, t = 0, 1, which covers each of the 64 small blocks exactly once;
+3. For each small block: read rows 4R..4R+3 of `in` at chunk C (4 float4), transpose in registers, and write rows 4C..4C+3 of `out` at chunk R (4 float4).
 
-16 字节的访问按 8 个 lane 一组（一个 wavefront，8 × 16 B = 128 B = 32 个 bank）处理。同一组的 8 个 lane（l / 8 相同）中：
+16-byte accesses are processed in groups of 8 lanes (one wavefront, 8 × 16 B = 128 B = 32 banks). Within one group of 8 lanes (same l / 8):
 
-- 读第 k 条：行 `4R + k`，物理 chunk `C ^ ((4R + k) % 8)`；
-- 写第 k 条：行 `4C + k`，物理 chunk `R ^ ((4C + k) % 8)`。
+- read number k: row `4R + k`, physical chunk `C ^ ((4R + k) % 8)`;
+- write number k: row `4C + k`, physical chunk `R ^ ((4C + k) % 8)`.
 
-R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小脚本）：对每个 k，8 个 lane 的物理 chunk 两两不同，读和写都无冲突。指令数也降到原来的 1/4（每条搬 16 字节而不是 4 字节）。
+R takes each value 0..7 once, and C = (R + constant) % 8. You can check one by one (or with a small script) that for each k, the physical chunks of the 8 lanes are pairwise distinct, so both reads and writes are conflict-free. The instruction count also drops to 1/4 (each instruction moves 16 bytes instead of 4).
 
-**调参**：tile 高度 kRows（32–256，box 高度上限 256）与级数 S。答案用 kRows = 256、S = 2：每个 CTA 9 个 warp、in 2 × 32 KB + out 8 × 8 KB = 128 KB，每 SM 一个 CTA。
+**Tuning**: the tile height kRows (32–256; the box height is at most 256) and the stage count S. The reference solution uses kRows = 256, S = 2: 9 warps per CTA, in 2 × 32 KB + out 8 × 8 KB = 128 KB, one CTA per SM.
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-所有命令在仓库根目录运行。
+Run all commands from the repository root.
 
-### 步骤 1 · TODO(1a)(1b)(1c)：封装、编码、单 tile
+### Step 1 · TODO(1a)(1b)(1c): wrappers, encoding, single tile
 
-- TODO(1a)：九个 PTX 封装（§4.2、§4.4、§4.5）。注意 `mbar_wait` 要在 asm 里写循环，标签用 `%=` 保证唯一；
-- TODO(1b)：host 端 `encode_2d`（§4.1 的表）；
-- TODO(1c)：`transpose_one_tile`（§5.1）。
+- TODO(1a): nine PTX wrappers (§4.2, §4.4, §4.5). `mbar_wait` needs a loop inside the asm; use `%=` in the labels to keep them unique;
+- TODO(1b): the host-side `encode_2d` (the table in §4.1);
+- TODO(1c): `transpose_one_tile` (§5.1).
 
 ```bash
 ./lab check 30 --step 1
 ./lab bench 30 --step 1
 ```
 
-### 步骤 2 · TODO(2a)(2b)：环形 buffer
+### Step 2 · TODO(2a)(2b): ring buffer
 
-- TODO(2a)：`mbar_arrive`、`bulk_wait_group_read<N>`、`elect_one`；
-- TODO(2b)：`transpose_pipelined` 的初始化、producer 循环、consumer 循环（§3.3、§5.2）。
+- TODO(2a): `mbar_arrive`, `bulk_wait_group_read<N>`, `elect_one`;
+- TODO(2b): the initialization, producer loop and consumer loop of `transpose_pipelined` (§3.3, §5.2).
 
 ```bash
 ./lab check 30 --step 2
@@ -342,13 +342,13 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 ./lab sanitize 30 --step 2 --case tail --tool racecheck
 ```
 
-先用 `--case tiny`、`--case tail` 调通（一个 CTA 一个 tile），再跑 `ring`（每个 CTA 约 7 个 tile，环形 buffer 绕圈）和 `ring_tail`（绕圈的同时有尾部 tile）。
+Get `--case tiny` and `--case tail` working first (one tile per CTA), then run `ring` (about 7 tiles per CTA, the ring buffer wraps around) and `ring_tail` (wrapping around with tail tiles at the same time).
 
-### 步骤 3 · TODO(3a)(3b)(3c)：swizzle 与调参
+### Step 3 · TODO(3a)(3b)(3c): swizzle and tuning
 
-- TODO(3a)：`tile_offset<true>`（§4.3）；
-- TODO(3b)：`transpose_slice` 的 swizzle 版本（§5.3）；
-- TODO(3c)：选择 `Step3` 的 `Config<Rows, Stages, true>`。
+- TODO(3a): `tile_offset<true>` (§4.3);
+- TODO(3b): the swizzled version of `transpose_slice` (§5.3);
+- TODO(3c): choose the `Config<Rows, Stages, true>` of `Step3`.
 
 ```bash
 ./lab check 30
@@ -358,47 +358,47 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 ./lab profile 30 --step 3
 ```
 
-比较两次 profile 中的 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` 和 `smsp__inst_executed_op_shared_ld.sum`。
+Compare `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` and `smsp__inst_executed_op_shared_ld.sum` between the two profiles.
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| Symptom | Likely cause |
 |---|---|
-| `TODO(1) is not implemented yet (make_plan)` | `encode_2d` 还没写，或仍有 `LAB_TODO(1)` |
-| `cuTensorMapEncodeTiled failed` | dims/box 顺序反了（最内层在前）、stride 写成了元素数、box 超过 256 或 swizzle 宽度 |
-| `TIMEOUT` | `expect_tx` 字节数不对、parity 写错、producer 第一圈在等 `empty`、`full` 的 init count 不是 1 |
-| `tiny`、`square` 对，`tail`、`tall` 错 | TMA 坐标 (x, y) 顺序或 y 的 box 原点写反 |
-| 步骤 2 的 `tiny`/`tail` 对、`ring` 错 | `empty` 的 arrive 次数和 init count 不一致，或 out buffer 复用前没有 `bulk_wait_group_read` |
-| 步骤 3 错误值成块出现、相差 4 的倍数列 | swizzle 下标用了全 tile 行号以外的行号，或 buffer 没有 1024 对齐 |
-| `misaligned address` / `illegal instruction` | TMA 目的地址未按 128/1024 字节对齐 |
+| `TODO(1) is not implemented yet (make_plan)` | `encode_2d` is not written yet, or `LAB_TODO(1)` is still there |
+| `cuTensorMapEncodeTiled failed` | dims/box in the wrong order (innermost first), stride given in elements, box larger than 256 or than the swizzle width |
+| `TIMEOUT` | Wrong `expect_tx` byte count, wrong parity, producer waiting on `empty` in its first lap, init count of `full` not 1 |
+| `tiny` and `square` pass, `tail` and `tall` fail | Wrong TMA coordinate order (x, y), or the box origin of y swapped |
+| In step 2, `tiny`/`tail` pass and `ring` fails | The number of arrives on `empty` does not match its init count, or no `bulk_wait_group_read` before an out buffer is reused |
+| Step 3 wrong values appear in blocks, at columns that differ by multiples of 4 | The swizzle index uses a row number other than the row within the whole tile, or the buffer is not 1024-aligned |
+| `misaligned address` / `illegal instruction` | TMA destination address not aligned to 128/1024 bytes |
 
-## 7. 性能
+## 7. Performance
 
-本机实测（CUDA Graph）。`./lab bench 30` 打印两条基线：
+Measured on this machine (CUDA Graph). `./lab bench 30` prints two baselines:
 
-- `torch`：PyTorch `y.copy_(x.t())`，一个通用的转置拷贝；
-- `copy`：`y.copy_(x)`，搬同样多的字节，但读写都是完全连续的，不做转置。它是本机 HBM 的**实际上限**。
+- `torch`: PyTorch `y.copy_(x.t())`, a general-purpose transposing copy;
+- `copy`: `y.copy_(x)`, which moves the same number of bytes but reads and writes fully contiguously, without transposing. It is the **practical upper bound** of HBM on this machine.
 
-`vs` 列是相对第一条基线 `torch` 的比值。本关的主要尺子是 **`vs copy`**（`copy` 耗时 / 你的耗时，即下表最后一列）：转置最多做到和连续拷贝一样快，比值越接近 1 越好。
+The `vs` column is the ratio against the first baseline, `torch`. The main yardstick of this lab is **`vs copy`** (`copy` time / your time, the last column of the table below): a transpose can at best be as fast as a contiguous copy, and the closer the ratio is to 1, the better.
 
-| 版本 | `big` 8192×8192 GB/s | `wide` 4096×16384 GB/s | % HBM 标称峰值 | `vs copy` |
+| Version | `big` 8192×8192 GB/s | `wide` 4096×16384 GB/s | % of nominal HBM peak | `vs copy` |
 |---|---|---|---|---|
-| 步骤 1：单 tile | ≈ 1950 | ≈ 1950 | ≈ 24% | ≈ 0.30× |
-| 步骤 2：环形 buffer（标量、无 swizzle） | ≈ 2100 | ≈ 2100 | ≈ 26% | ≈ 0.33× |
-| 步骤 3：swizzle，`Config<128, 4>` | ≈ 5600 | ≈ 5600 | ≈ 70% | ≈ 0.87× |
-| 步骤 3：swizzle，`Config<256, 2>`（答案） | ≈ 6200 | ≈ 6100 | ≈ 77% | ≈ 0.95× |
-| 参考：00 关步骤 4 | ≈ 5900 | — | ≈ 74% | ≈ 0.92× |
-| 参考：`torch`（`y.copy_(x.t())`） | ≈ 1860–1900 | ≈ 1890–1910 | ≈ 23% | ≈ 0.29× |
-| 参考：`copy`（`y.copy_(x)`，无转置） | ≈ 6430 | ≈ 6430 | ≈ 80% | 1 |
+| Step 1: single tile | ≈ 1950 | ≈ 1950 | ≈ 24% | ≈ 0.30× |
+| Step 2: ring buffer (scalar, no swizzle) | ≈ 2100 | ≈ 2100 | ≈ 26% | ≈ 0.33× |
+| Step 3: swizzle, `Config<128, 4>` | ≈ 5600 | ≈ 5600 | ≈ 70% | ≈ 0.87× |
+| Step 3: swizzle, `Config<256, 2>` (reference solution) | ≈ 6200 | ≈ 6100 | ≈ 77% | ≈ 0.95× |
+| Reference: lab 00 step 4 | ≈ 5900 | — | ≈ 74% | ≈ 0.92× |
+| Reference: `torch` (`y.copy_(x.t())`) | ≈ 1860–1900 | ≈ 1890–1910 | ≈ 23% | ≈ 0.29× |
+| Reference: `copy` (`y.copy_(x)`, no transpose) | ≈ 6430 | ≈ 6430 | ≈ 80% | 1 |
 
-答案达到连续拷贝的约 95%。它只比 00 关步骤 4 快约 5%（`--cold` 时约 2%）：转置本来就可以用满整个 SM 来搬运，TMA 在这里的收益不是带宽，而是**用 1 个线程、9 个 warp 做到了 00 关 2048 个线程才做到的事**。后面的关卡里，省下来的线程和寄存器用来做 Tensor Core 计算和 softmax。本关的性能门槛是步骤 3 在两个 perf case 上都达到 `vs copy` 0.85 倍以上（`copy` 耗时 / 你的耗时 ≥ 0.85）；`vs torch` 通常在 3 倍以上，但它不是好尺子，原因见下。
+The reference solution reaches about 95% of a contiguous copy. It is only about 5% faster than lab 00 step 4 (about 2% with `--cold`): a transpose could already use the whole SM for data movement, so the gain from TMA here is not bandwidth but **doing with 1 thread and 9 warps what took lab 00 2048 threads**. In later labs, the threads and registers saved go to Tensor Core compute and softmax. The perf gate of this lab is that step 3 reaches at least 0.85× `vs copy` on both perf cases (`copy` time / your time ≥ 0.85); `vs torch` is usually above 3×, but it is not a good yardstick, for the reasons below.
 
-**读这张表**：
+**Reading this table**:
 
-- **步骤 1、2 都慢，而且相差不到 10%**：瓶颈是 bank conflict，而不是搬运。`./lab profile` 中，步骤 1、2 的 shared load 有约 6600 万次 bank conflict，对应约 210 万条 LDS：每条约 31 次额外的 wavefront，正是 32 路冲突。步骤 2 的流水让 load 与转置重叠，只换来约 8%，被转置本身卡住。
-- **步骤 3 一下快了约 3 倍**：LDS/STS 各约 52 万条（16 字节一条，是原来的 1/4），bank conflict 约 70 万（load）和 100 万（store），平均每条不到 2 次。剩下这些不是下标公式造成的（换一种 lane 分配几乎不变），推测来自与 TMA 读写同一块 shared memory 的仲裁，未进一步证实。
-- **为什么不用 `vs torch` 当尺子**：`torch` 的转置和步骤 1、2 一样，不是被 HBM 卡住的。早先另一次测量中，步骤 1、2 只有约 1030、1060 GB/s（约为上表的一半），`torch` 在约 1.0 TB/s 与约 1.8 TB/s 之间跳动，而步骤 3 和 `copy` 与上表相同。一个**未经验证的假设**是 GPU 当时处于较低的 SM 时钟：受 bank conflict 或延迟限制的 kernel 的速度随 SM 时钟变化，受 HBM 限制的 kernel（`copy`、步骤 3）几乎不受影响。不论原因是什么，`copy` 和答案都由 HBM 决定，二者的比值在这种波动下是稳定的。
-- **调参**（`big`，swizzle 版）：
+- **Steps 1 and 2 are both slow, and differ by less than 10%**: the bottleneck is bank conflicts, not data movement. In `./lab profile`, the shared loads of steps 1 and 2 have about 66 million bank conflicts for about 2.1 million LDS instructions: about 31 extra wavefronts per instruction, exactly a 32-way conflict. The step 2 pipeline overlaps loads with the transpose but gains only about 8%, because the transpose itself is the limit.
+- **Step 3 is suddenly about 3× faster**: about 520 thousand LDS and 520 thousand STS (one per 16 bytes, 1/4 of before), with about 700 thousand (load) and 1 million (store) bank conflicts, fewer than 2 per instruction on average. The remaining conflicts are not caused by the index formula (a different lane assignment barely changes them); they presumably come from arbitration with the TMA reading and writing the same shared memory, which was not confirmed further.
+- **Why `vs torch` is not used as the yardstick**: `torch`'s transpose, like steps 1 and 2, is not limited by HBM. In an earlier, separate measurement, steps 1 and 2 reached only about 1030 and 1060 GB/s (about half of the table above), and `torch` jumped between about 1.0 TB/s and about 1.8 TB/s, while step 3 and `copy` matched the table above. An **unverified hypothesis** is that the GPU was at a lower SM clock at the time: the speed of kernels limited by bank conflicts or latency scales with the SM clock, while HBM-limited kernels (`copy`, step 3) are barely affected. Whatever the cause, `copy` and the reference solution are both set by HBM, so their ratio is stable under such fluctuations.
+- **Tuning** (`big`, swizzled version):
 
 | `Config<Rows, Stages>` | smem / CTA | CTA / SM | GB/s |
 |---|---|---|---|
@@ -410,38 +410,38 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 | `<256, 2>` | 129 KB | 1 | ≈ 6200 |
 | `<256, 3>` | 161 KB | 1 | ≈ 5770 |
 
-更多 stage（更多在途字节）并没有更快，最快的是“大 box、2 级”。我们没有找到确切原因；可能的解释是在途读请求过多时，HBM 的读写切换和页冲突抵消了收益。这类结论只能靠测量，不要凭直觉选级数。
+More stages (more bytes in flight) are not faster; the fastest is "large box, 2 stages". We have not found the exact reason; a possible explanation is that with too many read requests in flight, HBM read/write turnarounds and page conflicts cancel out the gain. Conclusions like this can only come from measurement; do not pick the stage count by intuition.
 
-`./lab profile` 时 Nsight Compute 锁定时钟，时间比 `bench` 长，只用它比较指标。
+During `./lab profile`, Nsight Compute locks the clocks and times are longer than in `bench`; use it only to compare metrics.
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. `tail`（36×68）中，CTA 处理 x 的 box 原点 (x = 64, y = 32)（步骤 1）。这个 box 里有多少个有效元素？`expect_tx` 应该填多少字节？
-2. mbarrier 初始化为 count = 2，两个线程各执行一次 `arrive`，同时 tx-count 为 0。此时 phase 0 完成了吗？如果其中一个线程用的是 `arrive.expect_tx(1024)`，而没有任何 TMA 呢？
-3. 步骤 2 中，若把 `empty[s]` 的 count 设为 consumer 线程数（128）但仍然每个 warp 只 arrive 一次，会怎样？
-4. 为什么 consumer 在复用 out buffer 之前用 `wait_group.read 1` 而不是 `wait_group.read 0`？
-5. 128B swizzle 下，`in` 的第 13 行第 22 列（float）的字节偏移是多少（相对 1024 对齐的 buffer）？
-6. 删掉 `fence_proxy_async()` 后本机测试仍然全部通过。为什么这不能说明 fence 可以省略？
+1. In `tail` (36×68), a CTA processes the x box with origin (x = 64, y = 32) (step 1). How many valid elements does this box contain? How many bytes should `expect_tx` be given?
+2. An mbarrier is initialized with count = 2, two threads each execute one `arrive`, and the tx-count is 0. Has phase 0 completed? What if one of the threads used `arrive.expect_tx(1024)` instead, and there is no TMA at all?
+3. In step 2, what happens if the count of `empty[s]` is set to the number of consumer threads (128) while each warp still arrives only once?
+4. Why does a consumer use `wait_group.read 1` rather than `wait_group.read 0` before reusing an out buffer?
+5. With 128B swizzle, what is the byte offset (relative to a 1024-aligned buffer) of row 13, column 22 (float) of `in`?
+6. After deleting `fence_proxy_async()`, all tests on this machine still pass. Why does this not show that the fence can be omitted?
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. 行 32..35 有效（4 行），列 64..67 有效（4 列），共 16 个元素；`expect_tx` 仍是整个 box 的 32 × 32 × 4 = 4096 字节，越界部分以 0 写入并计数。
-2. 第一种情况完成了：到达计数归零、tx-count 为 0。第二种情况不会完成：tx-count 是 1024，没有 complete_tx 来抵消，等待者永远挂起。
-3. 每个 phase 只有 C 次到达，永远凑不够 128 次：producer 第二圈在 `empty[s]` 上挂起。
-4. buffer `it % 2` 上一次是在 `it − 2` 被 store 的；此时最近提交的是 `it − 1` 的组，允许它还没读完（1 个未完成），就保证了 `it − 2` 的组已经读完。用 0 也正确，但会多等一个 store，减少重叠。
-5. 行 13：`13 % 8 = 5`；列 22 在 chunk `22 / 4 = 5`，chunk 内第 2 个 float。物理 chunk = `5 ^ 5 = 0`。偏移 = `13 × 128 + 0 × 16 + 2 × 4 = 1672` 字节。
-6. 内存模型不保证没有 fence 时的可见性；测试通过只说明在这台机器、这个负载下恰好没有出现重排。racecheck 也不跟踪 async proxy 的访问。这类正确性要按规范推理，测试只能发现一部分错误。
+1. Rows 32..35 are valid (4 rows) and columns 64..67 are valid (4 columns), 16 elements in total; `expect_tx` is still the whole box, 32 × 32 × 4 = 4096 bytes, because the out-of-bounds part is written as 0 and counted.
+2. In the first case, yes: the arrival count reaches zero and the tx-count is 0. In the second case, no: the tx-count is 1024, with no complete_tx to cancel it, so waiters hang forever.
+3. Each phase gets only C arrivals and never reaches 128: the producer hangs on `empty[s]` in its second lap.
+4. Buffer `it % 2` was last stored at `it − 2`; at this point the most recently committed group is that of `it − 1`, and allowing it to be still reading (1 pending) guarantees that the group of `it − 2` has finished reading. Using 0 is also correct, but it waits for one more store and reduces overlap.
+5. Row 13: `13 % 8 = 5`; column 22 is in chunk `22 / 4 = 5`, float 2 within the chunk. Physical chunk = `5 ^ 5 = 0`. Offset = `13 × 128 + 0 × 16 + 2 × 4 = 1672` bytes.
+6. The memory model does not guarantee visibility without the fence; passing tests only show that no reordering happened to occur on this machine under this load. racecheck does not track async proxy accesses either. Correctness of this kind must be reasoned from the specification; tests can find only some of the bugs.
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- PTX ISA 8.7：[cp.async.bulk.tensor](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor)、[cp.async.bulk.wait_group](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-wait-group)、[mbarrier](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier)（含 phase、tx-count 的定义）、[Tensor Memory Swizzling Modes / Tensor copy](https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-swizzling-modes)、[elect.sync](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-elect-sync)、[Memory Consistency Model: Proxies](https://docs.nvidia.com/cuda/parallel-thread-execution/#proxies)
-- CUDA Driver API：[cuTensorMapEncodeTiled](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html)
-- CUDA C++ Programming Guide：[Asynchronous Data Copies using the Tensor Memory Accelerator (TMA)](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/async-copies.html#async-copies-tma)
-- FlashAttention-3 论文（Shah et al., 2024）第 3.1 节：Producer-Consumer asynchrony
-- 上游源码（`third_party/` 中固定版本）：
-  - `third_party/cutlass/include/cute/arch/copy_sm90_tma.hpp`：`SM90_TMA_LOAD_2D`、`SM90_TMA_STORE_2D`、`tma_store_arrive` / `tma_store_wait`；
-  - `third_party/cutlass/include/cute/arch/copy_sm90_desc.hpp`：`TMA::SmemSwizzleBits` 与 tensor map 的编码；
-  - `third_party/cutlass/include/cutlass/arch/barrier.h`：`ClusterTransactionBarrier`（mbarrier 封装）、`fence_view_async_shared`；
-  - `third_party/cutlass/include/cutlass/pipeline/sm90_pipeline.hpp`：`PipelineTmaAsync`，即本关步骤 2 的 full/empty 协议（producer 从 phase 1 开始）。
+- PTX ISA 8.7: [cp.async.bulk.tensor](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor), [cp.async.bulk.wait_group](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-wait-group), [mbarrier](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier) (including the definitions of phase and tx-count), [Tensor Memory Swizzling Modes / Tensor copy](https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-swizzling-modes), [elect.sync](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-elect-sync), [Memory Consistency Model: Proxies](https://docs.nvidia.com/cuda/parallel-thread-execution/#proxies)
+- CUDA Driver API: [cuTensorMapEncodeTiled](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html)
+- CUDA C++ Programming Guide: [Asynchronous Data Copies using the Tensor Memory Accelerator (TMA)](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/async-copies.html#async-copies-tma)
+- FlashAttention-3 paper (Shah et al., 2024), section 3.1: Producer-Consumer asynchrony
+- Upstream source (pinned versions in `third_party/`):
+  - `third_party/cutlass/include/cute/arch/copy_sm90_tma.hpp`: `SM90_TMA_LOAD_2D`, `SM90_TMA_STORE_2D`, `tma_store_arrive` / `tma_store_wait`;
+  - `third_party/cutlass/include/cute/arch/copy_sm90_desc.hpp`: `TMA::SmemSwizzleBits` and tensor map encoding;
+  - `third_party/cutlass/include/cutlass/arch/barrier.h`: `ClusterTransactionBarrier` (mbarrier wrapper), `fence_view_async_shared`;
+  - `third_party/cutlass/include/cutlass/pipeline/sm90_pipeline.hpp`: `PipelineTmaAsync`, the full/empty protocol of step 2 in this lab (the producer starts at phase 1).

@@ -106,11 +106,8 @@ def test_attention_reference_matches_torch_sdpa():
         torch.testing.assert_close(lse_rows, lse[:, :, rows])
 
 
-def test_relative_links_in_lessons_resolve():
-    import re
-
-    broken = []
-    for md in sorted(
+def _markdown_docs():
+    return sorted(
         [
             *ROOT.glob("course/*/README.md"),
             *ROOT.glob("solutions/*/NOTES.md"),
@@ -118,11 +115,55 @@ def test_relative_links_in_lessons_resolve():
             ROOT / "README.md",
             ROOT / "AGENTS.md",
         ]
-    ):
+    )
+
+
+def _anchors(md):
+    """GitHub-style heading anchors of a Markdown file (code fences skipped)."""
+    import re
+
+    anchors, seen, fence = set(), {}, False
+    for line in md.read_text().splitlines():
+        if line.lstrip().startswith("```"):
+            fence = not fence
+        m = None if fence else re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if not m:
+            continue
+        text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", m.group(1)).lower()
+        slug = re.sub(r"[^\w\- ]", "", text).replace(" ", "-")
+        n = seen.get(slug, 0)
+        seen[slug] = n + 1
+        anchors.add(slug if n == 0 else f"{slug}-{n}")
+    return anchors
+
+
+def test_relative_links_in_lessons_resolve():
+    import re
+
+    broken = []
+    for md in _markdown_docs():
         for target in re.findall(r"\]\(([^)\s]+)\)", md.read_text()):
-            if re.match(r"[a-z]+:", target) or target.startswith("#"):
+            if re.match(r"[a-z]+:", target):
                 continue
-            path = (md.parent / target.split("#")[0]).resolve()
+            file, _, anchor = target.partition("#")
+            path = (md.parent / file).resolve() if file else md
             if not path.exists():
                 broken.append(f"{md.relative_to(ROOT)} -> {target}")
+            elif anchor and path.suffix == ".md" and anchor not in _anchors(path):
+                broken.append(f"{md.relative_to(ROOT)} -> {target} (no such heading)")
     assert not broken, "\n".join(broken)
+
+
+def test_docs_and_specs_are_ascii_width():
+    """No CJK or full-width text: it breaks code-block diagram alignment."""
+    import re
+
+    wide = re.compile(r"[⺀-鿿가-힯豈-﫿＀-￯]")
+    files = [*_markdown_docs(), *ROOT.glob("course/*/spec.json")]
+    bad = [
+        f"{f.relative_to(ROOT)}:{n}"
+        for f in files
+        for n, line in enumerate(f.read_text().splitlines(), 1)
+        if wide.search(line)
+    ]
+    assert not bad, "wide (CJK/full-width) characters at:\n" + "\n".join(bad)

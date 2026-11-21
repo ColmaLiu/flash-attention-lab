@@ -1,55 +1,55 @@
-# 代码格式
+# Code formatting
 
-本项目用三样工具统一格式：
+This project uses three tools to keep formatting consistent:
 
-| 工具 | 管什么 |
+| Tool | What it covers |
 |---|---|
-| clang-format | CUDA / C++（`.cu`、`.cuh`、`.h`、`.cpp` 等） |
-| Ruff | Python 的格式与静态检查 |
-| pre-commit | 在 `git commit` 前自动运行上面两个，以及空白、换行、大文件等检查 |
+| clang-format | CUDA / C++ (`.cu`, `.cuh`, `.h`, `.cpp` and so on) |
+| Ruff | Python formatting and static checks |
+| pre-commit | Runs the two tools above before `git commit`, plus checks for whitespace, line endings, large files and so on |
 
-版本固定在 `requirements-lint.txt` 和 `.pre-commit-config.yaml`，升级时两处一起改。
+The versions are pinned in `requirements-lint.txt` and `.pre-commit-config.yaml`; when you upgrade, change both together.
 
-## 安装与运行
+## Install and run
 
-在课程的 Conda 环境中安装并启用：
+Install and enable them in the course's Conda environment:
 
 ```bash
 source scripts/activate.sh
 python -m pip install -r requirements-lint.txt
-python -m pre_commit install              # 以后每次 git commit 都会检查暂存的文件
-python -m pre_commit run --all-files      # 检查全部已跟踪文件
+python -m pre_commit install              # from now on every git commit checks the staged files
+python -m pre_commit run --all-files      # check all tracked files
 ```
 
-第一次运行会安装隔离的 hook 环境，比较慢。`--all-files` 只检查已跟踪的文件；新文件先 `git add`，或用 `--files` 指定：
+The first run installs isolated hook environments and is slow. `--all-files` checks only tracked files; `git add` new files first, or name them with `--files`:
 
 ```bash
 python -m pre_commit run --files solutions/32_ws_gemm/kernel.cu include/lab/tcgen05.cuh
 ```
 
-如果 hook 修改了文件，先看 diff，确认无误后重新 `git add`，再提交。
+If a hook modifies files, read the diff first, `git add` again once it looks right, then commit.
 
-## 风格
+## Style
 
-| 语言 | 风格 |
+| Language | Style |
 |---|---|
-| CUDA / C++ | LLVM 风格，两空格缩进，80 列；不把短函数、短条件、短循环压成一行；保留 include 顺序 |
-| Python | 四空格缩进，88 列；单行多条语句会被展开 |
+| CUDA / C++ | LLVM style, two-space indent, 80 columns; short functions, short conditions and short loops are not squeezed onto one line; include order is kept |
+| Python | Four-space indent, 88 columns; several statements on one line get split |
 
-inline PTX 字符串的内容不会被改动。
+The contents of inline PTX strings are not changed.
 
-## 不会被格式化的目录
+## Directories that are not formatted
 
-`.pre-commit-config.yaml` 排除了 `students/`、`third_party/`、`artifacts/`、`.cache/`、`progress/` 等目录：
+`.pre-commit-config.yaml` excludes directories such as `students/`, `third_party/`, `artifacts/`, `.cache/` and `progress/`:
 
-- `students/` 是学习者的练习区，批量工具不应改动你的实现和笔记。你可以自己对正在编辑的文件运行 `clang-format -i students/<ID>/kernel.cu`；
-- `third_party/` 是固定版本的上游源码。
+- `students/` is the learner's student code, and bulk tools should not change your implementations and notes. You can run `clang-format -i students/<ID>/kernel.cu` yourself on the file you are editing;
+- `third_party/` holds the pinned upstream sources.
 
-## 格式化之后
+## After formatting
 
-格式化通过不代表正确。改了公共代码（`include/lab/`、`labkit/`、`solutions/`）后，还要：
+Passing the formatter does not mean the code is correct. After you change shared code (`include/lab/`, `labkit/`, `solutions/`), also run:
 
 ```bash
-python -m pytest -q tests/test_labkit.py          # 基础设施测试
-LAB_GPU=<n> ./lab check <ID> --solution           # 受影响的参考答案重新编译并检查
+python -m pytest -q tests/test_labkit.py          # infrastructure tests
+LAB_GPU=<n> ./lab check <ID> --solution           # rebuild and check the affected reference solutions
 ```

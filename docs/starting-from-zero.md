@@ -1,106 +1,106 @@
-# 从零开始：读懂并运行第一个 GPU kernel
+# Starting from zero: read and run your first GPU kernel
 
-本章面向会写普通 C/C++ 和 Python、但还没怎么写过 CUDA 的读者。读完后你应该能看懂 [00_transpose](../course/00_transpose/README.md) 的骨架 `students/00_transpose/kernel.cu`，并完成它的第 1 步。
+This chapter is for readers who can write ordinary C/C++ and Python but have not written much CUDA. After reading it you should be able to understand the skeleton `students/00_transpose/kernel.cu` of [00_transpose](../course/00_transpose/README.md) and complete its step 1.
 
-先不考虑 attention。把一个矩阵转置正确并做快，已经会用到后面所有关卡需要的四件事：地址、并行分工、存储层级、同步。
+Set attention aside for now. Making a matrix transpose correct and fast already uses the four things every later lab needs: addresses, parallel work split, the memory hierarchy, synchronization.
 
-## 1. 一个函数为什么会执行很多次
+## 1. Why one function runs many times
 
-CPU 上的普通函数调用只有一条执行流。CUDA 的 `__global__` 函数叫 **kernel**。host（CPU）发起一次 kernel，GPU 上会有很多线程同时运行这同一份函数体；每个线程根据自己的编号处理不同的数据。
+An ordinary function call on the CPU has a single flow of execution. A CUDA `__global__` function is called a **kernel**. When the host (CPU) launches a kernel once, many GPU threads run the same function body at the same time; each thread uses its own index to process different data.
 
 ```cpp
 transpose_naive<<<grid, block, shared_bytes, stream>>>(x, y, rows, cols);
-//               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  执行规模：多少线程、多少 shared memory、哪个 stream
-//                                                      ^^^^^^^^^^^^^^^^^^  每个线程都收到同样的参数
+//               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  launch size: how many threads, how much shared memory, which stream
+//                                                      ^^^^^^^^^^^^^^^^^^  every thread receives the same arguments
 ```
 
-| 名称 | 含义 | 由谁决定 |
+| Name | Meaning | Set by |
 |---|---|---|
-| host | 发起 GPU 工作的 CPU 代码 | 你写的普通 C++ |
-| kernel | 所有线程执行的设备函数 | `__global__` 函数 |
-| grid | 一次 launch 的全部 block | `<<<grid, ...>>>` 指定各维 block 数 |
-| block / CTA | 一组线程，共享一块 shared memory，可以用 `__syncthreads()` 同步 | `<<<..., block>>>` 指定各维线程数 |
-| warp | 32 个线程一组，一起执行同一条指令 | 硬件按 block 内的线性编号划分 |
-| lane | 线程在 warp 内的编号，0–31 | 线性编号 % 32 |
-| SM | 执行 warp 的硬件单元；B200 有 148 个 | 硬件调度，程序不能指定 |
+| host | The CPU code that launches GPU work | Ordinary C++ that you write |
+| kernel | The device function that all threads execute | A `__global__` function |
+| grid | All blocks of one launch | `<<<grid, ...>>>` gives the number of blocks in each dimension |
+| block / CTA | A group of threads that share a region of shared memory and can synchronize with `__syncthreads()` | `<<<..., block>>>` gives the number of threads in each dimension |
+| warp | A group of 32 threads that execute the same instruction together | The hardware splits by the linear index within the block |
+| lane | A thread's index within its warp, 0–31 | Linear index % 32 |
+| SM | The hardware unit that executes warps; B200 has 148 | Scheduled by hardware; the program cannot choose |
 
-CTA（Cooperative Thread Array）是 block 在 PTX 里的名字，两者指同一个东西。
+CTA (Cooperative Thread Array) is the PTX name for a block; the two mean the same thing.
 
-二维 block 中，线程的线性编号是 `t = threadIdx.x + blockDim.x * threadIdx.y`，所以 `warp = t / 32`，`lane = t % 32`。
-00 关的 block 是 `(32, 8)`：共 256 个线程、8 个 warp；同一个 `threadIdx.y` 的 32 个线程恰好是一个 warp。
+In a 2D block, a thread's linear index is `t = threadIdx.x + blockDim.x * threadIdx.y`, so `warp = t / 32` and `lane = t % 32`.
+The block in lab 00 is `(32, 8)`: 256 threads, 8 warps in total; the 32 threads with the same `threadIdx.y` form exactly one warp.
 
-一个 SM 可以同时驻留多个 block，数量受寄存器、shared memory 和线程数限制。**block 编号不是 SM 编号，也不能假设 block 按编号顺序执行。**
+One SM can hold several blocks at once; the number is limited by registers, shared memory and thread count. **A block index is not an SM index, and you cannot assume blocks run in index order.**
 
 ```
 host: make_plan + launch
         │
         ▼
-      grid ──┬── block 0 ──┬── warp 0（lane 0..31）
+      grid ──┬── block 0 ──┬── warp 0 (lane 0..31)
              │   (shared)  └── warp 1 ...
              ├── block 1 ...
-             └── ...         ← 硬件把 block 分配到空闲的 SM 上
+             └── ...         ← the hardware assigns blocks to idle SMs
 ```
 
-## 2. 数组是一段线性存储
+## 2. An array is a linear stretch of memory
 
-连续的（contiguous）行主序矩阵 `X[R,C]` 中，元素 `(r,c)` 在 `X[r*C + c]`。
-例如 `X = [[0,1,2],[3,4,5]]` 在内存中是 `[0,1,2,3,4,5]`。
-它的转置 `Y = Xᵀ` 形状是 `[3,2]`，内存中应为 `[0,3,1,4,2,5]`。
+In a contiguous row-major matrix `X[R,C]`, element `(r,c)` is at `X[r*C + c]`.
+For example, `X = [[0,1,2],[3,4,5]]` is `[0,1,2,3,4,5]` in memory.
+Its transpose `Y = Xᵀ` has shape `[3,2]` and should be `[0,3,1,4,2,5]` in memory.
 
-所以转置的地址等式是：
+So the address equation of the transpose is:
 
 ```
 Y[c*R + r] = X[r*C + c]
 ```
 
-只改 shape 不会完成转置：数据必须真的被搬到新位置。
+Changing only the shape does not transpose anything: the data must actually move to new positions.
 
-后面的 attention 使用连续的 `[B,N,H,D]`。元素 `(b,n,h,d)` 的偏移是 `((b*N + n)*H + h)*D + d`。
-固定 batch 和 head 时，相邻 token 相隔 `H*D` 个元素，而不是 `D` 个。
-把它误当成 `[B,H,N,D]` 会读错数据，所以课程的 case 总是包含 `B>1`、`H>1`（见 [11 关 §3.3](../course/11_naive_attention/README.md)）。
+Attention later uses a contiguous `[B,N,H,D]`. The offset of element `(b,n,h,d)` is `((b*N + n)*H + h)*D + d`.
+With batch and head fixed, adjacent tokens are `H*D` elements apart, not `D`.
+Mistaking it for `[B,H,N,D]` reads the wrong data, so the course's cases always include `B>1` and `H>1` (see [lab 11 §3.3](../course/11_naive_attention/README.md)).
 
-大矩阵的元素数可能超过 2³¹，线性下标要用 `int64_t`。
+The element count of a large matrix can exceed 2³¹, so linear indices must use `int64_t`.
 
-## 3. 数据放在哪里，决定谁能复用它
+## 3. Where data lives decides who can reuse it
 
-| 存储 | 谁能直接访问 | 生命周期 | 00 关的用途 |
+| Memory | Who can access it directly | Lifetime | Use in lab 00 |
 |---|---|---|---|
-| global memory（HBM） | 所有线程 | 由 host 分配，直到释放 | 输入 x、输出 y |
-| shared memory | 同一个 block 的线程 | block 执行期间 | 暂存一个 tile，改变读写顺序 |
-| 寄存器 | 只有当前线程 | 线程执行期间 | 下标、临时值、累加器 |
+| global memory (HBM) | All threads | Allocated by the host, until freed | Input x, output y |
+| shared memory | Threads of the same block | While the block runs | Holds one tile temporarily to change the read/write order |
+| Registers | Only the current thread | While the thread runs | Indices, temporaries, accumulators |
 
-源码里的标量变量通常放在寄存器。寄存器不够时，编译器会把一部分变量放进 local memory（实际在 HBM 上，经 L1/L2 缓存），这叫 **spill**，会变慢。`./lab sass` 可以看到有没有 spill（见 [工具指南](tools.md)）。
+Scalar variables in source code usually live in registers. When registers run out, the compiler puts some variables in local memory (which actually lives in HBM, cached through L1/L2); this is called a **spill**, and it slows the kernel down. `./lab sass` shows whether there is a spill (see the [Tools guide](tools.md)).
 
-shared memory 也有容量限制（B200 每个 SM 228 KB，见 [B200 架构概览](b200.md)）。每个 block 用得越多，一个 SM 上能同时驻留的 block 越少。
+shared memory also has a capacity limit (228 KB per SM on B200, see the [B200 architecture overview](b200.md)). The more each block uses, the fewer blocks one SM can hold at once.
 
-## 4. 课程的 kernel 文件长什么样
+## 4. What a course kernel file looks like
 
-每一关你只改一个文件：`students/<ID>/kernel.cu`。它固定包含三样东西：
+In each lab you change only one file: `students/<ID>/kernel.cu`. It always contains three things:
 
 ```cpp
-struct Plan {};                                          // 准备好的状态：00 关不需要，是空的
+struct Plan {};                                          // prepared state: lab 00 needs none, so it is empty
 
-Plan make_plan(const lab::TransposeProblem &p);          // 准备：不计时
-void run(const Plan &, const lab::TransposeProblem &p,   // 执行：计时；只在 stream 上发射 kernel
+Plan make_plan(const lab::TransposeProblem &p);          // prepare: not timed
+void run(const Plan &, const lab::TransposeProblem &p,   // execute: timed; only launches kernels on the stream
          cudaStream_t stream);
 
-LAB_REGISTER(lab::TransposeProblem, Plan, make_plan, run);   // 把上面两个函数交给 Python 框架
+LAB_REGISTER(lab::TransposeProblem, Plan, make_plan, run);   // hands the two functions above to the Python framework
 ```
 
-| 部分 | 做什么 | 00 关 |
+| Part | What it does | Lab 00 |
 |---|---|---|
-| `lab::TransposeProblem` | 框架传进来的问题：设备指针 `x`、`y`，尺寸 `rows`、`cols`，当前 step `p.step` | 定义在 [`include/lab/problem.h`](../include/lab/problem.h) |
-| `make_plan` | 只调用一次，不计时。后面的关卡在这里编码 TMA 描述符、分配 scratch | 只检查 dtype 与尺寸 |
-| `run` | 每次计时都调用。只负责发射 kernel，必须用传入的 `stream` | 按 `p.step` 选择版本 |
-| `LAB_TODO(n)` | 未完成的地方。运行到这里时报告 “TODO(n) 未实现” | 每个 step 一个 |
+| `lab::TransposeProblem` | The problem the framework passes in: device pointers `x`, `y`, sizes `rows`, `cols`, the current step `p.step` | Defined in [`include/lab/problem.h`](../include/lab/problem.h) |
+| `make_plan` | Called only once, not timed. Later labs encode TMA descriptors and allocate scratch here | Only checks the dtype and sizes |
+| `run` | Called for every timed run. It only launches kernels, and it must use the `stream` passed in | Selects a version by `p.step` |
+| `LAB_TODO(n)` | An unfinished spot. When execution reaches it, it reports "TODO(n) is not implemented yet" | One per step |
 
-`run` 按 `p.step` 选择版本，所以每一步的实现都保留在同一个文件里，可以互相比较速度。
+`run` selects a version by `p.step`, so the implementation of every step stays in the same file and you can compare their speeds.
 
-输出 `y` 在每次检查前被填满 NaN。如果有元素没写到，检查会报告 “never written”。
+The output `y` is filled with NaN before each check. If some element is never written, the check reports "never written".
 
-## 5. 读懂第 1 步
+## 5. Understanding step 1
 
-打开 `students/00_transpose/kernel.cu`，看 `run` 中 `case 1`：
+Open `students/00_transpose/kernel.cu` and look at `case 1` in `run`:
 
 ```cpp
 dim3 block(32, 8);
@@ -108,53 +108,53 @@ dim3 grid((p.cols + 31) / 32, (p.rows + 7) / 8);
 transpose_naive<<<grid, block, 0, stream>>>(x, y, p.rows, p.cols);
 ```
 
-- 每个 block 覆盖 x 的 8 行 × 32 列，每个线程负责一个元素。
-- `(cols + 31) / 32` 是向上取整：`cols = 11` 时也要 1 个 block。所以边缘 block 有一部分线程落在矩阵外面。
+- Each block covers 8 rows × 32 columns of x, and each thread handles one element.
+- `(cols + 31) / 32` rounds up: even `cols = 11` needs 1 block. So some threads of the edge blocks fall outside the matrix.
 
-`transpose_naive` 里是 `LAB_TODO(1)`。骨架注释已经列出三件事：
+`transpose_naive` contains `LAB_TODO(1)`. The skeleton comment already lists three things:
 
-1. 用 `blockIdx`、`blockDim`、`threadIdx` 算出本线程的 `(r, c)`；
-2. `(r, c)` 在矩阵外就返回；
-3. 把 `x[r][c]` 拷到 `y[c][r]`。
+1. Compute this thread's `(r, c)` from `blockIdx`, `blockDim` and `threadIdx`;
+2. Return if `(r, c)` is outside the matrix;
+3. Copy `x[r][c]` to `y[c][r]`.
 
-先在纸上回答：`threadIdx.x` 应该对应行还是列？提示：同一个 warp 的 32 个线程 `threadIdx.y` 相同、`threadIdx.x` 连续，而 `block` 的 x 方向是 32。
+First answer on paper: should `threadIdx.x` map to the row or the column? Hint: the 32 threads of one warp share the same `threadIdx.y` and have consecutive `threadIdx.x`, and the x dimension of `block` is 32.
 
-写完后运行：
+When you are done, run:
 
 ```bash
 ./lab check 00 --step 1
 ```
 
-还没写时，输出是这样的：
+Before you write anything, the output looks like this:
 
 ```
-step 1: 朴素转置：一个线程一个元素
+step 1: Naive transpose: one thread per element
   TODO  tiny [7, 11] fp32
-        purpose: 比一个 tile 还小：检查行列下标与越界判断。……
+        purpose: Smaller than one tile: checks row/column indices and bounds checks. …
 
 TODO: TODO(1) is not implemented yet (reached on the GPU).
 ```
 
-第一个 case `tiny` 是 7×11，每个输入值等于它的线性下标。答错时报告会给出“在某坐标得到 v、期望 w”，`v` 就告诉你读到了 x 的哪个位置。每个 case 的 `purpose` 说明它针对哪类错误。
+The first case `tiny` is 7×11, and each input value equals its linear index. When the answer is wrong, the report says "got v at some coordinate, expected w", and `v` tells you which position of x was read. Each case's `purpose` states which kind of bug it targets.
 
-## 6. CPU 返回了，不代表 GPU 已经完成
+## 6. The CPU returning does not mean the GPU is done
 
-kernel launch 只是把工作放进 **stream** 的队列，然后立刻返回 CPU。同一个 stream 里的工作按顺序执行；不同 stream 之间需要显式依赖。
+A kernel launch only puts work into the queue of a **stream** and returns to the CPU immediately. Work in the same stream runs in order; work in different streams needs explicit dependencies.
 
-因此，用 CPU 时间夹住一次 launch，测到的主要是提交开销，而不是 kernel 时间。`./lab bench` 用 CUDA event 在 stream 上计时，并默认用 CUDA Graph 一次回放多次 launch，去掉 Python 发起的间隙。编译、`make_plan`、造输入和分配内存都不计入。细节见 [工具指南 §5](tools.md#5-计时graph-与-cold)。
+So if you wrap one launch with CPU timers, you mostly measure the submission overhead, not the kernel time. `./lab bench` times on the stream with CUDA events, and by default uses a CUDA Graph to replay many launches at once, removing the gaps from Python launching them. Compilation, `make_plan`, input generation and memory allocation are not included. Details are in the [Tools guide §5](tools.md#5-timing-graph-and-cold).
 
-检查还会在非默认 stream 上运行你的 kernel。kernel 必须发射到 `run` 收到的 `stream` 上；写死默认 stream 可能在小例上碰巧正确，但会破坏依赖关系。
+The check also runs your kernel on a non-default stream. The kernel must be launched on the `stream` that `run` receives; hard-coding the default stream may happen to work on small examples, but it breaks the dependencies.
 
 ```bash
 ./lab bench 00 --step 1
 ```
 
-输出中 `vs torch` 是 PyTorch 转置的耗时除以本行的耗时，大于 1 表示比 PyTorch 快。
+In the output, `vs torch` is the time of the PyTorch transpose divided by this row's time; greater than 1 means faster than PyTorch.
 
-## 7. 接下来
+## 7. Next
 
-1. 读 00 关讲义 §4，弄清朴素转置的哪一侧访存不合并，再做第 2–4 步；
-2. 每做完一步，先 `check` 再 `bench`，用 `./lab profile 00 --step n` 验证你对 bank conflict 的预测；
-3. 完成后进入 [01_softmax](../course/01_softmax/README.md)，从“交换数据位置”进到“合并多个线程的数值结果”。
+1. Read §4 of the lab 00 lesson to find out which side of the naive transpose has uncoalesced memory access, then do steps 2–4;
+2. After each step, run `check` first and then `bench`, and use `./lab profile 00 --step n` to verify your bank conflict predictions;
+3. When done, move on to [01_softmax](../course/01_softmax/README.md), going from "swapping data positions" to "combining the numeric results of many threads".
 
-遇到不认识的词，查 [术语表](glossary.md)。
+When you meet an unfamiliar word, look it up in the [Glossary](glossary.md).

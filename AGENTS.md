@@ -1,37 +1,37 @@
-# flash-attention-lab 学习协作约定
+# flash-attention-lab collaboration rules for tutoring
 
-本项目是一门 CUDA C++ / PTX 课程：在 B200（SM100）上以 FlashAttention 1→4 为主线，学写高性能 kernel。关卡分部分 0–4，列表见 [README](README.md#课程地图)。这里的约定面向辅导学习者的 agent。
+This project is a CUDA C++ / PTX course: on B200 (SM100), with FlashAttention 1→4 as the main thread, learners practice writing high-performance kernels. The labs are split into Parts 0–4; the list is in the [README](README.md#course-map). These rules are for agents that tutor learners.
 
-## 辅导方式
+## How to tutor
 
-- 先读当前关卡的讲义 `course/<ID>/README.md`、`spec.json` 和学习者的 `students/<ID>/kernel.cu`，再回答学习者的问题：解释、提示、调试或代码审查。
-- 未经明确要求，不替学习者完成 `TODO`，不覆盖已有实现与笔记。
-- 帮学习者理解机制，而不只是让测试通过：数值之外，还要检查数据布局、线程分工、同步、buffer 生命周期。
+- Before you answer a learner's question (explanation, hint, debugging or code review), read the current lab's lesson `course/<ID>/README.md`, its `spec.json` and the learner's `students/<ID>/kernel.cu`.
+- Unless explicitly asked, do not complete a `TODO` for the learner, and do not overwrite existing implementations or notes.
+- Help the learner understand the mechanism, not only make the tests pass: beyond the numbers, also check data layout, thread work split, synchronization and buffer lifetimes.
 
-## 目录与边界
+## Directories and boundaries
 
-- `students/` 是练习区。骨架未完成时用 `LAB_TODO(n)` 明确报错。学生代码不能调用参考答案、数学 oracle 或库来代替要练习的 kernel。
-- `solutions/` 是可读的参考答案（`kernel.cu` 与 `NOTES.md`），可以按学习者需要阅读或运行（`--solution`）。
-- 辅导时不修改 `solutions/`、`course/`、`include/lab/`、`labkit/` 和测试。发现疑似错误时，给出证据，等明确的修复请求。
-- 支持域与 case 以本关讲义和 `spec.json` 为准。attention 接口为 contiguous `[B,N,H,D]`，O 同布局，LSE 为 `[B,H,N]` FP32（自然对数）；只有 self-attention 前向，无 dropout、bias、GQA。
+- `students/` is the student code. While a skeleton is incomplete, `LAB_TODO(n)` reports an explicit error. Student code must not call the reference solution, a math oracle or a library in place of the kernel being practiced.
+- `solutions/` holds readable reference solutions (`kernel.cu` and `NOTES.md`). Read or run them (`--solution`) as the learner needs.
+- While tutoring, do not modify `solutions/`, `course/`, `include/lab/`, `labkit/` or the tests. If you find a suspected error, give the evidence and wait for an explicit request to fix it.
+- The supported domain and cases are defined by the lab's lesson and `spec.json`. The attention interface is contiguous `[B,N,H,D]`, O has the same layout, LSE is `[B,H,N]` FP32 (natural log); only the self-attention forward pass, with no dropout, bias or GQA.
 
-## 正确性
+## Correctness
 
-- 先确认命令作用于哪个实现：不带 `--solution` 是学生代码，带 `--solution` 是参考答案；`bench` 中的 `cublas`、`cudnn`、`fa4` 等是库基线。
-- 先用小 case 定位：`./lab check ID --step n --case <小 case>`，再跑本关完整检查 `./lab check ID`。
-- 失败要如实报告。不删除测试、不无条件 skip、不放宽容差。
-- 库基线不可用时，`bench` 显示 “unavailable”。不要用别的实现静默顶替。
+- First confirm which implementation a command runs: without `--solution` it is the student code, with `--solution` it is the reference solution; `cublas`, `cudnn`, `fa4` and so on in `bench` are library baselines.
+- Locate problems with a small case first: `./lab check ID --step n --case <small case>`, then run the full check for the lab: `./lab check ID`.
+- Report failures as they are. Do not delete tests, do not skip unconditionally, do not loosen tolerances.
+- When a library baseline is unavailable, `bench` shows "unavailable". Do not silently substitute another implementation.
 
-## 性能
+## Performance
 
-- 比较必须使用相同的输入、输出契约和计时边界（排除编译、`make_plan`、输入生成与分配）。
-- 不混用计时模式：默认的 CUDA Graph 结果不能与 `--cold` 结果互相计算比值。
-- 区分实测、源码推断和未验证的假设；保留失败或变慢的结果。
-- 不自动运行长时间 sweep。工具用法见 [工具指南](docs/tools.md)。
+- Comparisons must use the same inputs, the same output contract and the same timing boundary (excluding compilation, `make_plan`, input generation and allocation).
+- Do not mix timing modes: do not compute ratios between the default CUDA Graph results and `--cold` results.
+- Distinguish measured results, inferences from source code and unverified assumptions; keep results that failed or got slower.
+- Do not run long sweeps automatically. Tool usage is in the [Tools guide](docs/tools.md).
 
-## 环境
+## Environment
 
-- 通过 `./lab` 使用独立 Conda 环境 `flash-attention-lab`（可用 `LAB_CONDA_ENV` 修改）。不改 base 环境、系统工具链或其他用户的进程。
-- 只用一张 GPU：由 `LAB_GPU` 选择，并在已有 `CUDA_VISIBLE_DEVICES` 范围内。先用 `nvidia-smi` 找空闲的卡。
-- 日志、测量结果、profile 报告、个人进度写入 Git 忽略的目录（`artifacts/`、`.cache/`、`progress/`）。
-- 只有学习者明确要求时才提交；提交的授权不包含推送。
+- Use the separate Conda environment `flash-attention-lab` through `./lab` (change it with `LAB_CONDA_ENV`). Do not change the base environment, the system toolchain or other users' processes.
+- Use only one GPU: select it with `LAB_GPU`, within the existing `CUDA_VISIBLE_DEVICES` range. Find an idle card with `nvidia-smi` first.
+- Write logs, measurements, profile reports and personal progress to Git-ignored directories (`artifacts/`, `.cache/`, `progress/`).
+- Commit only when the learner explicitly asks; permission to commit does not include permission to push.

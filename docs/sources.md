@@ -1,63 +1,63 @@
-# 上游来源与固定版本
+# Upstream sources and pinned versions
 
-课程的参考答案全部是本仓库中可读的 CUDA C++ / PTX，不调用 CUTLASS、CuTe 或 FlashAttention 的代码。上游源码只用来**对照阅读**：看生产实现怎样处理同一个问题。
+All of the course's reference solutions are readable CUDA C++ / PTX in this repository; they do not call code from CUTLASS, CuTe or FlashAttention. The upstream sources are only for **side-by-side reading**: to see how production implementations handle the same problem.
 
-## 1. 论文
+## 1. Papers
 
-| 论文 | 固定版本 | 对应关卡 |
+| Paper | Pinned version | Matching labs |
 |---|---|---|
-| [FlashAttention](https://arxiv.org/abs/2205.14135v2) | arXiv:2205.14135v2 | 11、12：IO 分析、分块、online softmax |
-| [FlashAttention-2](https://arxiv.org/abs/2307.08691v1) | arXiv:2307.08691v1 | 22：循环交换、warp 划分、减少非矩阵运算 |
-| [FlashAttention-3](https://arxiv.org/abs/2407.08608v2) | arXiv:2407.08608v2 | 34：异步生产者、GEMM/softmax 重叠、pingpong |
-| [FlashAttention-4](https://arxiv.org/abs/2603.05451v1) | arXiv:2603.05451v1 | 部分 4：Blackwell 流水、指数、rescale、2-CTA、调度 |
+| [FlashAttention](https://arxiv.org/abs/2205.14135v2) | arXiv:2205.14135v2 | 11, 12: IO analysis, tiling, online softmax |
+| [FlashAttention-2](https://arxiv.org/abs/2307.08691v1) | arXiv:2307.08691v1 | 22: loop interchange, warp partitioning, fewer non-matmul operations |
+| [FlashAttention-3](https://arxiv.org/abs/2407.08608v2) | arXiv:2407.08608v2 | 34: asynchronous producers, GEMM/softmax overlap, pingpong |
+| [FlashAttention-4](https://arxiv.org/abs/2603.05451v1) | arXiv:2603.05451v1 | Part 4: Blackwell pipeline, exponentials, rescale, 2-CTA, scheduling |
 
-## 2. 上游源码（Git submodule）
+## 2. Upstream sources (Git submodules)
 
-两个 submodule 的版本由父仓库的 gitlink 锁定。`bootstrap.sh` 会初始化它们；也可以手动运行：
+The versions of the two submodules are locked by gitlinks in the parent repository. `bootstrap.sh` initializes them; you can also run this by hand:
 
 ```bash
 git submodule update --init -- third_party/cutlass third_party/flash-attention
-git ls-files --stage third_party/cutlass third_party/flash-attention   # 查看锁定的 commit
+git ls-files --stage third_party/cutlass third_party/flash-attention   # show the locked commits
 ```
 
-| 路径 | 版本 | 许可证 | 用途 |
+| Path | Version | License | Use |
 |---|---|---|---|
-| `third_party/cutlass` | v4.4.1 / `4370102f9dacab813282e1d67722fceb0b90a019` | BSD-3-Clause（`LICENSE.txt`） | SM100 指令封装、描述符位域、流水线类、Blackwell GEMM 与 FMHA 示例 |
-| `third_party/flash-attention` | fa4-v4.0.0.beta35 / `1fc0221183e799363001394a12dd9e78e15f5dda` | BSD-3-Clause（`LICENSE`） | FA4（CuTe DSL）的 SM100 前向实现；`--with-fa4` 从这里安装性能基线 |
+| `third_party/cutlass` | v4.4.1 / `4370102f9dacab813282e1d67722fceb0b90a019` | BSD-3-Clause (`LICENSE.txt`) | SM100 instruction wrappers, descriptor bit fields, pipeline classes, Blackwell GEMM and FMHA examples |
+| `third_party/flash-attention` | fa4-v4.0.0.beta35 / `1fc0221183e799363001394a12dd9e78e15f5dda` | BSD-3-Clause (`LICENSE`) | The SM100 forward implementation of FA4 (CuTe DSL); `--with-fa4` installs the performance baseline from here |
 
-各关讲义的“延伸阅读”给出具体文件。常用的入口：
+The "Further reading" section of each lesson names specific files. Common entry points:
 
-| 文件 | 内容 | 对照关卡 |
+| File | Contents | Matching labs |
 |---|---|---|
-| `third_party/cutlass/include/cute/arch/mma_sm100_desc.hpp` | smem descriptor、instruction descriptor 的位域 | 31 |
-| `third_party/cutlass/include/cute/arch/mma_sm100_umma.hpp` | `tcgen05.mma` 的 inline PTX | 31、33 |
-| `third_party/cutlass/include/cute/arch/copy_sm90_tma.hpp`、`copy_sm100_tma.hpp` | TMA 指令 | 30、33 |
-| `third_party/cutlass/include/cutlass/arch/barrier.h` | mbarrier、cluster barrier | 30、33 |
-| `third_party/cutlass/examples/77_blackwell_fmha/` | CUTLASS SM100 FMHA 示例 | 34、部分 4 |
-| `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py` | FA4 SM100 前向 kernel | 34、部分 4 |
-| `third_party/flash-attention/flash_attn/cute/interface.py` | FA4 的 Python 接口（`flash_attn_func`） | `bench` 的 `fa4` 基线 |
+| `third_party/cutlass/include/cute/arch/mma_sm100_desc.hpp` | Bit fields of the smem descriptor and instruction descriptor | 31 |
+| `third_party/cutlass/include/cute/arch/mma_sm100_umma.hpp` | Inline PTX of `tcgen05.mma` | 31, 33 |
+| `third_party/cutlass/include/cute/arch/copy_sm90_tma.hpp`, `copy_sm100_tma.hpp` | TMA instructions | 30, 33 |
+| `third_party/cutlass/include/cutlass/arch/barrier.h` | mbarrier, cluster barrier | 30, 33 |
+| `third_party/cutlass/examples/77_blackwell_fmha/` | CUTLASS SM100 FMHA example | 34, Part 4 |
+| `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py` | FA4 SM100 forward kernel | 34, Part 4 |
+| `third_party/flash-attention/flash_attn/cute/interface.py` | FA4 Python interface (`flash_attn_func`) | The `fa4` baseline in `bench` |
 
-本仓库答案中直接改编自上游的部分，在代码注释中注明出处；许可证随 submodule 保存。
+Parts of this repository's solutions that are adapted directly from upstream cite their source in code comments; the licenses are kept with the submodules.
 
-## 3. 其他固定来源
+## 3. Other pinned sources
 
-[sources.lock.json](sources.lock.json) 以机器可读的格式记录论文版本、上游文件的 commit 与 sha256。其中还包括两份不在 submodule 中的历史版本：
+[sources.lock.json](sources.lock.json) records the paper versions and the commits and sha256 of upstream files in a machine-readable format. It also includes two historical versions that are not in the submodules:
 
-| 来源 | 固定版本 | 用途 |
+| Source | Pinned version | Use |
 |---|---|---|
-| [FA1 实现](https://github.com/Dao-AILab/flash-attention/tree/6d48e14a6c2f551db96f0badc658a6279a929df3) | v1.0.9 | FA1 的原始 CUDA 实现 |
-| [FA2 forward kernel](https://github.com/Dao-AILab/flash-attention/blob/5231d95fe13733fb534c01895f7ea88c6a6c7793/csrc/flash_attn/src/flash_fwd_kernel.h) | v2.7.4.post1 | FA2 的并行划分、流水与数值处理 |
+| [FA1 implementation](https://github.com/Dao-AILab/flash-attention/tree/6d48e14a6c2f551db96f0badc658a6279a929df3) | v1.0.9 | The original CUDA implementation of FA1 |
+| [FA2 forward kernel](https://github.com/Dao-AILab/flash-attention/blob/5231d95fe13733fb534c01895f7ea88c6a6c7793/csrc/flash_attn/src/flash_fwd_kernel.h) | v2.7.4.post1 | FA2's parallel partitioning, pipeline and numerics |
 
-## 4. NVIDIA 文档
+## 4. NVIDIA documentation
 
-在线文档会更新。指令用法以本机 CUDA 12.8 对应的 PTX ISA 8.7 为准；`include/lab/*.cuh` 中的封装注明了 PTX ISA 8.7 的章节名。
+The online docs change over time. For instruction usage, the authority is PTX ISA 8.7, which matches the local CUDA 12.8; the wrappers in `include/lab/*.cuh` name the PTX ISA 8.7 sections.
 
-| 文档 | 用途 |
+| Doc | Use |
 |---|---|
-| [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/) | 指令语义、合法参数、内存模型 |
-| [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/index.html) | 编程模型、cluster、异步拷贝、各计算能力的资源上限 |
-| [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html) | 合并访存、bank conflict、指令吞吐表 |
-| [Blackwell Tuning Guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html) | SM100 的资源与调优建议 |
-| [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html) | 性能指标的定义 |
-| [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) | memcheck、racecheck、synccheck、initcheck |
-| [CUDA Binary Utilities](https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html) | `cuobjdump`、`nvdisasm` |
+| [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/) | Instruction semantics, legal operands, memory model |
+| [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/index.html) | Programming model, clusters, asynchronous copies, resource limits per compute capability |
+| [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html) | Coalesced access, bank conflicts, instruction throughput tables |
+| [Blackwell Tuning Guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html) | SM100 resources and tuning advice |
+| [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html) | Definitions of performance metrics |
+| [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) | memcheck, racecheck, synccheck, initcheck |
+| [CUDA Binary Utilities](https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html) | `cuobjdump`, `nvdisasm` |

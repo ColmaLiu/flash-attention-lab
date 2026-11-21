@@ -1,23 +1,23 @@
 {
   "id": "31_tcgen05_gemm",
-  "title": "tcgen05 与 TMEM：第五代 Tensor Core GEMM",
+  "title": "tcgen05 and TMEM: fifth-generation Tensor Core GEMM",
   "part": 3,
   "kind": "gemm",
   "prerequisites": ["21_pipeline_gemm", "30_tma_mbarrier"],
   "steps": [
     {
       "step": 1,
-      "title": "单个 128×128×64 tile：TMA → tcgen05.mma → TMEM → C",
+      "title": "A single 128×128×64 tile: TMA → tcgen05.mma → TMEM → C",
       "cases": ["one_tile", "small"]
     },
     {
       "step": 2,
-      "title": "完整 K 循环：多级 TMA/mbarrier 流水",
+      "title": "Full K loop: multi-stage TMA/mbarrier pipeline",
       "cases": "all"
     },
     {
       "step": 3,
-      "title": "TMA store epilogue 与 128×256 tile",
+      "title": "TMA store epilogue and 128×256 tile",
       "cases": "all"
     }
   ],
@@ -27,69 +27,69 @@
       "shape": [128, 128, 64],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "恰好一个 tile、一个 K 块（4 条 MMA）：descriptor、instruction descriptor、TMEM 行列映射错任何一处，结果都不精确相等。"
+      "purpose": "Exactly one tile and one K tile (4 MMAs): any mistake in the descriptor, the instruction descriptor or the TMEM row/column mapping makes the result not exactly equal."
     },
     {
       "name": "small",
       "shape": [100, 72, 40],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "三个方向都不满一个 tile：TMA 越界填零，expect_tx 仍是整个 box 的字节数；写回要裁掉越界的行列。"
+      "purpose": "Less than one tile in all three dimensions: TMA fills out-of-bounds elements with zero, expect_tx is still the byte count of the whole box; the write-back must clip out-of-bounds rows and columns."
     },
     {
       "name": "long_k",
       "shape": [128, 128, 1024],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "单个 tile、16 个 K 块：环形 buffer 绕 4 圈，full/empty 的 parity 或 refill 时机错了会读到旧数据。"
+      "purpose": "A single tile, 16 K tiles: the ring buffer wraps around 4 times; a wrong full/empty parity or refill timing reads stale data."
     },
     {
       "name": "short_k",
       "shape": [64, 96, 136],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "3 个 K 块，少于流水级数：prologue 不能装不存在的 tile，最后一块只有 8 列有效。"
+      "purpose": "3 K tiles, fewer than the pipeline stages: the prologue must not load tiles that do not exist, and the last tile has only 8 valid columns."
     },
     {
       "name": "aligned",
       "shape": [256, 512, 512],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "多个 CTA、tile 的整数倍：检查 blockIdx 到 (m0, n0) 的映射和 TMA 坐标顺序（x = k，y = 行）。"
+      "purpose": "Multiple CTAs, exact multiples of the tile: checks the mapping from blockIdx to (m0, n0) and the TMA coordinate order (x = k, y = row)."
     },
     {
       "name": "tail",
       "shape": [133, 76, 40],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "M、N 都不是 tile 的倍数：第二行 CTA 只有 5 行有效，TMA store 必须裁掉其余行。"
+      "purpose": "Neither M nor N is a multiple of the tile: the second row of CTAs has only 5 valid rows, and the TMA store must clip the other rows."
     },
     {
       "name": "raster",
       "shape": [1300, 600, 264],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "11 × 3 个 CTA（BN = 256 时最后一列只有 88 列），K 尾部 8 列。"
+      "purpose": "11 × 3 CTAs (with BN = 256 the last column of CTAs has only 88 columns), a K tail of 8 columns."
     },
     {
       "name": "random",
       "shape": [640, 520, 1000],
       "dtype": "bf16",
-      "purpose": "中等规模随机数据：误差与 cuBLAS 同量级。"
+      "purpose": "Medium-size random data: error of the same order as cuBLAS."
     },
     {
       "name": "square",
       "shape": [4096, 4096, 4096],
       "dtype": "bf16",
       "perf": true,
-      "purpose": "Tensor Core 吞吐：137 GFLOP，与 21 关直接对比。"
+      "purpose": "Tensor Core throughput: 137 GFLOP, directly comparable with lab 21."
     },
     {
       "name": "wide",
       "shape": [8192, 8192, 4096],
       "dtype": "bf16",
       "perf": true,
-      "purpose": "550 GFLOP，A、B 共 128 MB：更多 tile，波次尾部的影响更小。"
+      "purpose": "550 GFLOP, 128 MB of A and B together: more tiles, so the wave tail matters less."
     }
   ],
   "perf_target": {

@@ -1,164 +1,165 @@
 # flash-attention-lab
 
-在 NVIDIA B200（SM100）上，从一个矩阵转置开始，一步步写出接近库性能的 FlashAttention。
+On an NVIDIA B200 (SM100), start from a matrix transpose and work step by step toward a FlashAttention that comes close to library performance.
 
-本课程用 **CUDA C++ 和内联 PTX** 编写全部 kernel，以 FlashAttention 1→4 为主线：每一代 FlashAttention 解决一个瓶颈，每一关先在简单算子上练一个新的硬件机制，再把它用进 attention。
+This course writes every kernel in **CUDA C++ and inline PTX**, with FlashAttention 1→4 as the main thread: each FlashAttention generation removes one bottleneck, and each lab first practices one new hardware mechanism on a simple operator and then uses it in attention.
 
-## 适合谁
+## Who this is for
 
-| 你需要会的 | 不需要会的 |
+| You need to know | You do not need to know |
 |---|---|
-| C/C++ 基础、Python 基础 | Tensor Core、TMA、TMEM 等硬件细节（讲义从头讲） |
-| 写过一个 elementwise CUDA kernel | 读过 FlashAttention 论文或 PTX 手册 |
-| 知道 grid / block / thread 和 shared memory 是什么 | CUTLASS、CuTe 或 Triton |
-| 矩阵乘法、softmax 的数学定义 | |
+| Basic C/C++, basic Python | Hardware details such as Tensor Core, TMA, TMEM (the lessons start from scratch) |
+| Having written one elementwise CUDA kernel | The FlashAttention papers or the PTX manual |
+| What grid / block / thread and shared memory are | CUTLASS, CuTe or Triton |
+| The math definitions of matrix multiplication and softmax | |
 
-如果你还没写过 CUDA，先读 [从零开始](docs/starting-from-zero.md)。
+If you have never written CUDA, read [Starting from zero](docs/starting-from-zero.md) first.
 
-学完后你应该能：
+After the course you should be able to:
 
-1. 从数学定义推导 attention 的 HBM 访存量，说清 FA1→FA4 每一代解决了什么瓶颈；
-2. 独立写出 `mma.sync`、TMA、mbarrier、`tcgen05`/TMEM、warp specialization、2-CTA MMA 的正确代码，并说清每条同步的作用；
-3. 用 SASS、Nsight Compute 和受控计时验证优化假设；
-4. 读懂上游 FA4（CuTe DSL）与 CUTLASS SM100 FMHA 的源码结构。
+1. Derive the HBM traffic of attention from its math definition, and explain which bottleneck each generation FA1→FA4 removes;
+2. Write correct code for `mma.sync`, TMA, mbarrier, `tcgen05`/TMEM, warp specialization and 2-CTA MMA on your own, and explain what each synchronization does;
+3. Verify optimization hypotheses with SASS, Nsight Compute and controlled timing;
+4. Read the source structure of upstream FA4 (CuTe DSL) and the CUTLASS SM100 FMHA.
 
-## 环境要求
+## Requirements
 
-| 项目 | 要求 |
+| Item | Requirement |
 |---|---|
-| GPU | B200 或其他计算能力 10.0（SM100）的 GPU。消费级 Blackwell（SM120）没有 `tcgen05`，不支持 |
-| 系统 | Linux x86_64，NVIDIA 驱动支持 CUDA 12.8 |
-| 软件 | Conda；CUDA Toolkit 12.8（可由安装脚本装进环境） |
+| GPU | B200 or another GPU with compute capability 10.0 (SM100). Consumer Blackwell (SM120) has no `tcgen05` and is not supported |
+| System | Linux x86_64, an NVIDIA driver that supports CUDA 12.8 |
+| Software | Conda; CUDA Toolkit 12.8 (the install script can put it into the environment) |
 
-## 安装
+## Installation
 
 ```bash
 git clone -b v2 https://github.com/ColmaLiu/flash-attention-lab.git
 cd flash-attention-lab
-bash scripts/bootstrap.sh            # 可加 --with-cuda、--with-fa4，见下表
+bash scripts/bootstrap.sh            # optional --with-cuda, --with-fa4, see the table below
 ```
 
-安装脚本会创建独立的 Conda 环境 `flash-attention-lab`，初始化 `third_party/` 中固定版本的上游源码，并安装 PyTorch 等 Python 依赖。两个可选参数：
+The install script creates a separate Conda environment `flash-attention-lab`, initializes the pinned upstream sources in `third_party/`, and installs PyTorch and the other Python dependencies. Two optional flags:
 
-| 参数 | 作用 | 什么时候需要 |
+| Flag | What it does | When you need it |
 |---|---|---|
-| `--with-cuda` | 往环境里装 CUDA 12.8 和 GCC 13 | 系统里没有 CUDA 12.8 的 `nvcc` |
-| `--with-fa4` | 安装 FlashAttention-4（固定版本），作为性能对照 | 想在部分 3、4 的 `bench` 里看到 FA4 一列 |
+| `--with-cuda` | Installs CUDA 12.8 and GCC 13 into the environment | The system has no CUDA 12.8 `nvcc` |
+| `--with-fa4` | Installs FlashAttention-4 (pinned version) as a performance baseline | You want an FA4 column in the `bench` output of Parts 3 and 4 |
 
-详细说明见 [环境与依赖](docs/environment.md)。
+Details are in [Environment and dependencies](docs/environment.md).
 
-## 快速开始
+## Quick start
 
 ```bash
-./lab doctor                 # 检查 GPU、nvcc、PyTorch 和工具
-./lab list                   # 课程列表与你的进度
+./lab doctor                 # check GPU, nvcc, PyTorch and tools
+./lab list                   # course list and your progress
 ```
 
-然后打开第一关的讲义 [course/00_transpose/README.md](course/00_transpose/README.md)，在 `students/00_transpose/kernel.cu` 里完成 `TODO(1)`，运行：
+Then open the lesson of the first lab, [course/00_transpose/README.md](course/00_transpose/README.md), complete `TODO(1)` in `students/00_transpose/kernel.cu`, and run:
 
 ```bash
-./lab check 00 --step 1      # 第 1 步的正确性检查
-./lab bench 00 --step 1      # 和参考答案、PyTorch 比速度
+./lab check 00 --step 1      # correctness check for step 1
+./lab bench 00 --step 1      # compare speed with the reference solution and PyTorch
 ```
 
-还没写代码时，`check` 会明确报告 `TODO(1) is not implemented yet`。这是预期行为。
+Before you write any code, `check` reports `TODO(1) is not implemented yet`. This is expected.
 
-机器上有多张 GPU 时，用 `LAB_GPU` 选一张空闲的卡，例如 `LAB_GPU=3 ./lab check 00 --step 1`。
+If the machine has several GPUs, pick an idle one with `LAB_GPU`, for example `LAB_GPU=3 ./lab check 00 --step 1`.
 
-## 课程地图
+## Course map
 
-关卡 ID 的第一位数字是“部分”：部分 0 是预备，部分 1–4 分别对应 FA1–FA4。
+The first digit of a lab ID is the "Part": Part 0 is the preliminaries, and Parts 1–4 correspond to FA1–FA4.
 
-| ID | 主题 | 这一关学什么 |
+| ID | Topic | What this lab teaches |
 |---|---|---|
-| **部分 0 · 预备** | | |
-| [00_transpose](course/00_transpose/README.md) | 矩阵转置 | 线程到地址的映射、合并访存、shared memory、bank conflict、在途访存 |
-| [01_softmax](course/01_softmax/README.md) | 行 softmax | warp shuffle、block 归约、数值稳定、online softmax |
-| **部分 1 · FA1：IO 感知的分块** | | |
-| [10_simt_gemm](course/10_simt_gemm/README.md) | FP32 分块 GEMM | 数据复用、算术强度、roofline、shared memory 与寄存器分块 |
-| [11_naive_attention](course/11_naive_attention/README.md) | 标准 attention | attention 数学、causal mask、LSE、HBM 流量计数 |
-| [12_fa1](course/12_fa1/README.md) | FlashAttention-1 | 分块 + online softmax 的正确性证明、论文 Algorithm 1 |
-| **部分 2 · FA2：Tensor Core 与并行划分** | | |
-| [20_mma_gemm](course/20_mma_gemm/README.md) | `mma.sync` GEMM | warp 级 Tensor Core、fragment 布局、`ldmatrix`、XOR swizzle |
-| [21_pipeline_gemm](course/21_pipeline_gemm/README.md) | 异步拷贝流水 | `cp.async`、commit/wait group、多级 buffer |
-| [22_fa2](course/22_fa2/README.md) | FlashAttention-2 | 循环交换、P 留在寄存器、causal 跳块 |
-| **部分 3 · FA3 的思想在 SM100 上：异步与分工** | | |
-| [30_tma_mbarrier](course/30_tma_mbarrier/README.md) | TMA 转置 | tensor map、TMA load/store、mbarrier 的 phase、环形 buffer |
-| [31_tcgen05_gemm](course/31_tcgen05_gemm/README.md) | `tcgen05` GEMM | Tensor Memory（TMEM）、smem/instruction descriptor、`tcgen05.mma/commit/ld` |
-| [32_ws_gemm](course/32_ws_gemm/README.md) | warp specialization | 生产者/消费者分工、TMEM 双缓冲、persistent kernel、L2 光栅化 |
-| [33_2cta_gemm](course/33_2cta_gemm/README.md) | 2-CTA MMA | cluster、distributed shared memory、`cta_group::2`、TMA multicast |
-| [34_fa3](course/34_fa3/README.md) | FA3 式 attention | S/O 放在 TMEM、softmax 与 MMA 重叠 |
-| **部分 4 · FA4：Blackwell 上的完整优化** | | |
-| [40_fa4_pipeline](course/40_fa4_pipeline/README.md) | FA4 流水结构 | 两个 Q tile ping-pong、P 写回 TMEM、correction warpgroup |
-| [41_fa4_softmax](course/41_fa4_softmax/README.md) | softmax 吞吐 | MUFU 瓶颈、多项式 `exp2`、条件 rescale |
-| [42_fa4_2cta](course/42_fa4_2cta/README.md) | 2-CTA attention | 2-CTA 的 QKᵀ/PV 划分、cluster 同步 |
-| [43_fa4_schedule](course/43_fa4_schedule/README.md) | 调度与 causal | 块分类、persistent、LPT 排序 |
-| [44_fa4_fp8](course/44_fa4_fp8/README.md) | FP8 前向 | E4M3 量化、descale、`kind::f8f6f4` |
+| **Part 0 · Preliminaries** | | |
+| [00_transpose](course/00_transpose/README.md) | Matrix transpose | Thread-to-address mapping, coalesced access, shared memory, bank conflicts, memory accesses in flight |
+| [01_softmax](course/01_softmax/README.md) | Row softmax | warp shuffle, block reduction, numerical stability, online softmax |
+| **Part 1 · FA1: IO-aware tiling** | | |
+| [10_simt_gemm](course/10_simt_gemm/README.md) | FP32 tiled GEMM | Data reuse, arithmetic intensity, roofline, shared memory and register tiling |
+| [11_naive_attention](course/11_naive_attention/README.md) | Standard attention | Attention math, causal mask, LSE, HBM traffic counting |
+| [12_fa1](course/12_fa1/README.md) | FlashAttention-1 | Correctness proof of tiling + online softmax, Algorithm 1 of the paper |
+| **Part 2 · FA2: Tensor Cores and work partitioning** | | |
+| [20_mma_gemm](course/20_mma_gemm/README.md) | `mma.sync` GEMM | Warp-level Tensor Core, fragment layout, `ldmatrix`, XOR swizzle |
+| [21_pipeline_gemm](course/21_pipeline_gemm/README.md) | Async copy pipeline | `cp.async`, commit/wait group, multi-stage buffers |
+| [22_fa2](course/22_fa2/README.md) | FlashAttention-2 | Loop swap, P stays in registers, causal block skipping |
+| **Part 3 · FA3 ideas on SM100: asynchrony and specialization** | | |
+| [30_tma_mbarrier](course/30_tma_mbarrier/README.md) | TMA transpose | tensor map, TMA load/store, mbarrier phase, ring buffer |
+| [31_tcgen05_gemm](course/31_tcgen05_gemm/README.md) | `tcgen05` GEMM | Tensor Memory (TMEM), smem/instruction descriptors, `tcgen05.mma/commit/ld` |
+| [32_ws_gemm](course/32_ws_gemm/README.md) | warp specialization | Producer/consumer split, TMEM double buffering, persistent kernel, L2 rasterization |
+| [33_2cta_gemm](course/33_2cta_gemm/README.md) | 2-CTA MMA | cluster, distributed shared memory, `cta_group::2`, TMA multicast |
+| [34_fa3](course/34_fa3/README.md) | FA3-style attention | S/O in TMEM, overlapping softmax with MMA |
+| **Part 4 · FA4: full optimization on Blackwell** | | |
+| [40_fa4_pipeline](course/40_fa4_pipeline/README.md) | FA4 pipeline structure | Two Q tiles in ping-pong, P written back to TMEM, correction warpgroup |
+| [41_fa4_softmax](course/41_fa4_softmax/README.md) | Softmax throughput | MUFU bottleneck, polynomial `exp2`, conditional rescale |
+| [42_fa4_2cta](course/42_fa4_2cta/README.md) | 2-CTA attention | 2-CTA split of QKᵀ/PV, cluster synchronization |
+| [43_fa4_schedule](course/43_fa4_schedule/README.md) | Scheduling and causal | Block classification, persistent, LPT ordering |
+| [44_fa4_fp8](course/44_fa4_fp8/README.md) | FP8 forward | E4M3 quantization, descale, `kind::f8f6f4` |
 
-建议按顺序学。每关讲义开头写了前置关卡。部分 4 的设计见 [设计稿 §3](docs/design-v2.md#3-课程地图)。
+Work through the labs in order. Each lesson lists its prerequisite labs at the top. The design of Part 4 is in [design doc §3](docs/design-v2.md#3-course-map).
 
-## 一关怎么学
+## How to work through a lab
 
-每关都有同样的结构：一份讲义、一个带 `TODO` 的骨架、一组按 step 拆开的检查。
+Every lab has the same structure: a lesson, a skeleton with `TODO`s, and a set of checks split by step.
 
 ```
-读讲义 ──► 填 TODO(n) ──► ./lab check ID --step n ──► ./lab bench ID --step n ──► sass / profile / sanitize
- §1–§5      §6 分步练习      正确性（小 case 先挂）       与答案、库比速度            解释为什么快或慢
-                ▲                                                                        │
-                └──────────────────────────── 下一个 step ◄──────────────────────────────┘
+read lesson ──► fill TODO(n) ──► ./lab check ID --step n ──► ./lab bench ID --step n ──► sass / profile / sanitize
+ §1–§5           §6 exercises     correctness (small cases    speed vs solution and      explain why it is
+                                  fail first)                 libraries                  fast or slow
+                       ▲                                                                               │
+                       └───────────────────────────────── next step ◄──────────────────────────────────┘
 ```
 
-| 环节 | 在哪里 | 说明 |
+| Stage | Where | Notes |
 |---|---|---|
-| 讲义 | `course/<ID>/README.md` | 九节：目标、动机、数学、硬件与指令、调度设计、分步练习、性能、自测、延伸阅读 |
-| 骨架 | `students/<ID>/kernel.cu` | 你只改这个文件。launch 配置等非重点部分已写好；每个 `TODO(n)` 写明输入、输出和不变式 |
-| 正确性 | `./lab check ID --step n` | 与 FP64 数学 oracle 比较。输出先填 NaN，漏写会被发现；还会在非默认 stream 上再跑一次 |
-| 性能 | `./lab bench ID --step n` | 同一输入、同一计时方式下，比较你的 kernel、参考答案和库（cuBLAS、cuDNN、FA4） |
-| 分析 | `./lab sass` / `profile` / `sanitize` | 寄存器与指令、Nsight Compute 指标、Compute Sanitizer。见 [工具指南](docs/tools.md) |
-| 参考答案 | `solutions/<ID>/` | 可读的 CUDA C++/PTX 实现和设计说明 `NOTES.md`。卡住时可以读；加 `--solution` 可运行它 |
+| Lesson | `course/<ID>/README.md` | Nine sections: goals, motivation, math, hardware and instructions, schedule design, step-by-step exercises, performance, self-check, further reading |
+| Skeleton | `students/<ID>/kernel.cu` | The only file you change. Parts outside the focus, such as the launch configuration, are already written; each `TODO(n)` states its inputs, outputs and invariants |
+| Correctness | `./lab check ID --step n` | Compares against an FP64 math oracle. The output is first filled with NaN, so missing writes are caught; the kernel also runs a second time on a non-default stream |
+| Performance | `./lab bench ID --step n` | With the same input and the same timing method, compares your kernel, the reference solution and libraries (cuBLAS, cuDNN, FA4) |
+| Analysis | `./lab sass` / `profile` / `sanitize` | Registers and instructions, Nsight Compute metrics, Compute Sanitizer. See the [Tools guide](docs/tools.md) |
+| Reference solution | `solutions/<ID>/` | A readable CUDA C++/PTX implementation and the design notes `NOTES.md`. Read it when you are stuck; add `--solution` to run it |
 
-所有命令：
+All commands:
 
 ```
-./lab list                                     课程列表与进度
-./lab check ID [--step N] [--case NAME]        正确性
-./lab bench ID [--step N] [--case NAME] [--cold]   计时
-./lab sass ID                                  寄存器、spill、指令统计
+./lab list                                     course list and progress
+./lab check ID [--step N] [--case NAME]        correctness
+./lab bench ID [--step N] [--case NAME] [--cold]   timing
+./lab sass ID                                  registers, spills, instruction counts
 ./lab profile ID [--step N] [--case NAME]      Nsight Compute
 ./lab sanitize ID --case NAME [--tool memcheck|racecheck|synccheck|initcheck]
-./lab doctor                                   环境检查
-./lab clean [--yes]                            删除编译缓存和 bench/profile/sass 输出（不动 students/ 和进度）
+./lab doctor                                   environment check
+./lab clean [--yes]                            delete build cache and bench/profile/sass output (keeps students/ and progress)
 ```
 
-在 check、bench、sass、profile、sanitize 后加 `--solution`，就改为运行参考答案。ID 可以写唯一前缀，例如 `00` 或 `31_tc`。
+Add `--solution` after check, bench, sass, profile or sanitize to run the reference solution instead. An ID can be any unique prefix, for example `00` or `31_tc`.
 
-## 仓库结构
+## Repository layout
 
 ```
-course/<ID>/          讲义 README.md 与 spec.json（case、step、性能目标）
-students/<ID>/        你的练习：kernel.cu
-solutions/<ID>/       参考答案：kernel.cu（及 .cuh）与 NOTES.md
-include/lab/          公共头文件：接口、错误检查，以及前面关卡写过的原语（mma_sync、tma、tcgen05…）
-labkit/               Python 基础设施：造数据、调用 kernel、对答案、计时
-third_party/          固定版本的 CUTLASS 与 FlashAttention 源码，供对照阅读
-docs/                 全局文档
-scripts/              bootstrap.sh（安装）、activate.sh（激活环境）
-tests/                基础设施测试
-artifacts/  .cache/  progress/              bench/profile 结果、编译缓存、进度（Git 忽略）
+course/<ID>/          lesson README.md and spec.json (cases, steps, perf targets)
+students/<ID>/        your exercise: kernel.cu
+solutions/<ID>/       reference solution: kernel.cu (and .cuh) and NOTES.md
+include/lab/          shared headers: interface, error checks, and primitives written in earlier labs (mma_sync, tma, tcgen05…)
+labkit/               Python infrastructure: input generation, kernel calls, answer checks, timing
+third_party/          pinned CUTLASS and FlashAttention sources, for side-by-side reading
+docs/                 project-wide docs
+scripts/              bootstrap.sh (install), activate.sh (activate environment)
+tests/                infrastructure tests
+artifacts/  .cache/  progress/              bench/profile results, build cache, progress (ignored by Git)
 ```
 
-`include/lab/` 中的原语遵循“前面写过的，后面提供”：例如你在 20 关自己实现 `ldmatrix` 和 `mma.sync` 的封装，从 21 关起直接 `#include "lab/mma_sync.cuh"`。
+The primitives in `include/lab/` follow "what you wrote earlier is provided later": for example, you implement the `ldmatrix` and `mma.sync` wrappers yourself in lab 20, and from lab 21 on you `#include "lab/mma_sync.cuh"` directly.
 
-## 文档
+## Docs
 
-| 文档 | 内容 |
+| Doc | Contents |
 |---|---|
-| [从零开始](docs/starting-from-zero.md) | 第一次写 CUDA：线程、地址、存储层级，以及第一关的第一步 |
-| [B200 架构概览](docs/b200.md) | SM、寄存器、shared memory、L2、HBM、Tensor Core、TMEM、TMA、cluster 的数字，以及哪一关讲 |
-| [工具指南](docs/tools.md) | `./lab sass/profile/sanitize`、SASS 指令、计时模式与 `vs` 列 |
-| [术语表](docs/glossary.md) | 中英文术语，链接到引入它的关卡 |
-| [attention 的数学](docs/attention-math.md) | attention、online softmax、IO 复杂度、数值检查 |
-| [环境与依赖](docs/environment.md) | 安装参数、`LAB_GPU`、CUDA 版本、FA4 基线 |
-| [上游来源](docs/sources.md) | 论文、固定版本的上游源码 |
-| [代码格式](docs/formatting.md) | clang-format、Ruff、pre-commit |
-| [设计稿](docs/design-v2.md)、[编写关卡](docs/authoring.md) | 面向维护者 |
+| [Starting from zero](docs/starting-from-zero.md) | Writing CUDA for the first time: threads, addresses, the memory hierarchy, and step 1 of the first lab |
+| [B200 architecture overview](docs/b200.md) | Numbers for SM, registers, shared memory, L2, HBM, Tensor Core, TMEM, TMA, cluster, and which lab covers each |
+| [Tools guide](docs/tools.md) | `./lab sass/profile/sanitize`, SASS instructions, timing modes and the `vs` column |
+| [Glossary](docs/glossary.md) | The course glossary, with links to the lab that introduces each term |
+| [Attention math](docs/attention-math.md) | Attention, online softmax, IO complexity, numerical checks |
+| [Environment and dependencies](docs/environment.md) | Install flags, `LAB_GPU`, CUDA versions, the FA4 baseline |
+| [Upstream sources](docs/sources.md) | Papers, pinned upstream sources |
+| [Code formatting](docs/formatting.md) | clang-format, Ruff, pre-commit |
+| [Design doc](docs/design-v2.md), [Writing labs](docs/authoring.md) | For maintainers |

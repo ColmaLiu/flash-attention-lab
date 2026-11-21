@@ -1,67 +1,67 @@
-# 33_2cta_gemm 答案说明
+# 33_2cta_gemm solution notes
 
-## 设计选择
+## Design choices
 
-- **支持域**：与 31、32 关相同。A、B 为 BF16，C 为 FP32；`K % 8 == 0`、`N % 4 == 0`、`K > 0`（K = 0 时会在没有任何 MMA 的情况下 commit `acc_full`，读到未初始化的 TMEM），M 任意；尾部全部交给 TMA。三个 step 都覆盖全部形状，所以每个 step 跑全部 correctness case。
-- **原语**：新增 `include/lab/cluster.cuh`（学生在本关骨架里实现，34 关起提供）：cluster 身份（`%cluster_ctarank`、`%clusterid.x`、`%nclusterid.x`）、`barrier.cluster`、`mapa`、cluster 作用域的 mbarrier arrive / wait、`.cta_group::2` 的 TMA load（含 multicast）、TMEM alloc/relinquish/dealloc、`tcgen05.mma`、multicast `tcgen05.commit`，以及 host 端 `launch_cluster`（`cudaLaunchKernelEx` + `cudaLaunchAttributeClusterDimension`）和 `max_active_clusters`（`cudaOccupancyMaxActiveClusters`）。没有修改 `tcgen05.cuh` / `tma.cuh`：kernel 内所有 tcgen05 指令必须用同一个 `.cta_group`，所以 pair 版本的 alloc/mma/commit 都放在 `cluster.cuh`，`tcgen05.ld`、fence、descriptor 仍来自 `tcgen05.cuh`。
-- **pair 布局**：cluster 的 rank 0 是 leader，rank 1 是 peer。CTA r 用 TMA 读 A 的第 `m0 + 128r` 起 128 行和 B 的第 `n0 + 128r` 起 128 行（B box 128 行），放在相同的 shared memory 偏移。leader 的一个线程发 `tcgen05.mma.cta_group::2`，idesc M = 256、N = 256，descriptor 只指向 leader 自己的 buffer，硬件在 peer 的同一偏移读另一半。累加器在两个 CTA 的 TMEM 中各 128 lane × 256 列，CTA r 的 epilogue 写 C 的第 `m0 + 128r` 起 128 行、全部 256 列。
-- **barrier**（同一偏移在两个 CTA 里各有一份）：
-  - `full[s]`（count 1）：只用 leader 的。leader 的 producer `arrive_expect_tx(64 KB)`（两个 CTA 的字节），两个 CTA 的 TMA 都用 `mapa` 得到的 leader 地址 `complete_tx`。peer 的 TMA 可能先于 leader 的 expect_tx 到达，tx-count 暂时为负，这是允许的；相位要等 leader 的 1 次到达才能完成。
-  - `empty[s]`（count = 每 cluster 的 pair 数）：leader 的 MMA 线程 `tcgen05.commit.cta_group::2 ... multicast` 到 cluster 内所有 CTA；每个 CTA 的 producer 只等自己的那份。
-  - `acc_full[a]`（count 1）：leader commit multicast 到本 pair 的两个 CTA；各自的 epilogue 等自己的那份。
-  - `acc_empty[a]`（count 256）：只用 leader 的。两个 CTA 的 128 个 epilogue 线程都在最后一次 `tcgen05.ld` 后 `fence::before_thread_sync` + `mbarrier.arrive.release.cluster`（peer 经 `mapa` 地址）；leader 用 `try_wait.acquire.cluster` 等待，再 `fence::after_thread_sync`。
-- **启动与退出**（维护者 review 指出的问题，本关必须处理）：
-  - setup：thread 0 初始化 barrier + `fence.mbarrier_init.release.cluster`；两个 CTA 的 warp 5 都执行 `tcgen05.alloc.cta_group::2`（512 列，两边得到同一个列地址）；`fence::before` + `barrier.cluster.arrive.release/wait.acquire` + `fence::after`。`__syncthreads` 不够：peer 的 TMA、leader 的 commit 会写对方的 barrier，必须在对方初始化之后。
-  - 排空：两个 CTA 的 producer 在最后一个 tile 之后再“获取” kStages 个槽（等 `empty`，不装数据），保证 leader 发往本 CTA 的所有 multicast commit 都已到达；leader 的 MMA 线程同样再等 kAccStages 次 `acc_empty`，保证 peer 的远程 arrive 都已到达。
-  - teardown：`fence::before` + cluster barrier + `fence::after`，然后各自 `tcgen05.dealloc.cta_group::2`。此时 leader 的 MMA 已全部完成（两边 epilogue 都等过最后的 `acc_full`），任何 CTA 都不再被另一方访问 smem / TMEM。
-- **资源**：每 CTA 每级 32 KB（A 16 KB + B 16 KB，32 关是 48 KB），6 级 192 KB + 32 KB staging + 1 KB 对齐 = 225 KB；TMEM 2 × 256 列 = 512 列。寄存器 56–72，无 spill。
-- **step 1**（`gemm_pair_tile`）：grid = 2 × tile 数，cluster 2，每 cluster 一个 256×256 tile、单累加器。**step 2**（`gemm_pair_persistent<Config<6,2,8>>`）：grid = 2 × min(tile 数, 可驻留 cluster 数)，按 `%clusterid.x` / `%nclusterid.x` 静态轮转，累加器双缓冲，分组光栅化 G = 8（单位是 256 行的 tile 行）。**step 3**：cluster 4 = 沿 N 并排的两个 pair（cluster tile 256×512），A 的每一半由两个 pair 中同位置的两个 CTA 各读 64 行并 multicast 给对方（mask = bit r | bit r+2），`empty` count = 2（两个 leader 的 commit），`acc_full` 只 multicast 给本 pair。host 端按“轮数”在 cluster 4 与 cluster 2 之间选择。
-- **multicast 的 barrier 地址**：`.cta_group::2` + `.multicast::cluster` 的 TMA 只给一个 barrier 操作数（本 CTA 的 leader 的 `mapa` 地址），每个目标 CTA 的那份在“目标 CTA 所在 pair 的 leader”的同一偏移上 complete_tx。这一点由 `persistent` 等 case 实测确认（若信号落到错误的 leader，一个 leader 会多收字节、另一个永远等不到，即 `TIMEOUT`），与 CUTLASS `SM100_TMA_2SM_LOAD_MULTICAST` 清除 peer bit 的做法一致。
+- **Supported domain**: the same as labs 31 and 32. A and B are BF16, C is FP32; `K % 8 == 0`, `N % 4 == 0`, `K > 0` (with K = 0 the kernel would commit `acc_full` without any MMA and read uninitialized TMEM); M arbitrary; all tails are left to TMA. All three steps cover all shapes, so every step runs all correctness cases.
+- **Primitives**: new `include/lab/cluster.cuh` (students implement it in this lab's skeleton; it is provided from lab 34 on): cluster identity (`%cluster_ctarank`, `%clusterid.x`, `%nclusterid.x`), `barrier.cluster`, `mapa`, cluster-scope mbarrier arrive / wait, the `.cta_group::2` TMA load (including multicast), TMEM alloc/relinquish/dealloc, `tcgen05.mma`, multicast `tcgen05.commit`, plus the host-side `launch_cluster` (`cudaLaunchKernelEx` + `cudaLaunchAttributeClusterDimension`) and `max_active_clusters` (`cudaOccupancyMaxActiveClusters`). `tcgen05.cuh` / `tma.cuh` are unchanged: all tcgen05 instructions in a kernel must use the same `.cta_group`, so the pair versions of alloc/mma/commit live in `cluster.cuh`, while `tcgen05.ld`, fences and descriptors still come from `tcgen05.cuh`.
+- **Pair layout**: rank 0 of the cluster is the leader and rank 1 is the peer. CTA r uses TMA to read 128 rows of A starting at row `m0 + 128r` and 128 rows of B starting at row `n0 + 128r` (B box of 128 rows), placed at the same shared memory offsets. One leader thread issues `tcgen05.mma.cta_group::2` with idesc M = 256, N = 256; the descriptors point only to the leader's own buffers, and the hardware reads the other half at the same offset in the peer. The accumulator takes 128 lanes × 256 columns in the TMEM of each of the two CTAs, and the epilogue of CTA r writes the 128 rows of C starting at row `m0 + 128r`, all 256 columns.
+- **barriers** (one copy at the same offset in each of the two CTAs):
+  - `full[s]` (count 1): only the leader's is used. The leader's producer does `arrive_expect_tx(64 KB)` (the bytes of both CTAs), and the TMAs of both CTAs `complete_tx` on the leader address obtained with `mapa`. The peer's TMA may arrive before the leader's expect_tx, making the tx-count temporarily negative; this is allowed. The phase cannot complete until the leader's 1 arrival.
+  - `empty[s]` (count = number of pairs per cluster): the leader's MMA thread does `tcgen05.commit.cta_group::2 ... multicast` to all CTAs in the cluster; each CTA's producer waits only on its own copy.
+  - `acc_full[a]` (count 1): the leader commits with multicast to both CTAs of this pair; each epilogue waits on its own copy.
+  - `acc_empty[a]` (count 256): only the leader's is used. The 128 epilogue threads of each of the two CTAs do `fence::before_thread_sync` + `mbarrier.arrive.release.cluster` after their last `tcgen05.ld` (the peer through the `mapa` address); the leader waits with `try_wait.acquire.cluster`, then `fence::after_thread_sync`.
+- **Startup and exit** (problems pointed out in the maintainer's review; this lab must handle them):
+  - setup: thread 0 initializes the barriers + `fence.mbarrier_init.release.cluster`; warp 5 of both CTAs executes `tcgen05.alloc.cta_group::2` (512 columns; both sides get the same column address); `fence::before` + `barrier.cluster.arrive.release/wait.acquire` + `fence::after`. `__syncthreads` is not enough: the peer's TMA and the leader's commit write the other side's barriers, which must happen after the other side has initialized them.
+  - Drain: after the last tile, the producers of both CTAs "acquire" kStages more slots (wait on `empty`, load no data), which guarantees that all multicast commits the leader sent to this CTA have arrived; the leader's MMA thread likewise waits on `acc_empty` kAccStages more times, which guarantees that all of the peer's remote arrives have arrived.
+  - teardown: `fence::before` + cluster barrier + `fence::after`, then each side does `tcgen05.dealloc.cta_group::2`. At this point all of the leader's MMAs have completed (both epilogues have waited on the last `acc_full`), and no CTA's smem / TMEM is accessed by the other side any more.
+- **Resources**: 32 KB per stage per CTA (A 16 KB + B 16 KB; lab 32 has 48 KB), 6 stages 192 KB + 32 KB staging + 1 KB alignment = 225 KB; TMEM 2 × 256 columns = 512 columns. 56–72 registers, no spill.
+- **step 1** (`gemm_pair_tile`): grid = 2 × number of tiles, cluster 2, one 256×256 tile per cluster, single accumulator. **step 2** (`gemm_pair_persistent<Config<6,2,8>>`): grid = 2 × min(number of tiles, number of resident clusters), static round-robin over `%clusterid.x` / `%nclusterid.x`, accumulator double buffering, grouped rasterization G = 8 (in units of tile rows of 256 rows). **step 3**: cluster 4 = two pairs side by side along N (cluster tile 256×512). For each half of A, the two CTAs at the same position in the two pairs each read 64 rows and multicast them to each other (mask = bit r | bit r+2); `empty` count = 2 (the commits of the two leaders); `acc_full` is multicast only to this pair. The host chooses between cluster 4 and cluster 2 by the number of "rounds".
+- **Barrier address of a multicast**: a `.cta_group::2` + `.multicast::cluster` TMA takes only one barrier operand (the `mapa` address of this CTA's leader), and each target CTA's copy does complete_tx at the same offset in "the leader of the pair the target CTA belongs to". This was confirmed by measurement on `persistent` and other cases (if the signal lands on the wrong leader, one leader receives extra bytes and the other never gets enough, i.e. `TIMEOUT`), and it matches the way CUTLASS `SM100_TMA_2SM_LOAD_MULTICAST` clears the peer bit.
 
-## 各 step 的性能（2 号卡，CUDA Graph 中位数，相对 cuBLAS BF16→FP32）
+## Performance per step (GPU 2, CUDA Graph median, relative to cuBLAS BF16→FP32)
 
-| 版本 | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
+| Version | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
 |---|---|---|---|
-| 32 关答案（128×256，单 CTA） | ≈ 0.91× | ≈ 0.91× | ≈ 0.99× |
-| step 1：pair tile，非 persistent | ≈ 0.91× | ≈ 0.86× | ≈ 0.73× |
-| step 2：persistent pair + 双缓冲 + G = 8 | ≈ 0.98–0.99× | ≈ 1.12× | ≈ 1.09× |
-| step 3：按轮数选择（square 走 cluster 4 multicast，wide/flat 走 cluster 2） | ≈ 1.00× | ≈ 1.16× | ≈ 1.03–1.05× |
-| 对照：强制 cluster 4 multicast | ≈ 1.00× | 比 step 2 慢 ≈ 8% | 比 step 2 慢 ≈ 5% |
-| step 3，`--cold` | ≈ 1.01× | ≈ 1.05× | ≈ 1.10× |
+| Lab 32 solution (128×256, single CTA) | ≈ 0.91× | ≈ 0.91× | ≈ 0.99× |
+| step 1: pair tile, not persistent | ≈ 0.91× | ≈ 0.86× | ≈ 0.73× |
+| step 2: persistent pair + double buffering + G = 8 | ≈ 0.98–0.99× | ≈ 1.12× | ≈ 1.09× |
+| step 3: chosen by rounds (square takes cluster 4 multicast, wide/flat take cluster 2) | ≈ 1.00× | ≈ 1.16× | ≈ 1.03–1.05× |
+| Control: forced cluster 4 multicast | ≈ 1.00× | ≈ 8% slower than step 2 | ≈ 5% slower than step 2 |
+| step 3, `--cold` | ≈ 1.01× | ≈ 1.05× | ≈ 1.10× |
 
-- cuBLAS 在 `wide` 上本机波动较大（同一卡多次测得 0.39–0.43 ms），比值随之在 1.0–1.16 之间变化；本答案自身的时间很稳定（step 2/3 约为 32 关答案的 0.83 倍）。
-- `selftest --perf`（门槛 0.9）：square 1.00、wide 1.16、flat 1.05。最差的 square 留约 10% 余量。
-- NCU（锁频，只看比例），square：`sm__pipe_tensor_cycles_active` 32 关 ≈ 84.5%，step 1 ≈ 75.7%，step 2 ≈ 87.7%，step 3 ≈ 88.7%。`lts__t_sectors_srcunit_tex_op_read`：step 2 ≈ 0.99 GB，step 3 ≈ 0.82 GB；推导值 32 关 1.61 GB、pair 1.07 GB、pair + A multicast 0.81 GB。锁频下 step 3 反而比 step 2 慢约 2%，不锁频时快约 1.5%：差别主要来自轮数与功耗/频率，不是 L2 带宽。
-- **为什么 step 3 要在 host 上选形状**：`cudaOccupancyMaxActiveClusters` 给出 B200 上 cluster 2 可驻留 74 个（148 SM 全用），cluster 4 只有 33 个（132 SM）：cluster 必须放在一个 GPC 内，GPC 的 SM 数不是 4 的倍数。两种形状下每个 pair 每轮都算一个 256×256 tile，所以时间 ≈ 轮数 × 每轮时间。square：256 个 pair tile / 74 = 3.46 → 4 轮；128 个 cluster tile / 33 = 3.88 → 4 轮，轮数相同，multicast 少读 A 而稍快。wide/flat：1024 / 74 → 14 轮，512 / 33 → 16 轮，cluster 4 慢约 8%（实测与 16/14 的 14% 有差，multicast 抵消了一部分）。CUTLASS 的解法是 preferred cluster（`cudaLaunchAttributePreferredClusterDimension`，examples/73），让放不下 4 的 GPC 用 2，需要动态调度，不在本课范围。
-- step 1 比 32 关的 step 1 在 wide/flat 上差：每个 cluster 只算一个 tile，2048/1024 个 cluster 反复启动、建流水、TMEM alloc，epilogue 不重叠（flat 的 epilogue 占比最大）。persistent 之后 pair 的优势才显出来。
+- cuBLAS on `wide` varies a lot on this machine (0.39–0.43 ms over several runs on the same GPU), so the ratio moves between 1.0 and 1.16 with it; this solution's own time is very stable (steps 2/3 take about 0.83 times the time of the lab 32 solution).
+- `selftest --perf` (perf gate 0.9): square 1.00, wide 1.16, flat 1.05. The worst, square, leaves about 10% margin.
+- NCU (clocks locked, so only ratios matter), square: `sm__pipe_tensor_cycles_active` lab 32 ≈ 84.5%, step 1 ≈ 75.7%, step 2 ≈ 87.7%, step 3 ≈ 88.7%. `lts__t_sectors_srcunit_tex_op_read`: step 2 ≈ 0.99 GB, step 3 ≈ 0.82 GB; the derived values are lab 32 1.61 GB, pair 1.07 GB, pair + A multicast 0.81 GB. With locked clocks step 3 is actually about 2% slower than step 2, and without locked clocks about 1.5% faster: the difference comes mainly from the round count and power/frequency, not from L2 bandwidth.
+- **Why step 3 chooses the shape on the host**: `cudaOccupancyMaxActiveClusters` reports that on B200 74 cluster-2 clusters can be resident (all 148 SMs used), but only 33 cluster-4 clusters (132 SMs): a cluster must fit inside one GPC, and the SM count of a GPC is not a multiple of 4. With both shapes each pair computes one 256×256 tile per round, so time ≈ number of rounds × time per round. square: 256 pair tiles / 74 = 3.46 → 4 rounds; 128 cluster tiles / 33 = 3.88 → 4 rounds; the round counts are equal, and multicast reads less A, so it is slightly faster. wide/flat: 1024 / 74 → 14 rounds, 512 / 33 → 16 rounds, and cluster 4 is about 8% slower (the measurement differs from the 14% of 16/14; multicast offsets part of it). CUTLASS's solution is the preferred cluster (`cudaLaunchAttributePreferredClusterDimension`, examples/73), which lets GPCs that cannot fit 4 use 2; it needs dynamic scheduling and is outside the scope of this course.
+- step 1 is worse than lab 32's step 1 on wide/flat: each cluster computes only one tile, so 2048/1024 clusters repeatedly launch, build the pipeline and do TMEM alloc, and the epilogue does not overlap (the epilogue's share is largest on flat). The advantage of the pair shows only after persistent.
 
-## 验证
+## Verification
 
-- `./lab check 33 --solution`：3 个 step × 9 个 case 通过（`int` case 精确相等，`random` 最大误差 1.8e-4）。step 3 的全部 correctness case 都走 cluster 4（轮数都不多于 cluster 2），`persistent` case 让部分 cluster 处理 3 个 tile；step 2 的 `persistent` 覆盖 cluster 2 的 persistent 路径。
-- compute-sanitizer：
-  - memcheck、synccheck：3 个 step 在 `tail` 上、step 2/3 在 `persistent` 上均 0 错误。
-  - racecheck：每次运行报告 2 个 hazard，全部是“PC 未知的写”对“`tmem_alloc_cg2` 那一行的读”。查 SASS：`tcgen05.alloc.cta_group::2` 被编译器展开成一段软件协议（`UTCATOMSWS.2CTA.FIND_AND_SET`、在保留的 shared memory 0x40–0x7f 上的 `SYNCS` mbarrier、向 peer 的 `STAS` 远程写），racecheck 不理解跨 CTA 的 mbarrier 同步。一个只做 alloc/dealloc 的最小 kernel（148 个 CTA、cluster 2、warp 5 alloc）同样报告这个 hazard，与本关代码无关；cta_group::1 的 32 关没有。除此之外 racecheck 无报告。racecheck 本身不跟踪 TMA、tcgen05、multicast 与 DSMEM 远程 arrive（异步代理/远程访问），这些顺序按下表推理：
+- `./lab check 33 --solution`: 3 steps × 9 cases pass (`int` cases exactly equal, `random` max error 1.8e-4). All correctness cases of step 3 take cluster 4 (none of them has more rounds than with cluster 2); the `persistent` case makes some clusters process 3 tiles; step 2's `persistent` covers the persistent path of cluster 2.
+- compute-sanitizer:
+  - memcheck, synccheck: 0 errors on `tail` for all 3 steps and on `persistent` for steps 2/3.
+  - racecheck: every run reports 2 hazards, all of them "a write at an unknown PC" against "a read at the `tmem_alloc_cg2` line". From the SASS: the compiler expands `tcgen05.alloc.cta_group::2` into a software protocol (`UTCATOMSWS.2CTA.FIND_AND_SET`, a `SYNCS` mbarrier in the reserved shared memory 0x40–0x7f, remote `STAS` writes to the peer), and racecheck does not understand cross-CTA mbarrier synchronization. A minimal kernel that only does alloc/dealloc (148 CTAs, cluster 2, warp 5 alloc) reports the same hazard, so it is unrelated to this lab's code; lab 32 with cta_group::1 does not have it. Apart from this, racecheck reports nothing. racecheck itself does not track TMA, tcgen05, multicast or DSMEM remote arrives (async proxy / remote accesses); their ordering is reasoned through in the table below:
 
-| 访问 | 先 | 后 | 保证 |
+| Access | Before | After | Guarantee |
 |---|---|---|---|
-| barrier 初始化 → 另一个 CTA 或异步代理使用 | `mbarrier.init` | peer 的 TMA complete_tx、leader 的 commit、远程 arrive | `fence.mbarrier_init.release.cluster` + `barrier.cluster` |
-| TMA 写 leader / peer 的 stage s → pair MMA 读 | 两边 `complete_tx` | MMA 发出 | leader 的 `full[s]`（64 KB）wait + `fence::after` |
-| MMA 读两边 stage s → 两边 TMA 重写 | MMA 完成 | 下一轮 TMA | multicast commit → 各 CTA 的 `empty[s]`，各自 producer wait |
-| MMA 写两边累加器 a → 各自 epilogue 读 | MMA 完成 | `tcgen05.ld` | multicast commit → 各 CTA 的 `acc_full[a]`，wait + `fence::after` |
-| 两边 epilogue 读累加器 a → MMA 重写 | `wait::ld` | 下一 tile 的 MMA | `fence::before` + 256 次 `arrive.release.cluster` → leader `acc_empty[a]`，`try_wait.acquire.cluster` + `fence::after` |
-| （step 3）另一 pair 的 multicast 写本 CTA 的 A → 重写 | 两个 pair 的 MMA 读完 | 下一轮 multicast | `empty[s]` count 2：两个 leader 的 commit |
-| leader commit → 本 CTA 的 `empty` / `acc_full` | 到达 | CTA 退出 | producer 排空 kStages 次；epilogue 等过每个 `acc_full` |
-| peer 远程 arrive → leader 的 `acc_empty` | 到达 | leader 退出 | leader MMA 排空 kAccStages 次 |
-| 所有 TMEM 访问 → dealloc | MMA 完成、`wait::ld` | `dealloc.cta_group::2` | `fence::before` + `barrier.cluster` + `fence::after` |
-| generic 写 staging → TMA store；store 读完 → 重写 / 退出 | | | 与 32 关相同 |
+| barrier init → use by another CTA or the async proxy | `mbarrier.init` | the peer's TMA complete_tx, the leader's commit, remote arrives | `fence.mbarrier_init.release.cluster` + `barrier.cluster` |
+| TMA writes stage s of the leader / peer → pair MMA reads | `complete_tx` from both sides | MMA issued | wait on the leader's `full[s]` (64 KB) + `fence::after` |
+| MMA reads stage s on both sides → TMA on both sides rewrites | MMA completes | next-round TMA | multicast commit → each CTA's `empty[s]`, each producer waits |
+| MMA writes accumulator a on both sides → each epilogue reads | MMA completes | `tcgen05.ld` | multicast commit → each CTA's `acc_full[a]`, wait + `fence::after` |
+| epilogues on both sides read accumulator a → MMA rewrites | `wait::ld` | the next tile's MMA | `fence::before` + 256 `arrive.release.cluster` → leader `acc_empty[a]`, `try_wait.acquire.cluster` + `fence::after` |
+| (step 3) the other pair's multicast writes this CTA's A → rewrite | the MMAs of both pairs finished reading | next-round multicast | `empty[s]` count 2: the commits of both leaders |
+| leader commit → this CTA's `empty` / `acc_full` | arrival | CTA exits | producer drains kStages times; the epilogue has waited on every `acc_full` |
+| peer remote arrive → the leader's `acc_empty` | arrival | leader exits | leader MMA drains kAccStages times |
+| all TMEM accesses → dealloc | MMA completes, `wait::ld` | `dealloc.cta_group::2` | `fence::before` + `barrier.cluster` + `fence::after` |
+| generic write to staging → TMA store; store finished reading → rewrite / exit | | | Same as lab 32 |
 
-- `./lab sass 33 --solution`：寄存器 56 / 72 / 72，无 spill、无 local memory；`UTCHMMA.2CTA`、`UTCBAR.2CTA.MULTICAST`、`UTMALDG.2D.2CTA`、`UTMALDG.2D.MULTICAST.2CTA`（step 3）、`UTCATOMSWS.2CTA`（alloc）都在。
-- 骨架：按 TODO(1)、(2)、(3) 逐组把答案代码填入原位，`--step n` 依次通过，第 n 步只依赖前 n 组 TODO；填完后学生版与答案同速；骨架已恢复为逐字节相同。未填时：step 1/2 在 host 的 `launch_cluster`（TODO(1)）处报错；只实现 launch 时，两个 CTA 都在 setup 的 TODO(1) 处 trap（`tmem_alloc_cg2` / `cluster_arrive`，任何等待之前）；step 1 完成后 step 2 在 leader MMA 的 TODO(2) 处 trap（GPU 上报告，不挂起）；step 3 在 host 的 cluster 形状选择 TODO(3) 处报错。
-- `./lab selftest 33 --perf` 通过；`pytest` 通过（写完讲义后）。
+- `./lab sass 33 --solution`: 56 / 72 / 72 registers, no spill, no local memory; `UTCHMMA.2CTA`, `UTCBAR.2CTA.MULTICAST`, `UTMALDG.2D.2CTA`, `UTMALDG.2D.MULTICAST.2CTA` (step 3) and `UTCATOMSWS.2CTA` (alloc) are all present.
+- Skeleton: the solution code was filled in place group by group for TODO(1), (2), (3); `--step n` passes in order, and step n depends only on the first n groups of TODOs. After filling, the student version runs at the same speed as the solution; the skeleton has been restored byte for byte. When unfilled: steps 1/2 report an error at the host's `launch_cluster` (TODO(1)); with only the launch implemented, both CTAs trap at the setup TODO(1) (`tmem_alloc_cg2` / `cluster_arrive`, before any wait); with step 1 complete, step 2 traps at the leader MMA's TODO(2) (reported on the GPU, no hang); step 3 reports an error at the host's cluster-shape choice TODO(3).
+- `./lab selftest 33 --perf` passes; `pytest` passes (after the lesson was written).
 
-## 已知局限
+## Known limitations
 
-- 静态 round-robin 调度；square 的 3.46 波尾部没有处理。cluster 4 只能在轮数不吃亏时使用；没有实现 preferred cluster / 动态调度（CLC）。
-- `kGroupM = 8` 沿用 32 关的结论（单位换成 256 行的 tile 行），没有对 pair 重新扫描。
-- multicast 只用于 A（沿 N 并排的两个 pair）；沿 M 并排共享 B 的形状对称，未实现。
-- 只有 BF16 → FP32。
+- Static round-robin scheduling; the 3.46-wave tail of square is not handled. Cluster 4 can only be used when it does not cost extra rounds; preferred cluster / dynamic scheduling (CLC) is not implemented.
+- `kGroupM = 8` reuses the conclusion of lab 32 (with the unit changed to tile rows of 256 rows); it was not re-swept for the pair.
+- Multicast is used only for A (two pairs side by side along N); the symmetric shape that shares B along M is not implemented.
+- BF16 → FP32 only.

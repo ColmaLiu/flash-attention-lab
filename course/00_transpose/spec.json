@@ -1,28 +1,28 @@
 {
   "id": "00_transpose",
-  "title": "访存与线程映射：矩阵转置",
+  "title": "Memory access and thread mapping: matrix transpose",
   "part": 0,
   "kind": "transpose",
   "prerequisites": [],
   "steps": [
     {
       "step": 1,
-      "title": "朴素转置：一个线程一个元素",
+      "title": "Naive transpose: one thread per element",
       "cases": "all"
     },
     {
       "step": 2,
-      "title": "shared memory 分块转置",
+      "title": "Tiled transpose through shared memory",
       "cases": "all"
     },
     {
       "step": 3,
-      "title": "消除 bank conflict",
+      "title": "Remove bank conflicts",
       "cases": "all"
     },
     {
       "step": 4,
-      "title": "提高在途访存：64×64 tile",
+      "title": "More loads in flight: 32×2 threads per tile",
       "cases": "all"
     }
   ],
@@ -35,7 +35,7 @@
       ],
       "dtype": "fp32",
       "pattern": "coordinate",
-      "purpose": "比一个 tile 还小：检查行列下标与越界判断。值等于输入的线性地址，错了能看出来自哪里。"
+      "purpose": "Smaller than one tile: checks row/column indices and bounds checks. Each value equals its linear address in the input, so a wrong value shows where it came from."
     },
     {
       "name": "tail",
@@ -45,7 +45,7 @@
       ],
       "dtype": "fp32",
       "pattern": "coordinate",
-      "purpose": "两个方向都比 32 的倍数多 1：检查尾部 tile。"
+      "purpose": "One more than a multiple of 32 in both directions: checks the tail tiles."
     },
     {
       "name": "row",
@@ -55,7 +55,7 @@
       ],
       "dtype": "fp32",
       "pattern": "coordinate",
-      "purpose": "退化为一行：转置后是一列，区分 transpose 与 copy。"
+      "purpose": "Degenerates to one row: the transpose is one column, which tells a transpose apart from a copy."
     },
     {
       "name": "tall",
@@ -64,7 +64,7 @@
         17
       ],
       "dtype": "fp32",
-      "purpose": "细长矩阵：grid 在两个方向上的覆盖。"
+      "purpose": "Tall, thin matrix: grid coverage in both directions."
     },
     {
       "name": "square",
@@ -73,7 +73,7 @@
         1024
       ],
       "dtype": "fp32",
-      "purpose": "中等规模随机数据。"
+      "purpose": "Medium-size random data."
     },
     {
       "name": "big",
@@ -83,7 +83,7 @@
       ],
       "dtype": "fp32",
       "perf": true,
-      "purpose": "256 MB 输入，远大于 126 MB L2：测 HBM 带宽利用率。"
+      "purpose": "256 MB input, far larger than the 126 MB L2: measures HBM bandwidth utilization."
     }
   ],
   "perf_target": {

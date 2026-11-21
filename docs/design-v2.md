@@ -1,100 +1,100 @@
-# flash-attention-lab v2 设计
+# flash-attention-lab v2 design
 
-状态：设计稿，跟踪 issue 见 GitHub `v2` 标签。本文件描述 v2 的目标、课程结构、仓库组织、接口与验收方式；实现过程中如有变更，先改本文件再改代码。
+Status: design doc; tracking issues carry the GitHub `v2` label. This file describes the goals, course structure, repository organization, interfaces and acceptance criteria of v2; if something changes during implementation, change this file first, then the code.
 
-## 1. 目标
+## 1. Goals
 
-让**只有一点 CUDA 基础**（写过 elementwise kernel，知道 grid/block/thread 与 shared memory）的学习者，在 **B200（SM100）** 上以 **FlashAttention 1→4** 为主线，学会编写和优化高性能 kernel。
+Let learners with **only a little CUDA background** (they have written an elementwise kernel and know grid/block/thread and shared memory) learn to write and optimize high-performance kernels on **B200 (SM100)**, with **FlashAttention 1→4** as the main thread.
 
-学完后学习者应能：
+After the course, learners should be able to:
 
-1. 从数学定义推导 attention 的 IO 复杂度，解释 FA1→FA4 每一代解决了什么瓶颈；
-2. 独立写出 mma.sync、TMA、mbarrier、tcgen05/TMEM、warp specialization、2-CTA MMA 的正确代码，并说清每条同步的作用；
-3. 用 SASS、Nsight Compute 和受控计时验证优化假设，而不是凭感觉调参；
-4. 读懂上游 FA4（CuTe DSL）与 CUTLASS SM100 FMHA 源码的结构。
+1. Derive the IO complexity of attention from its math definition, and explain which bottleneck each generation FA1→FA4 removes;
+2. Write correct code for mma.sync, TMA, mbarrier, tcgen05/TMEM, warp specialization and 2-CTA MMA on their own, and explain what each synchronization does;
+3. Verify optimization hypotheses with SASS, Nsight Compute and controlled timing, rather than tuning by feel;
+4. Read the source structure of upstream FA4 (CuTe DSL) and the CUTLASS SM100 FMHA.
 
-非目标：Hopper wgmma；反向传播；decode/split-KV；GQA/MQA、dropout、bias、变长序列。
+Non-goals: Hopper wgmma; backward pass; decode/split-KV; GQA/MQA, dropout, bias, variable-length sequences.
 
-## 2. 设计原则
+## 2. Design principles
 
-1. **先学明白再写。** 每关的讲义覆盖本关全部新知识：数学、调度、指令。学生不需要先去读论文或 PTX 手册才能开始；讲义给出出处供深入。
-2. **小步可验证。** 每关拆成 2–5 个 step，每个 step 对应骨架里的 `TODO(n)`，可用 `./lab check ID --step n` 单独验证。学生不会面对“整关一次过或一次挂”的黑盒。
-3. **一关一个新机制。** 新硬件机制先在 GEMM（或更简单的算子）上单独练，再用进 attention。参考答案只包含本关引入的特性，不提前泄露后续关卡。
-4. **前面写过的，后面提供。** 学生在某关亲手写过的原语（如 mbarrier 封装、TMA 描述符编码），从下一关起由公共头文件 `include/lab/` 提供参考实现，避免前面的小错误拖垮后面的实验。
-5. **性能结论可复现。** 计时排除编译与准备；CUDA Graph 与 eager 不混算；每关以“相对库基线的比例”给出学生目标，仓库不提交本机实测数据；维护者验收与学生输出分开。
-6. **简单的基础设施。** 学生只需要理解 `kernel.cu` 里的 `make_plan` / `run` 两个函数；Python 侧只负责造数据、调用、对答案、计时。
+1. **Understand first, then write.** Each lesson covers all the new knowledge of its lab: math, scheduling, instructions. Learners do not need to read the papers or the PTX manual before they start; the lesson gives references for going deeper.
+2. **Small, verifiable steps.** Each lab is split into 2–5 steps; each step matches a `TODO(n)` in the skeleton and can be verified on its own with `./lab check ID --step n`. Learners never face a black box where "the whole lab passes or fails at once".
+3. **One new mechanism per lab.** A new hardware mechanism is first practiced on its own on a GEMM (or a simpler operator), then used in attention. The reference solution contains only the features this lab introduces and does not leak later labs early.
+4. **What you wrote earlier is provided later.** Primitives that a learner wrote by hand in one lab (such as the mbarrier wrappers and TMA descriptor encoding) are provided as reference implementations in the shared headers `include/lab/` from the next lab on, so that small mistakes early on do not wreck later experiments.
+5. **Reproducible performance conclusions.** Timing excludes compilation and preparation; CUDA Graph and eager results are never mixed; each lab gives the learner's goal as "a ratio relative to a library baseline", and the repository does not commit measurements from our machine; maintainer acceptance is kept separate from learner output.
+6. **Simple infrastructure.** Learners only need to understand the two functions `make_plan` / `run` in `kernel.cu`; the Python side only generates data, calls the kernel, checks answers and times.
 
-## 3. 课程地图
+## 3. Course map
 
-ID 采用 `<部分><序号>_<名字>`。部分 0 预备，1–4 分别对应 FA1–FA4。
+IDs follow `<part><index>_<name>`. Part 0 is preliminaries, and 1–4 correspond to FA1–FA4.
 
-| ID | 主题 | 新知识 | 练习（step 概要） | 对照基线 |
+| ID | Topic | New knowledge | Exercises (step outline) | Baseline |
 |---|---|---|---|---|
-| **部分 0：预备** |||||
-| `00_transpose` | 访存与线程映射 | 线性地址、coalescing、shared memory、bank conflict、padding/swizzle | 朴素转置 → smem 分块 → 消除 bank conflict → 增大 tile 提高在途访存 | torch copy |
-| `01_softmax` | 归约与数值稳定 | warp shuffle、block 归约、safe softmax、**online softmax** 推导 | 两遍 softmax → 单遍 online softmax | torch.softmax |
-| **部分 1：FA1 — IO 感知的分块** |||||
-| `10_simt_gemm` | 分块 GEMM | 数据复用、算术强度、smem tiling、寄存器分块、向量化 | 朴素 → smem tile → 寄存器 thread tile | cuBLAS（FP32） |
-| `11_naive_attention` | 标准 attention 与 IO 分析 | attention 数学、mask/scale、HBM 流量计数 | 用提供的 GEMM 组合：S、带 mask 的 softmax、PV；测量并解释 N² 流量 | 数学 oracle |
-| `12_fa1` | FlashAttention-1 | 分块 + online softmax 的正确性证明；论文 Algorithm 1（KV 外层、O/ℓ/m 回写 HBM）；LSE | 单块正确 → 完整 KV 循环 → causal | 11 关实现、cuDNN |
-| **部分 2：FA2 — Tensor Core 与并行划分** |||||
-| `20_mma_gemm` | warp 级 Tensor Core | `mma.sync.m16n8k16` fragment 布局、`ldmatrix`、XOR swizzle | 单 warp 16×8×16 → CTA tile → 无冲突 ldmatrix | cuBLAS（BF16） |
-| `21_pipeline_gemm` | 异步拷贝流水 | `cp.async`、commit/wait_group、多级 buffer、延迟隐藏 | 双缓冲 → 多级流水 → 调参与分析 | cuBLAS |
-| `22_fa2` | FlashAttention-2 | 循环交换（Q 外层）、延迟归一化、warp 按 Q 切分、P 留在寄存器作 A 操作数、causal 跳块 | QKᵀ fragment → online softmax in registers → PV → causal | cuDNN |
-| **部分 3：FA3 的思想在 SM100 上 — 异步与分工** |||||
-| `30_tma_mbarrier` | TMA 与 mbarrier | tensor map、swizzle 模式、`cp.async.bulk.tensor`、expect_tx、phase/parity、TMA store | 单 tile 搬运 → 多级环形 buffer（full/empty barrier） | torch copy |
-| `31_tcgen05_gemm` | tcgen05 与 TMEM | TMEM 分配/释放、smem descriptor、instruction descriptor、`tcgen05.mma/commit/ld` | 单 tile → 完整 K 循环（已覆盖全部 tile） → TMA store epilogue 与 tile 形状 | cuBLAS |
-| `32_ws_gemm` | warp specialization | 生产者/消费者、TMA warp + MMA warp + epilogue warps、TMEM 双缓冲、persistent | 分工流水 → 累加器双缓冲 → persistent 调度 | cuBLAS |
-| `33_2cta_gemm` | 2-CTA MMA | cluster、distributed smem、`cta_group::2`、TMA multicast | 2-CTA 单 tile → 完整流水 | cuBLAS |
-| `34_fa3` | FA3 式 attention | FA3 三个思想（异步生产者、GEMM/softmax 重叠、pingpong）在 tcgen05 上的对应；S/O 在 TMEM、P 经 smem | 单 KV 块 → 完整循环 → S 双缓冲重叠 QKᵀ 与 softmax | cuDNN |
-| **部分 4：FA4 — Blackwell 上的完整优化** |||||
-| `40_fa4_pipeline` | FA4 流水结构 | 2 个 Q tile ping-pong、P 别名写回 TMEM（TS-MMA）、独立 correction warpgroup、寄存器重分配 | 角色划分 → P in TMEM → correction WG | cuDNN、FA4 |
-| `41_fa4_softmax` | softmax 吞吐 | MUFU 瓶颈分析、多项式 exp2 软件模拟、条件 rescale 及误差界 | 多项式 exp2 → 混合 MUFU/FMA → 条件 rescale | 40 关、FA4 |
-| `42_fa4_2cta` | 2-CTA attention | 2-CTA 的 QKᵀ/PV 划分、cluster 同步 | 2-CTA QKᵀ → 2-CTA PV | FA4 |
-| `43_fa4_schedule` | 调度与 causal | causal 的块分类与掩码开销、persistent、LPT 排序 | causal → persistent → LPT | cuDNN、FA4 |
-| `44_fa4_fp8` | FP8 前向 | E4M3 量化、descale、P 的 FP8 量化误差、`kind::f8f6f4` | FP8 QKᵀ → FP8 PV → 误差分析 | FA4 FP8（若支持） |
+| **Part 0: Preliminaries** |||||
+| `00_transpose` | Memory access and thread mapping | Linear addresses, coalescing, shared memory, bank conflicts, padding/swizzle | Naive transpose → smem tiling → remove bank conflicts → larger tiles for more memory accesses in flight | torch copy |
+| `01_softmax` | Reductions and numerical stability | warp shuffle, block reduction, safe softmax, derivation of **online softmax** | Two-pass softmax → single-pass online softmax | torch.softmax |
+| **Part 1: FA1 — IO-aware tiling** |||||
+| `10_simt_gemm` | Tiled GEMM | Data reuse, arithmetic intensity, smem tiling, register tiling, vectorization | Naive → smem tile → register thread tile | cuBLAS (FP32) |
+| `11_naive_attention` | Standard attention and IO analysis | Attention math, mask/scale, HBM traffic counting | Compose the provided GEMMs: S, softmax with mask, PV; measure and explain the N² traffic | Math oracle |
+| `12_fa1` | FlashAttention-1 | Correctness proof of tiling + online softmax; Algorithm 1 of the paper (KV in the outer loop, O/ℓ/m written back to HBM); LSE | Single block correct → full KV loop → causal | Lab 11 implementation, cuDNN |
+| **Part 2: FA2 — Tensor Cores and work partitioning** |||||
+| `20_mma_gemm` | Warp-level Tensor Core | `mma.sync.m16n8k16` fragment layout, `ldmatrix`, XOR swizzle | Single warp 16×8×16 → CTA tile → conflict-free ldmatrix | cuBLAS (BF16) |
+| `21_pipeline_gemm` | Async copy pipeline | `cp.async`, commit/wait_group, multi-stage buffers, latency hiding | Double buffering → multi-stage pipeline → tuning and analysis | cuBLAS |
+| `22_fa2` | FlashAttention-2 | Loop interchange (Q outer), deferred normalization, warps split by Q, P stays in registers as the A operand, causal block skipping | QKᵀ fragment → online softmax in registers → PV → causal | cuDNN |
+| **Part 3: FA3 ideas on SM100 — asynchrony and specialization** |||||
+| `30_tma_mbarrier` | TMA and mbarrier | tensor map, swizzle modes, `cp.async.bulk.tensor`, expect_tx, phase/parity, TMA store | Single-tile copy → multi-stage ring buffer (full/empty barriers) | torch copy |
+| `31_tcgen05_gemm` | tcgen05 and TMEM | TMEM alloc/free, smem descriptor, instruction descriptor, `tcgen05.mma/commit/ld` | Single tile → full K loop (already covering all tiles) → TMA store epilogue and tile shape | cuBLAS |
+| `32_ws_gemm` | warp specialization | Producer/consumer, TMA warp + MMA warp + epilogue warps, TMEM double buffering, persistent | Specialized pipeline → accumulator double buffering → persistent scheduling | cuBLAS |
+| `33_2cta_gemm` | 2-CTA MMA | cluster, distributed smem, `cta_group::2`, TMA multicast | 2-CTA single tile → full pipeline | cuBLAS |
+| `34_fa3` | FA3-style attention | How the three FA3 ideas (asynchronous producers, GEMM/softmax overlap, pingpong) map onto tcgen05; S/O in TMEM, P through smem | Single KV block → full loop → S double buffering to overlap QKᵀ and softmax | cuDNN |
+| **Part 4: FA4 — full optimization on Blackwell** |||||
+| `40_fa4_pipeline` | FA4 pipeline structure | 2 Q tiles in ping-pong, P aliased and written back to TMEM (TS-MMA), separate correction warpgroup, register reallocation | Role split → P in TMEM → correction WG | cuDNN, FA4 |
+| `41_fa4_softmax` | Softmax throughput | MUFU bottleneck analysis, software-emulated polynomial exp2, conditional rescale and its error bound | Polynomial exp2 → mixed MUFU/FMA → conditional rescale | Lab 40, FA4 |
+| `42_fa4_2cta` | 2-CTA attention | 2-CTA split of QKᵀ/PV, cluster synchronization | 2-CTA QKᵀ → 2-CTA PV | FA4 |
+| `43_fa4_schedule` | Scheduling and causal | Causal block classification and masking overhead, persistent, LPT ordering | causal → persistent → LPT | cuDNN, FA4 |
+| `44_fa4_fp8` | FP8 forward | E4M3 quantization, descale, FP8 quantization error of P, `kind::f8f6f4` | FP8 QKᵀ → FP8 PV → error analysis | FA4 FP8 (if supported) |
 
-支持域（除非某关另行声明）：
+Supported domain (unless a lab states otherwise):
 
-- 部分 0–1：FP32；
-- attention：`[B,N,H,D]` contiguous BF16/FP16，`D ∈ {64,128}`，`scale > 0` 有限，causal/非 causal，O 同布局，LSE `[B,H,N]` FP32（自然对数）；
-- FP8 关：E4M3 输入加 FP32 descale，O 为 BF16。
+- Parts 0–1: FP32;
+- attention: `[B,N,H,D]` contiguous BF16/FP16, `D ∈ {64,128}`, `scale > 0` and finite, causal/non-causal, O in the same layout, LSE `[B,H,N]` FP32 (natural log);
+- FP8 lab: E4M3 inputs plus FP32 descale, O in BF16.
 
-各关在 `spec.json` 中声明自己的 dtype 和形状约束；binding 与 Python 两侧都检查支持域，越界输入明确报错。
+Each lab declares its own dtype and shape constraints in `spec.json`; both the binding and the Python side check the supported domain, and out-of-domain inputs report an explicit error.
 
-## 4. 每关的组成
+## 4. What each lab contains
 
 ```
 course/<ID>/
-  README.md     讲义（见下方模板）
-  spec.json     case、step、支持域、性能 case
-  figures/      讲义用图（SVG/mermaid 源）
-students/<ID>/kernel.cu      学生骨架（含 TODO(n)），学生直接修改
-solutions/<ID>/kernel.cu     参考答案（可拆多个 .cuh）
-solutions/<ID>/NOTES.md      答案设计说明：为什么这样分工、如何验证、已知局限（不含本机实测数据）
+  README.md     lesson (see the template below)
+  spec.json     cases, steps, supported domain, perf cases
+  figures/      figures for the lesson (SVG/mermaid sources)
+students/<ID>/kernel.cu      student skeleton (with TODO(n)); the learner edits it directly
+solutions/<ID>/kernel.cu     reference solution (may be split into several .cuh)
+solutions/<ID>/NOTES.md      solution design notes: why the work is split this way, how it is verified, known limitations (no measurements from our machine)
 ```
 
-讲义模板：
+Lesson template:
 
-1. **本关目标**：一段话，加前置关卡；
-2. **动机**：上一关的瓶颈是什么，对应 FA 论文哪一节；
-3. **数学**：推导、不变式、手算小例；
-4. **硬件与指令**：本关新指令的语义、操作数布局、最小代码片段、常见误用；
-5. **调度设计**：线程/warp 分工、smem/TMEM/寄存器预算、时序图；
-6. **分步练习**：每个 step 写清要实现哪个 TODO、运行哪条命令、常见错误与排查；
-7. **性能**：测哪些 case、相对库基线的目标比例、用 SASS/NCU 看什么指标；
-8. **自测问题**：3–6 个，答案在讲义末尾折叠；
-9. **延伸阅读**：论文章节、PTX 手册章节、上游源码位置（固定版本）。
+1. **Goals**: one paragraph, plus the prerequisite labs;
+2. **Motivation**: what the bottleneck of the previous lab is, and which section of the FA paper it matches;
+3. **Math**: derivations, invariants, small examples worked by hand;
+4. **Hardware and instructions**: semantics of this lab's new instructions, operand layouts, minimal code snippets, common misuses;
+5. **Schedule design**: thread/warp work split, smem/TMEM/register budget, timelines;
+6. **Step-by-step exercises**: for each step, which TODO to implement, which command to run, common mistakes and how to debug them;
+7. **Performance**: which cases to measure, the target ratio relative to the library baseline, which SASS/NCU metrics to look at;
+8. **Self-check questions**: 3–6, with answers collapsed at the end of the lesson;
+9. **Further reading**: paper sections, PTX manual sections, upstream source locations (pinned versions).
 
-骨架规范：
+Skeleton rules:
 
-- 骨架能编译，`make_plan` / `run`、launch 配置、host 侧描述符编码等“非本关重点”的部分已写好；
-- 每个 `TODO(n)` 注释说明输入、输出、不变式和可调用的 helper；
-- 未完成时运行到 TODO 处明确报错（`LAB_TODO(n)`），不静默输出垃圾。
+- The skeleton compiles; the parts "outside this lab's focus", such as `make_plan` / `run`, the launch configuration and host-side descriptor encoding, are already written;
+- The comment on each `TODO(n)` states the inputs, outputs, invariants and the helpers that may be called;
+- When unfinished, running to a TODO reports an explicit error (`LAB_TODO(n)`) instead of silently producing garbage.
 
-## 5. C++ 接口
+## 5. C++ interface
 
-每种算子一个 Problem 结构体，定义在 `include/lab/problem.h`：
+Each operator has a Problem struct, defined in `include/lab/problem.h`:
 
 ```cpp
 namespace lab {
@@ -107,98 +107,98 @@ struct AttentionProblem {
   float scale;
   bool causal;
   float q_descale, k_descale, v_descale;  // FP8 only
-  float *probe;           // step 调试输出，可为空
+  float *probe;           // step debug output, may be null
 };
 }  // namespace lab
 ```
 
-学生的 `kernel.cu` 只实现两个函数和一个 Plan 类型：
+The learner's `kernel.cu` implements only two functions and a Plan type:
 
 ```cpp
-struct Plan { /* TMA 描述符、scratch、launch 参数 */ };
-Plan make_plan(const lab::AttentionProblem& p);                          // 不计时：编码描述符、分配 scratch
-void run(const Plan& plan, const lab::AttentionProblem& p, cudaStream_t s);  // 计时：只发射 kernel
+struct Plan { /* TMA descriptors, scratch, launch parameters */ };
+Plan make_plan(const lab::AttentionProblem& p);                          // not timed: encode descriptors, allocate scratch
+void run(const Plan& plan, const lab::AttentionProblem& p, cudaStream_t s);  // timed: only launches kernels
 LAB_REGISTER(lab::AttentionProblem, Plan, make_plan, run);
 ```
 
-- `LAB_REGISTER` 生成类型擦除的入口，供 `labkit` 中每种 Problem 对应的 TVM FFI binding 调用；
-- Plan 中的 scratch 用 `lab::Scratch`（RAII）分配，分配时填入垃圾值，强制学生自行初始化；
-- 早期关卡的 Plan 为空结构体，骨架已写好，学生从第一关就接触“准备/执行分离”。
+- `LAB_REGISTER` generates a type-erased entry point, called by the TVM FFI binding for each Problem kind in `labkit`;
+- The scratch in a Plan is allocated with `lab::Scratch` (RAII), which fills it with garbage on allocation, forcing learners to initialize it themselves;
+- In early labs the Plan is an empty struct and the skeleton is already written, so learners meet the "prepare/execute split" from the first lab.
 
-GEMM 统一为 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 都是 K-major，与 QKᵀ 的形状一致；PV 中 MN-major 的 B 操作数在 attention 关卡讲解。
+GEMM is unified as `C[M,N] = A[M,K] · B[N,K]ᵀ`: A and B are both K-major, matching the shape of QKᵀ; the MN-major B operand in PV is explained in the attention labs.
 
-公共头文件 `include/lab/`：
+Shared headers in `include/lab/`:
 
-| 头文件 | 内容 | 学生自己实现于 → 从哪关起提供 |
+| Header | Contents | Learner implements it in → provided from lab |
 |---|---|---|
-| `problem.h`、`register.h`、`check.h` | Problem、注册宏、CUDA 错误检查、`LAB_TODO` | 00 |
-| `scratch.h` | 带垃圾值初始化的 scratch 分配 | 00 |
-| `mma_sync.cuh` | `ldmatrix`、`mma.sync` 封装、fragment 坐标函数 | 20 → 21 |
-| `cp_async.cuh` | `cp.async` 与 wait_group | 21 → 22 |
-| `tma.cuh`、`mbarrier.cuh` | tensor map 编码、TMA load/store、mbarrier | 30 → 31 |
-| `tcgen05.cuh` | TMEM alloc/dealloc/relinquish、`tcgen05.ld`/`st`（32x32b，含 ld+wait 合一的 `_sync` 版本）与 wait、smem/instruction descriptor、mma/commit、tcgen05 fence | 31 → 32 |
-| `cluster.cuh` | cluster、2-CTA 辅助 | 33 → 34 |
+| `problem.h`, `register.h`, `check.h` | Problem, registration macro, CUDA error checks, `LAB_TODO` | 00 |
+| `scratch.h` | scratch allocation with garbage initialization | 00 |
+| `mma_sync.cuh` | `ldmatrix`, `mma.sync` wrappers, fragment coordinate functions | 20 → 21 |
+| `cp_async.cuh` | `cp.async` and wait_group | 21 → 22 |
+| `tma.cuh`, `mbarrier.cuh` | tensor map encoding, TMA load/store, mbarrier | 30 → 31 |
+| `tcgen05.cuh` | TMEM alloc/dealloc/relinquish, `tcgen05.ld`/`st` (32x32b, including `_sync` versions that combine ld+wait) and wait, smem/instruction descriptors, mma/commit, tcgen05 fences | 31 → 32 |
+| `cluster.cuh` | cluster and 2-CTA helpers | 33 → 34 |
 
-例如 `mma_sync.cuh`：学生在 20 关的骨架里自己实现这些函数（骨架给出签名与语义注释），20 关的参考答案 `#include` 它；从 21 关起骨架直接 `#include` 它。
+For example `mma_sync.cuh`: in the lab 20 skeleton the learner implements these functions (the skeleton gives the signatures and semantic comments), and the lab 20 reference solution `#include`s it; from lab 21 on, the skeleton `#include`s it directly.
 
-## 6. Python 基础设施 `labkit`
+## 6. Python infrastructure `labkit`
 
-命令：
+Commands:
 
-| 命令 | 作用 |
+| Command | What it does |
 |---|---|
-| `./lab list` / `./lab status` | 课程列表与各关、各 step 进度 |
-| `./lab check ID [--step n] [--case name]` | 编译学生代码并对照 oracle；默认运行全部 correctness case |
-| `./lab bench ID [--case name] [--cold]` | 计时：学生、答案、库基线，同一输入，CUDA Graph |
-| `./lab solution ID ...` | 对答案运行 check/bench |
-| `./lab sass ID` | 编译产物的寄存器、spill、smem 用量与 SASS 摘录 |
-| `./lab profile ID --case name` | 用本关预设的 NCU 指标采集 |
+| `./lab list` / `./lab status` | Course list and progress per lab and per step |
+| `./lab check ID [--step n] [--case name]` | Compiles the student code and compares against the oracle; runs all correctness cases by default |
+| `./lab bench ID [--case name] [--cold]` | Timing: student, solution and library baselines, same input, CUDA Graph |
+| `--solution` on check/bench/sass/profile/sanitize | Runs the reference solution instead of the student code |
+| `./lab sass ID` | Registers, spills, smem usage and a SASS excerpt of the build output |
+| `./lab profile ID --case name` | Captures the lab's preset NCU metrics |
 | `./lab sanitize ID --tool memcheck/racecheck/synccheck` | Compute Sanitizer |
-| `./lab doctor` | 环境检查 |
-| `./lab selftest` | 维护者：全部答案通过、骨架可编译且明确报 TODO、基础设施单测 |
+| `./lab doctor` | Environment check |
+| `./lab selftest` | Maintainers: all solutions pass, skeletons compile and report their TODOs explicitly, infrastructure unit tests |
 
-正确性检查：
+Correctness checks:
 
-- 数学 oracle：PyTorch FP64（GEMM/attention 分块计算以控制显存）；
-- 容差按 dtype 与归约长度给出，定义在 `labkit/tolerance.py`，并在讲义中解释；
-- 输出与 scratch 都先填 NaN 或垃圾值；检查输入未被修改；默认流与非默认流各跑一次；
-- step 通过 `spec.json` 中的 case 子集、`probe` 输出及对应 oracle 定义。
+- Math oracle: PyTorch FP64 (GEMM/attention computed in chunks to limit GPU memory);
+- Tolerances are given per dtype and reduction length, defined by `tolerance()` in `labkit/kinds/<kind>.py`, and explained in the lessons;
+- Outputs and scratch are first filled with NaN or garbage; inputs are checked for modification; the kernel runs once on the default stream and once on a non-default stream;
+- Steps are defined by a subset of cases in `spec.json`, the `probe` output and its oracle.
 
-计时：
+Timing:
 
-- 默认 CUDA Graph 回放，可选 eager，两者不混算；
-- `--cold` 在每次迭代之间清空 L2；
-- 报告中位数与分布、TFLOP/s 或 GB/s、相对 B200 标称峰值的比例，以及对答案和库基线的比值；
-- 库基线：cuBLAS（经 torch）、cuDNN SDPA（强制后端，失败即报错）、FA4（`flash_attn.cute`，可选安装，未安装则显示“不可用”）；
-- 维护者的答案性能门槛只在 `selftest --perf` 中检查，不出现在学生输出里。
+- CUDA Graph replay by default, eager optional; the two are never mixed;
+- `--cold` flushes L2 between iterations;
+- Reports the median and the distribution, TFLOP/s or GB/s, the ratio to the B200 nominal peak, and the ratios to the solution and the library baselines;
+- Library baselines: cuBLAS (through torch), cuDNN SDPA (forced backend; reports an error if it fails), FA4 (`flash_attn.cute`, optional install; shows "unavailable" if not installed);
+- The maintainers' perf gate for solutions is checked only in `selftest --perf` and never appears in learner output.
 
-进度：`progress/<ID>.json` 记录每个 step 的通过状态与该关源码指纹。指纹只包含 `students/<ID>/` 与其 include 的 `include/lab/` 文件。
+Progress: `progress/<ID>.json` records the pass status of each step and the source fingerprint of the lab. The fingerprint covers only `students/<ID>/` and the `include/lab/` files it includes.
 
-## 7. 质量保证
+## 7. Quality assurance
 
-每个关卡合入 `v2` 前须满足：
+Before a lab merges into `v2`, it must satisfy:
 
-1. 答案通过全部 case（含 `--cold`、非默认流），`compute-sanitizer` 的 memcheck、racecheck、synccheck 无报错；
-2. 骨架可编译，每个 step 在未实现时报 `LAB_TODO(n)`；
-3. 讲义包含模板全部九节，命令可直接运行，链接有效；
-4. 答案性能达到 `spec.json` 中声明的目标比例（相对库基线）；每类算子的最终答案（transpose：`30_tma_mbarrier`，softmax：`01_softmax`，GEMM：`33_2cta_gemm`，attention：`43_fa4_schedule`）在本关**全部** perf case 上逐项达到库基线的 90%（同次 CUDA Graph 中位数），不平均、不筛选；实测报告只写入 Git 忽略的 `artifacts/`；
-5. 有一次独立审查（未参与编写的 reviewer agent），结论记录在对应 issue 中。
+1. The solution passes all cases (including `--cold` and the non-default stream), and the `compute-sanitizer` memcheck, racecheck and synccheck report no errors;
+2. The skeleton compiles, and each step reports `LAB_TODO(n)` while unimplemented;
+3. The lesson contains all nine sections of the template, its commands run as written, and its links are valid;
+4. The solution's performance reaches the target ratio (relative to the library baseline) declared in `spec.json`; the final solution of each operator class (transpose: `30_tma_mbarrier`, softmax: `01_softmax`, GEMM: `33_2cta_gemm`, attention: `43_fa4_schedule`) reaches 90% of the library baseline on **every** perf case of its lab, case by case (medians from the same CUDA Graph run), with no averaging and no filtering; measurement reports are written only to the Git-ignored `artifacts/`;
+5. There is one independent review (by a reviewer agent that did not take part in writing it), with the conclusion recorded in the matching issue.
 
-## 8. 从 v1 迁移
+## 8. Migration from v1
 
-- v1 的 `flash_attention_lab/`、`students/cuda/`、`solutions/s*`、`docs/tasks/`、`curriculum.json` 在 v2 中整体替换；
-- v1 中已验证正确的 kernel 代码（如 s40/s43 的 TMA、tcgen05、softmax 实现）作为 v2 答案的起点，按“一关一机制”拆分并修复已知问题（scale ≤ 0 的 NaN、极端 scale 分支、重复的 PTX 封装）；
-- `third_party/` submodule 保留，用于源码对照；
-- v1 保留在 `main` 分支，v2 稳定后再讨论合并方式。
+- v1's `flash_attention_lab/`, `students/cuda/`, `solutions/s*`, `docs/tasks/` and `curriculum.json` are replaced as a whole in v2;
+- Kernel code from v1 that was verified correct (such as the TMA, tcgen05 and softmax implementations of s40/s43) is the starting point for the v2 solutions, split up by "one mechanism per lab", with known issues fixed (NaN for scale ≤ 0, extreme-scale branches, duplicated PTX wrappers);
+- The `third_party/` submodules stay, for side-by-side source reading;
+- v1 stays on the `main` branch; how to merge is discussed once v2 is stable.
 
-## 9. 里程碑
+## 9. Milestones
 
-| 里程碑 | 内容 |
+| Milestone | Contents |
 |---|---|
-| M0 | 本设计稿、issue 拆分 |
-| M1 | `labkit`、C++ 接口、`include/lab` 基础头文件；`00_transpose` 端到端打通 |
-| M2 | 部分 0–1（00、01、10、11、12） |
-| M3 | 部分 2（20、21、22） |
-| M4 | 部分 3（30–34） |
-| M5 | 部分 4（40–44） |
-| M6 | 全局文档（入门、B200 架构概览、工具指南、术语表）、selftest、全面审查、清理 v1 |
+| M0 | This design doc, splitting into issues |
+| M1 | `labkit`, the C++ interface, the base headers in `include/lab`; `00_transpose` working end to end |
+| M2 | Parts 0–1 (00, 01, 10, 11, 12) |
+| M3 | Part 2 (20, 21, 22) |
+| M4 | Part 3 (30–34) |
+| M5 | Part 4 (40–44) |
+| M6 | Project-wide docs (getting started, B200 architecture overview, tools guide, glossary), selftest, full review, v1 cleanup |

@@ -1,70 +1,70 @@
-# 21 · 异步拷贝流水：cp.async 多级 buffer
+# 21 · Async copy pipeline: cp.async multistage buffers
 
-> 部分 2 · FA2　｜　前置：[20_mma_gemm](../20_mma_gemm/README.md)　｜　代码：[`students/21_pipeline_gemm/kernel.cu`](../../students/21_pipeline_gemm/kernel.cu)
+> Part 2 · FA2 | Prerequisites: [20_mma_gemm](../20_mma_gemm/README.md) | Code: [`students/21_pipeline_gemm/kernel.cu`](../../students/21_pipeline_gemm/kernel.cu)
 
-## 1. 本关目标
+## 1. Goals
 
-继续算 `C[M,N] = A[M,K] · B[N,K]ᵀ`（BF16 输入，FP32 输出）。20 关的 kernel 在搬运数据时 Tensor Core 空等，计算时又没有人搬运。本关用 **`cp.async`** 让下一块数据的搬运和这一块的计算同时进行：
+We keep computing `C[M,N] = A[M,K] · B[N,K]ᵀ` (BF16 inputs, FP32 output). In the lab 20 kernel, the Tensor Cores sit idle while data moves, and nothing moves data while they compute. This lab uses **`cp.async`** to load the next tile while the current tile is computed:
 
-1. **双缓冲**：两份 shared memory buffer，算一份、搬另一份；
-2. **多级环形 buffer**：S 份 buffer，最多 S−1 块数据同时在路上，用 commit group 计数；
-3. **调参**：更大的 K tile、64×64 的 warp tile、分组光栅化，并用 profile 判断每个改动为什么有效（或无效）。
+1. **Double buffering**: two shared memory buffers; compute from one while loading the other;
+2. **Multistage ring buffer**: S buffers, at most S−1 tiles in flight at once, counted with commit groups;
+3. **Tuning**: a larger K tile, 64×64 warp tiles, grouped rasterization, and profiling to explain why each change helps (or does not).
 
-做完后你应该能：
+When you finish, you should be able to:
 
-- 写出 `cp.async`、`commit_group`、`wait_group` 的封装，并说清它们的完成语义；
-- 说出流水循环中每个 `__syncthreads()` 同时保护的两件事；
-- 用 Little 定律估算需要几级流水；
-- 把 20 关 cuBLAS 的约 0.17 倍提到约 0.28 倍，即 `mma.sync` 上限的约 70%。
+- write wrappers for `cp.async`, `commit_group` and `wait_group`, and explain their completion semantics;
+- name the two things that each `__syncthreads()` in the pipeline loop protects at the same time;
+- estimate the number of pipeline stages you need with Little's law;
+- raise lab 20's ≈0.17× of cuBLAS to ≈0.28×, about 70% of the `mma.sync` upper bound.
 
-`ldmatrix`、`mma`、fragment 坐标和 swizzle 由 [`include/lab/mma_sync.cuh`](../../include/lab/mma_sync.cuh) 提供（就是你在 20 关写的）。本关写的 `cp.async` 封装从 22 关起由 [`include/lab/cp_async.cuh`](../../include/lab/cp_async.cuh) 提供。
+[`include/lab/mma_sync.cuh`](../../include/lab/mma_sync.cuh) provides `ldmatrix`, `mma`, fragment coordinates and swizzle (the code you wrote in lab 20). From lab 22 on, [`include/lab/cp_async.cuh`](../../include/lab/cp_async.cuh) provides the `cp.async` wrappers you write in this lab.
 
-## 2. 动机：让 Tensor Core 不再等数据
+## 2. Motivation: stop the Tensor Cores from waiting for data
 
-20 关步骤 3 的 K 循环是：
+The K loop of lab 20 step 3 is:
 
 ```
-load_tile(A)、load_tile(B)  ← 所有 warp 读 global，Tensor Core 空闲
+load_tile(A), load_tile(B)  ← all warps read global, Tensor Cores idle
 __syncthreads()
-ldmatrix + mma             ← 所有 warp 计算，没有访存在路上
+ldmatrix + mma              ← all warps compute, no memory access in flight
 __syncthreads()
 ```
 
-普通的 global load 要先进寄存器，线程必须等数据回来才能把它存进 shared memory，所以“搬”和“算”只能交替。SM 上同时驻留的其他 CTA 可以填补一部分空闲，但每个 CTA 自己是串行的。
+A normal global load goes into registers first. The thread must wait for the data to arrive before it can store it to shared memory, so "load" and "compute" can only alternate. Other CTAs resident on the same SM can fill part of the idle time, but each CTA on its own is serial.
 
-FlashAttention-2 的实现（`third_party/flash-attention/csrc/flash_attn/src/flash_fwd_kernel.h`）在计算当前 K/V 块的 `Q·Kᵀ` 时就用 `cp.async` 预取下一个 K/V 块，并用 `cp_async_wait<1>` 等待。22 关的 FA2 会沿用本关的流水结构：GEMM 的 K 维对应 attention 的 KV 序列维。
+The FlashAttention-2 implementation (`third_party/flash-attention/csrc/flash_attn/src/flash_fwd_kernel.h`) prefetches the next K/V block with `cp.async` while it computes `Q·Kᵀ` for the current K/V block, and waits with `cp_async_wait<1>`. FA2 in lab 22 reuses the pipeline structure of this lab: the K dimension of the GEMM corresponds to the KV sequence dimension of attention.
 
-## 3. 数学：需要多少数据在路上
+## 3. Math: how much data must be in flight
 
-### 3.1 Little 定律
+### 3.1 Little's law
 
-和 [00 关 §4.5](../00_transpose/README.md#45-little-定律需要多少数据在路上) 一样：
+As in [lab 00 §4.5](../00_transpose/README.md#45-littles-law-how-much-data-must-be-in-flight):
 
 ```
-需要的在途字节数 = 需要的带宽 × 延迟
+bytes in flight needed = bandwidth needed × latency
 ```
 
-**需要的带宽**：一个 CTA 每个 K tile 读 `(BM + BN) · BK · 2` 字节、做 `2 · BM · BN · BK` 次浮点运算。BM = BN = 128、BK = 32 时是 16 KB 对 1 MFLOP。B200 上 `mma.sync` 的上限约 1920 FLOP/周期/SM（20 关 §4.1）。一个 SM 上要以这个速度计算，就要每周期供给 `1920 / 64 ≈ 30` 字节，也就是**每个 SM 每 550 个周期左右要读完一个 16 KB 的 tile**。
+**Bandwidth needed**: per K tile, one CTA reads `(BM + BN) · BK · 2` bytes and performs `2 · BM · BN · BK` floating-point operations. With BM = BN = 128 and BK = 32, that is 16 KB for 1 MFLOP. On B200, the `mma.sync` upper bound is about 1920 FLOP/cycle/SM (lab 20 §4.1). For one SM to compute at that rate, it must be fed `1920 / 64 ≈ 30` bytes per cycle, that is, **each SM must finish reading one 16 KB tile about every 550 cycles**.
 
-**延迟**：数据大多来自 L2（4096³ 时 A、B 共 64 MB，能放进 126 MB 的 L2），L2 命中的延迟是几百个周期，未命中要再加上 HBM 的延迟，在 1000 周期量级（这里是估计值，本关不测量）。
+**Latency**: most data comes from L2 (at 4096³, A and B total 64 MB and fit in the 126 MB L2). An L2 hit takes a few hundred cycles; a miss adds HBM latency, on the order of 1000 cycles (this is an estimate; this lab does not measure it).
 
-**结论**：每个 SM 需要大约 `30 B/周期 × 1000 周期 ≈ 30 KB` 在路上，即约两个 16 KB 的 tile。双缓冲每个 CTA 提前一个 tile，SM 上两个 CTA 合起来正好约两个 tile；多一级流水就多一个 tile 的余量。第 7 节的实测会验证这个估计。
+**Conclusion**: each SM needs about `30 B/cycle × 1000 cycles ≈ 30 KB` in flight, about two 16 KB tiles. With double buffering, each CTA is one tile ahead, so two CTAs on an SM together give about two tiles; each extra pipeline stage adds one tile of margin. The measurements in section 7 test this estimate.
 
-### 3.2 group 计数的不变式
+### 3.2 The group-counting invariant
 
-多级流水中，tile t 放在 stage `t % S`。每个线程每“轮”提交一个 commit group，并维持：
+In a multistage pipeline, tile t goes into stage `t % S`. Each thread commits one commit group per "round" and maintains:
 
-> **第 g 个 commit group 恰好包含 tile g 的拷贝**（tile 不存在时是空 group）。
+> **Commit group g contains exactly the copies of tile g** (an empty group when tile g does not exist).
 
-于是“tile t 已到达”等价于“前 t+1 个 group 都已完成”。若此时一共提交了 `t + S − 1` 个 group（tile 0 .. t+S−2），允许 `S − 2` 个未完成，正好保证 tile 0..t 都完成了。这就是 `wait_group<S − 2>` 的来历。空 group 的作用是保证 K 循环末尾的计数不变：否则最后几轮的 `wait_group<S−2>` 会放过还没到的 tile。
+So "tile t has arrived" is equivalent to "the first t+1 groups have completed". If `t + S − 1` groups have been committed at that point (tiles 0 .. t+S−2), allowing `S − 2` of them to be pending guarantees exactly that tiles 0..t are complete. This is where `wait_group<S − 2>` comes from. The empty groups keep the count invariant at the end of the K loop: without them, `wait_group<S−2>` in the last few rounds would let through tiles that have not arrived.
 
-| S | prologue 提交 | 循环中每轮 wait | 同时在路上的 tile |
+| S | prologue commits | wait in each loop round | tiles in flight at once |
 |---|---|---|---|
-| 2（双缓冲） | tile 0 | `wait_group 0` | 1 |
+| 2 (double buffering) | tile 0 | `wait_group 0` | 1 |
 | 3 | tile 0, 1 | `wait_group 1` | 2 |
 | 4 | tile 0, 1, 2 | `wait_group 2` | 3 |
 
-## 4. 硬件与指令
+## 4. Hardware and instructions
 
 ### 4.1 `cp.async`
 
@@ -72,74 +72,74 @@ FlashAttention-2 的实现（`third_party/flash-attention/csrc/flash_attn/src/fl
 cp.async.cg.shared.global [dst], [src], 16, src_size;
 ```
 
-| 部分 | 含义 |
+| Part | Meaning |
 |---|---|
-| `cp.async` | 从 global 拷贝到 shared，**不经过寄存器**，发出后线程立即继续执行（SASS 中是 `LDGSTS`） |
-| `.cg` | 只缓存在 L2（绕过 L1），只允许 cp-size = 16。另一种是 `.ca`（也缓存在 L1），cp-size 可以是 4、8、16 |
-| `16` | 拷贝大小（cp-size），只能是 4、8、16；`.cg` 只能是 16。`dst`、`src` 都要按大小对齐 |
-| `src_size` | 可选。只从 `src` 读 `src_size` 个字节，剩下的 `16 − src_size` 个字节**填零** |
+| `cp.async` | Copies from global to shared **without going through registers**; the thread continues right after issuing it (`LDGSTS` in SASS) |
+| `.cg` | Caches only in L2 (bypasses L1); only cp-size = 16 is allowed. The other option is `.ca` (also caches in L1), with cp-size 4, 8 or 16 |
+| `16` | The copy size (cp-size): only 4, 8 or 16; `.cg` allows only 16. `dst` and `src` must both be aligned to the size |
+| `src_size` | Optional. Reads only `src_size` bytes from `src` and **fills the remaining `16 − src_size` bytes with zeros** |
 
-本关用 `src_size = valid ? 16 : 0` 处理尾部：越界的 chunk 写成 16 个零字节，对点积没有贡献，而且一个字节都不读。`src` 仍然要是一个“看起来合法”的地址，传矩阵的首地址即可。
+This lab uses `src_size = valid ? 16 : 0` to handle the tail: an out-of-bounds chunk is written as 16 zero bytes, which contribute nothing to the dot product, and not a single byte is read. `src` must still be a "legal-looking" address; passing the matrix base address works.
 
-为什么要求 `K % 8 == 0`？一个 16 字节 chunk 是 8 个 BF16。K 是 8 的倍数时，每行起点都 16 字节对齐，而且每个 chunk 要么完全在行内、要么完全在行外，用 0 或 16 的 `src_size` 就够了。（支持任意 K 需要按字节数填 `src_size` 并处理不对齐的行，本关不做。）
+Why require `K % 8 == 0`? A 16-byte chunk is 8 BF16 values. When K is a multiple of 8, every row starts 16-byte aligned, and each chunk is either fully inside the row or fully outside it, so a `src_size` of 0 or 16 is enough. (Supporting any K would require filling `src_size` with a byte count and handling misaligned rows; this lab does not do that.)
 
-### 4.2 commit group 与 wait_group
+### 4.2 commit group and wait_group
 
 ```
-cp.async.commit_group;      把本线程此前提交、尚未分组的 cp.async 打包成一个 group
-cp.async.wait_group N;      等到本线程最近的 group 中最多还有 N 个没完成
+cp.async.commit_group;      packs this thread's earlier, not-yet-grouped cp.async ops into one group
+cp.async.wait_group N;      waits until at most N of this thread's most recent groups are pending
 cp.async.wait_all;          = commit_group + wait_group 0
 ```
 
 ```
-线程 t 的时间线：
+Timeline of thread t:
   cp.async × 8 ─commit─┐ cp.async × 8 ─commit─┐ cp.async × 8 ─commit─┐
                   group 0                group 1                group 2
-  wait_group 1  ⇒  group 0 完成（group 1、2 可以未完成）
+  wait_group 1  ⇒  group 0 complete (groups 1 and 2 may still be pending)
 ```
 
-**只管本线程。** `wait_group` 返回时，本线程发出的拷贝已经写进 shared memory、对本线程可见；**其他线程**发出的拷贝不一定完成，也不一定可见。
+**It covers only the calling thread.** When `wait_group` returns, the copies issued by this thread are written to shared memory and visible to this thread; copies issued by **other threads** are not necessarily complete or visible.
 
-### 4.3 每个 `__syncthreads()` 保护两件事
+### 4.3 Each `__syncthreads()` protects two things
 
-流水循环中每个 K tile 只有一个 `__syncthreads()`，放在 `wait_group` 之后、发出下一批拷贝之前。它同时保证：
+The pipeline loop has only one `__syncthreads()` per K tile, placed after `wait_group` and before the next batch of copies is issued. It guarantees two things at once:
 
-1. **RAW（先写后读）**：所有线程对 tile t 的拷贝都已完成并可见，任何 warp 都可以 `ldmatrix` tile t；
-2. **WAR（先读后写）**：所有 warp 都已经算完上一轮的 tile（t−1），它所在的 stage 可以被覆盖。
+1. **RAW (read after write)**: every thread's copies of tile t are complete and visible, so any warp may `ldmatrix` tile t;
+2. **WAR (write after read)**: every warp has finished computing the previous round's tile (t−1), so its stage may be overwritten.
 
-| 去掉了什么 | 后果 |
+| What is removed | Consequence |
 |---|---|
-| `wait_group` | barrier 处拷贝还没完成，`ldmatrix` 读到旧数据 |
-| `__syncthreads()` | 只等到了自己的拷贝；别的线程的 chunk 可能没到；还可能覆盖别的 warp 正在读的 stage |
-| barrier 放在 issue 之后 | WAR 被破坏：新的拷贝可能覆盖一个还有 warp 在读的 stage |
+| `wait_group` | Copies are not complete at the barrier; `ldmatrix` reads stale data |
+| `__syncthreads()` | Only this thread's own copies are waited for; other threads' chunks may not have arrived, and a stage that another warp is still reading may be overwritten |
+| Barrier placed after the issue | WAR is broken: new copies may overwrite a stage that a warp is still reading |
 
-这类错误往往只在部分运行中出现。`./lab sanitize 21 --case aligned --tool racecheck` 能发现 shared memory 上的竞争。
+These bugs often show up only in some runs. `./lab sanitize 21 --case aligned --tool racecheck` can find races on shared memory.
 
-### 4.4 超过 48 KB 的 shared memory
+### 4.4 Shared memory above 48 KB
 
-静态 `__shared__` 数组最多 48 KB。更大的 buffer 用动态 shared memory（`extern __shared__`，大小作为 `<<<grid, block, smem>>>` 的第三个参数），并且要在 launch 前声明上限：
+A static `__shared__` array is limited to 48 KB. For larger buffers, use dynamic shared memory (`extern __shared__`, with the size as the third argument of `<<<grid, block, smem>>>`), and declare the limit before launch:
 
 ```cpp
 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
 ```
 
-B200 每个 SM 有 228 KB shared memory，单个 CTA 最多 227 KB。shared memory 和 L1 共用每个 SM 上的同一块存储，比例（carveout）由驱动按 kernel 选择。骨架中的 `allow_smem` 同时设置了 `cudaFuncAttributePreferredSharedMemoryCarveout = cudaSharedmemCarveoutMaxShared`：在本机上，不设置时 3–4 级流水的版本偶尔出现慢一倍的运行（像是每个 SM 只放下了一个 CTA），设置后消失。这部分已经写好。
+B200 has 228 KB of shared memory per SM, and a single CTA can use at most 227 KB. Shared memory and L1 share the same storage on each SM; the driver picks the split (the carveout) per kernel. The skeleton's `allow_smem` also sets `cudaFuncAttributePreferredSharedMemoryCarveout = cudaSharedmemCarveoutMaxShared`: on this machine, without it, the 3–4 stage versions occasionally had runs that were twice as slow (as if only one CTA fit per SM); with it, those runs disappeared. This part is already written.
 
-### 4.5 常见误用
+### 4.5 Common misuses
 
-| 误用 | 后果 |
+| Misuse | Consequence |
 |---|---|
-| asm 没有 `"memory"` clobber | 编译器可能把普通的 shared memory 读写移到 `wait_group` 前面 |
-| 越界 chunk 用 `if (ok) cp_async(...)` 跳过 | shared memory 里留着上一个 tile 的旧值，尾部结果错 |
-| 越界时 `src` 仍指向算出来的越界地址 | `src_size = 0` 时不会读，但越界地址可能落在别的分配甚至未映射的页上；传矩阵首地址最稳妥 |
-| `wait_group` 的参数用变量 | 编译失败：N 必须是立即数（模板参数 + `"n"` 约束） |
-| K 很短时 prologue 没有提交空 group | `wait_group<S−2>` 在最后几轮放过还没到的 tile |
+| asm without a `"memory"` clobber | The compiler may move ordinary shared memory reads and writes before `wait_group` |
+| Skipping out-of-bounds chunks with `if (ok) cp_async(...)` | Shared memory keeps stale values from the previous tile; the tail results are wrong |
+| `src` still points to the computed out-of-bounds address | With `src_size = 0` nothing is read, but the out-of-bounds address may fall in another allocation or even an unmapped page; passing the matrix base address is safest |
+| A variable as the `wait_group` argument | Compile error: N must be an immediate (template parameter + `"n"` constraint) |
+| No empty groups committed in the prologue when K is short | `wait_group<S−2>` lets through tiles that have not arrived in the last few rounds |
 
-## 5. 调度设计
+## 5. Schedule design
 
-### 5.1 步骤 1：双缓冲
+### 5.1 Step 1: double buffering
 
-CTA tile 与 20 关相同：128×128，BK = 32，8 个 warp（2×4，每个 64×32），shared tile 用 20 关的 4-chunk swizzle。每个 stage 16 KB，两个 stage 32 KB。
+The CTA tile is the same as in lab 20: 128×128, BK = 32, 8 warps (2×4, each 64×32), and the shared tile uses lab 20's 4-chunk swizzle. Each stage is 16 KB; two stages are 32 KB.
 
 ```
 prologue:  issue(tile 0 → stage 0); commit
@@ -147,54 +147,54 @@ t = 0:     wait 0; sync │ issue(tile 1 → stage 1); commit │ compute(stage 
 t = 1:     wait 0; sync │ issue(tile 2 → stage 0); commit │ compute(stage 1)
 t = 2:     wait 0; sync │ issue(tile 3 → stage 1); commit │ compute(stage 0)
                  ▲                                              │
-                 └── tile t+1 的拷贝与 compute(t) 同时进行 ───────┘
+                 └── copy of tile t+1 overlaps compute(t) ──────┘
 ```
 
-在 t 轮覆盖 stage `(t+1) % 2` 是安全的：它上一次装的是 tile t−1，而所有 warp 在 t 轮的 barrier 之前已经算完了 tile t−1（§4.3 的 WAR）。
+Overwriting stage `(t+1) % 2` in round t is safe: it last held tile t−1, and all warps finished computing tile t−1 before the barrier of round t (the WAR case of §4.3).
 
-### 5.2 步骤 2：S 级环形 buffer
+### 5.2 Step 2: S-stage ring buffer
 
 ```
-prologue:  for s in 0 .. S−2:  issue(tile s → stage s)（若存在）; commit
+prologue:  for s in 0 .. S−2:  issue(tile s → stage s) (if it exists); commit
 for t in 0 .. k_tiles−1:
     wait_group<S−2>; __syncthreads()
-    issue(tile t+S−1 → stage (t+S−1) % S)（若存在）; commit   ← 可能是空 group
+    issue(tile t+S−1 → stage (t+S−1) % S) (if it exists); commit   ← may be an empty group
     compute(stage t % S)
 ```
 
-stage `(t+S−1) % S = (t−1) % S` 上一次装的是 tile t−1，理由同上。S = 3 时 shared memory 为 48 KB，每个 SM 可以放两个 CTA。
+Stage `(t+S−1) % S = (t−1) % S` last held tile t−1; the same argument applies. With S = 3, shared memory is 48 KB, and two CTAs fit per SM.
 
-### 5.3 步骤 3：调参
+### 5.3 Step 3: tuning
 
-| 改动 | 目的 |
+| Change | Purpose |
 |---|---|
-| BK = 32 → 64 | 每行 128 字节（8 个 chunk），用 `swizzle_chunk<8>`；每个 tile 的计算量翻倍，`__syncthreads()` 和循环开销减半 |
-| 8 个 64×32 warp → 4 个 64×64 warp | 每个 k16：4 条 A 的 `ldmatrix` + 4 条 B 的 `ldmatrix` 喂 32 条 mma（原来 6 条喂 16 条），shared memory 读取量相对计算减少 1/3 |
-| 3 个 stage × 32 KB = 96 KB | 两个 CTA 共用一个 SM（192 KB） |
-| 分组光栅化 | 让同时运行的 CTA 共享 A、B tile，减少 L2 未命中 |
+| BK = 32 → 64 | 128 bytes per row (8 chunks), using `swizzle_chunk<8>`; the work per tile doubles, and `__syncthreads()` and loop overhead are halved |
+| 8 warps of 64×32 → 4 warps of 64×64 | Per k16: 4 A `ldmatrix` + 4 B `ldmatrix` feed 32 mma (before: 6 feed 16); shared memory reads relative to compute drop by 1/3 |
+| 3 stages × 32 KB = 96 KB | Two CTAs share one SM (192 KB) |
+| Grouped rasterization | CTAs that run at the same time share A and B tiles, which reduces L2 misses |
 
-64×64 的 warp tile 有 128 个 float 累加器，答案用了约 254 个寄存器。一个 CTA 128 个线程，两个 CTA 共 65536 个寄存器，正好是一个 SM 的寄存器文件。
+A 64×64 warp tile has 128 float accumulators; the reference solution uses about 254 registers. A CTA has 128 threads, so two CTAs use 65536 registers, exactly one SM's register file.
 
-**光栅化**：`blockIdx.x` 是一维的，`tile_coords` 把它映射为 (tm, tn)。按行映射时，同时运行的约 296 个 CTA（148 SM × 2）覆盖 C 的若干整行，需要所有 B tile。分组映射先沿 M 走 kGroup 行，再换列：
+**Rasterization**: `blockIdx.x` is one-dimensional, and `tile_coords` maps it to (tm, tn). With a row-major mapping, the ≈296 CTAs that run at the same time (148 SMs × 2) cover several full rows of C and need every B tile. A grouped mapping first walks kGroup rows along M, then moves to the next column:
 
 ```
-按行（kGroup = 1）              分组（kGroup = 4，tiles_n = 4）
+Row-major (kGroup = 1)          Grouped (kGroup = 4, tiles_n = 4)
 pid: 0  1  2  3                 pid: 0  4  8 12
      4  5  6  7                      1  5  9 13
      8  9 10 11                      2  6 10 14
     12 13 14 15                      3  7 11 15
-                                    16 20 ...       ← 下一组
+                                    16 20 ...       ← next group
 ```
 
-上图只是示意，取 kGroup = 4 是为了画得下；答案用 `kGroupM = 8`。最后一组可能不满 kGroup 行（`raster` case：11 行 tile，kGroup = 8 时最后一组 3 行）。
+The figure is only an illustration; kGroup = 4 keeps it small enough to draw. The reference solution uses `kGroupM = 8`. The last group may have fewer than kGroup rows (`raster` case: 11 rows of tiles; with kGroup = 8 the last group has 3 rows).
 
-## 6. 分步练习
+## 6. Step-by-step exercises
 
-### 步骤 1 · TODO(1)：cp.async 与双缓冲
+### Step 1 · TODO(1): cp.async and double buffering
 
-- TODO(1a)：三个封装 `cp_async_16_zfill`、`cp_async_commit`、`cp_async_wait_group<N>`（§4.1、§4.2）；
-- TODO(1b)：`issue_tile`：与 20 关 `load_tile` 相同的线程分工，但用 `cp_async_16_zfill` 直接写 shared memory（§4.1 的尾部处理）；
-- TODO(1c)：`gemm_double_buffer` 的 prologue 与 K 循环（§5.1）。
+- TODO(1a): the three wrappers `cp_async_16_zfill`, `cp_async_commit`, `cp_async_wait_group<N>` (§4.1, §4.2);
+- TODO(1b): `issue_tile`: the same thread mapping as lab 20's `load_tile`, but writing shared memory directly with `cp_async_16_zfill` (the tail handling of §4.1);
+- TODO(1c): the prologue and K loop of `gemm_double_buffer` (§5.1).
 
 ```bash
 ./lab check 21 --step 1
@@ -202,122 +202,122 @@ pid: 0  1  2  3                 pid: 0  4  8 12
 ./lab sanitize 21 --step 1 --case aligned --tool racecheck
 ```
 
-### 步骤 2 · TODO(2)：多级环形 buffer
+### Step 2 · TODO(2): multistage ring buffer
 
-实现 `gemm_multistage` 的 prologue 与 K 循环（§3.2、§5.2）。`run()` 用 S = 3 调用它；同一个 kernel 在步骤 3 中也会用到。
+Implement the prologue and K loop of `gemm_multistage` (§3.2, §5.2). `run()` calls it with S = 3; step 3 uses the same kernel.
 
 ```bash
 ./lab check 21 --step 2
 ./lab bench 21 --step 2
 ```
 
-试着把 `Step2` 的 stage 数改成 2、4，看 `short_k`、`tiny` 是否仍然通过、性能怎样变化，再改回 3。
+Try changing the stage count of `Step2` to 2 and 4. Check whether `short_k` and `tiny` still pass and how performance changes, then change it back to 3.
 
-### 步骤 3 · TODO(3)：调参
+### Step 3 · TODO(3): tuning
 
-- TODO(3a)：`tile_coords` 中的分组光栅化（§5.3）；
-- TODO(3b)：选择 `Step3` 的配置。从下表开始实验，每次改完运行 `check` 再 `bench`：
+- TODO(3a): grouped rasterization in `tile_coords` (§5.3);
+- TODO(3b): choose the configuration of `Step3`. Start your experiments from the table below; after each change, run `check`, then `bench`:
 
-| 实验 | `Config<BM, BN, BK, WarpsM, WarpsN, Stages>` |
+| Experiment | `Config<BM, BN, BK, WarpsM, WarpsN, Stages>` |
 |---|---|
-| 起点（= 步骤 2） | `128, 128, 32, 2, 4, 3` |
-| 更大的 K tile | `128, 128, 64, 2, 4, 3` |
-| 更大的 warp tile | `128, 128, 64, 2, 2, 3` |
-| 更大的 CTA tile | `128, 256, 32, 2, 4, 3` |
-| 更多 stage | `128, 128, 64, 2, 2, 4` |
+| Starting point (= step 2) | `128, 128, 32, 2, 4, 3` |
+| Larger K tile | `128, 128, 64, 2, 4, 3` |
+| Larger warp tile | `128, 128, 64, 2, 2, 3` |
+| Larger CTA tile | `128, 256, 32, 2, 4, 3` |
+| More stages | `128, 128, 64, 2, 2, 4` |
 
-`Step3` 的默认配置就是步骤 2 的配置，所以写完 TODO(3a) 后 `./lab check 21 --step 3` 就会通过。通过只说明光栅化写对了；这一步的重点是调参：比较各配置的 `bench`，用 profile 解释快慢。
+The default configuration of `Step3` is the step 2 configuration, so `./lab check 21 --step 3` passes as soon as TODO(3a) is written. Passing only shows that the rasterization is correct; the point of this step is tuning: compare `bench` across configurations and use profiles to explain what is fast and what is slow.
 
 ```bash
 ./lab check 21
 ./lab bench 21 --step 3 --case square
 ./lab bench 21 --step 3 --case wide
-./lab sass 21          # 寄存器数、有没有 spill（LOCAL > 0）
+./lab sass 21          # register count, any spill (LOCAL > 0)
 ./lab profile 21 --step 3 --case wide
 ```
 
-把 `kGroupM` 改成 1 再 profile 一次，比较 `dram__bytes_read.sum` 和 `lts__t_sector_hit_rate.pct`。
+Change `kGroupM` to 1, profile again, and compare `dram__bytes_read.sum` and `lts__t_sector_hit_rate.pct`.
 
-### 常见错误
+### Common mistakes
 
-| 现象 | 可能原因 |
+| Symptom | Likely cause |
 |---|---|
-| `tail` 或 `tiny` 失败，错误值像是别处的数据 | 越界 chunk 没有填零（§4.5） |
-| 结果偶尔错、每次不一样 | 少了 `wait_group` 或 `__syncthreads()`，或 barrier 位置不对（§4.3）；用 racecheck |
-| `short_k`、`tiny` 失败，其他通过 | prologue 或尾部的 group 计数不对：K 很短时也要每轮 commit |
-| `aligned` 失败、`tail` 通过 | stage 下标算错（`t % S`），环形 buffer 绕圈后读到旧 tile |
-| 编译错误 `asm operand must be an immediate` | `wait_group` 的 N 用了运行时变量 |
-| `raster` 失败（只在步骤 3） | 最后一组不满 kGroup 行时 `tm`、`tn` 计算错误 |
-| `too many resources requested for launch` | 配置的寄存器 × 线程数或 shared memory 超出上限 |
+| `tail` or `tiny` fails, and the wrong values look like data from elsewhere | Out-of-bounds chunks are not zero-filled (§4.5) |
+| Results are occasionally wrong, different on each run | Missing `wait_group` or `__syncthreads()`, or the barrier is in the wrong place (§4.3); use racecheck |
+| `short_k` and `tiny` fail, others pass | Group counting in the prologue or tail is wrong: commit every round even when K is short |
+| `aligned` fails, `tail` passes | Wrong stage index (`t % S`); after the ring buffer wraps around, a stale tile is read |
+| Compile error `asm operand must be an immediate` | The N of `wait_group` is a runtime variable |
+| `raster` fails (step 3 only) | `tm` and `tn` are computed wrong when the last group has fewer than kGroup rows |
+| `too many resources requested for launch` | Registers × threads or shared memory of the configuration exceed the limit |
 
-## 7. 性能
+## 7. Performance
 
-本机实测（CUDA Graph；`vs cublas` 越大越好；“占 mma.sync 上限”是 TFLOP/s 除以 20 关 §4.1 测得的 560 TFLOP/s）：
+Measured on this machine (CUDA Graph; larger `vs cublas` is better; "% of mma.sync upper bound" is TFLOP/s divided by the 560 TFLOP/s measured in lab 20 §4.1):
 
-| 版本 | `square` `vs cublas` | `wide` `vs cublas` | 占 mma.sync 上限 |
+| Version | `square` `vs cublas` | `wide` `vs cublas` | % of mma.sync upper bound |
 |---|---|---|---|
-| 20 关步骤 3（同步搬运） | ≈ 0.17× | ≈ 0.17× | ≈ 45% |
-| 步骤 1：双缓冲 | ≈ 0.24× | ≈ 0.21× | ≈ 60% |
-| 步骤 2：3 级流水 | ≈ 0.24× | ≈ 0.21× | ≈ 60% |
-| 步骤 3：调参后 | ≈ 0.28× | ≈ 0.26× | ≈ 72% |
-| mma.sync 上限 | ≈ 0.39× | ≈ 0.36× | 100% |
+| Lab 20 step 3 (synchronous loads) | ≈ 0.17× | ≈ 0.17× | ≈ 45% |
+| Step 1: double buffering | ≈ 0.24× | ≈ 0.21× | ≈ 60% |
+| Step 2: 3-stage pipeline | ≈ 0.24× | ≈ 0.21× | ≈ 60% |
+| Step 3: tuned | ≈ 0.28× | ≈ 0.26× | ≈ 72% |
+| mma.sync upper bound | ≈ 0.39× | ≈ 0.36× | 100% |
 
-步骤 3 达到 cuBLAS 的 0.22 倍以上（mma.sync 上限的约 55%）就说明机制成立。`wide` 上我们的 kernel 每次运行之间有约 ±10% 的波动（cuBLAS 很稳定），请多跑几次、看中位数。
+If step 3 reaches 0.22× of cuBLAS or more (about 55% of the mma.sync upper bound), the mechanism works. On `wide`, our kernel varies by about ±10% from run to run (cuBLAS is stable); run it several times and look at the median.
 
-**读这张表**：
+**Reading this table**:
 
-- **步骤 1 的提升最大**：搬运和计算第一次重叠。
-- **步骤 2 几乎没有变化**：和 §3.1 的估计一致。双缓冲时每个 SM 上两个 CTA 各有一个 tile 在路上，已经接近所需的在途量。多级流水在“每个 SM 只能放一个 CTA”或“延迟更长”时才明显，例如部分 3 的 TMA 流水。
-- **步骤 3 的提升来自 tile 形状**，不是光栅化。步骤 3 配置实验（`square`，本机）：
+- **Step 1 gives the largest gain**: loads and compute overlap for the first time.
+- **Step 2 changes almost nothing**: this matches the §3.1 estimate: with double buffering, each of the two CTAs on an SM has one tile in flight, which is already close to the amount needed. Multistage pipelines matter when "only one CTA fits per SM" or "latency is longer", for example the TMA pipelines of Part 3.
+- **The step 3 gain comes from the tile shape**, not from rasterization. Step 3 configuration experiments (`square`, this machine):
 
-| 配置 | `vs cublas` |
+| Configuration | `vs cublas` |
 |---|---|
-| `128,128,32, 2,4, 3`（起点） | ≈ 0.24× |
+| `128,128,32, 2,4, 3` (starting point) | ≈ 0.24× |
 | `128,128,64, 2,4, 3` | ≈ 0.27× |
-| `128,128,64, 2,2, 3`（答案） | ≈ 0.28× |
+| `128,128,64, 2,2, 3` (reference solution) | ≈ 0.28× |
 | `128,256,32, 2,4, 3` | ≈ 0.19× |
-| `128,128,64, 2,2, 4`（128 KB，每 SM 一个 CTA） | ≈ 0.23× |
+| `128,128,64, 2,2, 4` (128 KB, one CTA per SM) | ≈ 0.23× |
 
-`128×256` 的 CTA 每个线程要 170 个寄存器，每个 SM 只放得下一个 CTA（8 个 warp），没有别的 CTA 来填补它的空闲；4 级 64 宽的 stage 也一样。**驻留的 warp 数和流水深度一起决定延迟能否被隐藏。**
+A `128×256` CTA needs 170 registers per thread, so only one CTA (8 warps) fits per SM, and no other CTA fills its idle time; the same holds for a 64-wide, 4-stage pipeline. **The number of resident warps and the pipeline depth together decide whether latency can be hidden.**
 
-**光栅化**（`wide`，`./lab profile`，答案配置）：
+**Rasterization** (`wide`, `./lab profile`, reference configuration):
 
-| 指标 | `kGroupM = 1` | `kGroupM = 8` |
+| Metric | `kGroupM = 1` | `kGroupM = 8` |
 |---|---|---|
 | `dram__bytes_read.sum` | ≈ 716 MB | ≈ 556 MB |
 | `lts__t_sector_hit_rate.pct` | ≈ 79% | ≈ 86% |
 | `dram__throughput` | ≈ 5% | ≈ 4% |
-| 时间 | 相同 | 相同 |
+| Time | same | same |
 
-分组让 DRAM 读取减少约 22%，但时间不变：HBM 只用了约 5% 的带宽，kernel 受限于 Tensor Core（`sm__pipe_tensor_cycles_active` 约 79%）。优化要针对真正的瓶颈；等到部分 3 的 kernel 快 3–4 倍时，L2 命中率才会变得重要。
+Grouping cuts DRAM reads by about 22%, but the time does not change: HBM uses only about 5% of its bandwidth, and the kernel is bound by the Tensor Cores (`sm__pipe_tensor_cycles_active` about 79%). Optimize the real bottleneck; the L2 hit rate starts to matter only when the Part 3 kernels are 3–4× faster.
 
-剩下约 30% 到 `mma.sync` 上限的差距，主要来自每个 tile 的 `__syncthreads()`、`ldmatrix` 与 mma 之间的依赖、以及 1024 个 CTA 在 296 个位置上的波次不均（3.46 波）。部分 3 用 TMA + mbarrier 去掉了线程搬运和 CTA 级 barrier，用 `tcgen05` 跨过 `mma.sync` 的上限。
+The remaining ≈30% gap to the `mma.sync` upper bound comes mainly from the `__syncthreads()` per tile, the dependence between `ldmatrix` and mma, and the uneven waves of 1024 CTAs over 296 slots (3.46 waves). Part 3 removes thread-driven loads and CTA-level barriers with TMA + mbarrier, and goes past the `mma.sync` upper bound with `tcgen05`.
 
-## 8. 自测问题
+## 8. Self-check questions
 
-1. 双缓冲循环中，如果把 `__syncthreads()` 移到 `issue_stage` 之后、`compute_stage` 之前，会出什么问题？
-2. S = 4 时，循环第 t 轮的 `wait_group<2>` 返回后，哪些 tile 保证已经到达本线程？哪些可能还在路上？
-3. K = 8、S = 3 时（`tiny` case），一共提交几个 group？其中几个是空的？
-4. 为什么越界 chunk 要用 `src_size = 0` 写零，而不是跳过拷贝？
-5. 按 §3.1 的方法估算：如果把 B200 换成 `tcgen05` 的吞吐（约为 `mma.sync` 的 4 倍），同样 128×128×32 的 tile 每个 SM 需要多少在途数据？
+1. In the double-buffered loop, what goes wrong if you move `__syncthreads()` after `issue_stage` and before `compute_stage`?
+2. With S = 4, after `wait_group<2>` returns in loop round t, which tiles are guaranteed to have arrived for this thread? Which may still be in flight?
+3. With K = 8 and S = 3 (the `tiny` case), how many groups are committed in total? How many of them are empty?
+4. Why must an out-of-bounds chunk be written as zeros with `src_size = 0` instead of skipping the copy?
+5. Estimate with the method of §3.1: if B200 ran at `tcgen05` throughput (about 4× that of `mma.sync`), how much data in flight per SM would the same 128×128×32 tile need?
 
 <details>
-<summary>参考答案</summary>
+<summary>Answers</summary>
 
-1. WAR 被破坏：issue 写的是上一轮的 stage，此时可能还有 warp 在 `ldmatrix` 那个 stage（它还没走到 barrier）。RAW 仍然成立，但新 tile 会覆盖别人正在读的数据。
-2. 已提交 tile 0 .. t+2 共 t+3 个 group，最多 2 个未完成，所以 tile 0 .. t 已到达；tile t+1、t+2 可能还在路上。注意这只是本线程自己的拷贝，所以后面要有 `__syncthreads()`。
-3. k_tiles = 1。prologue 提交 2 个 group（tile 0 和一个空的 tile 1），循环中 t = 0 再提交 1 个（tile 2，空）。共 3 个，2 个是空的。
-4. shared memory 的 stage 是复用的，跳过拷贝会留下上一个 tile 的数据，参与点积就错了。（第一次使用时则是未初始化的值。）
-5. 每周期要供给的字节数变成约 4 倍，约 120 B/周期/SM；延迟不变（约 1000 周期）时需要约 120 KB 在路上，即 7–8 个 16 KB 的 tile。这就是部分 3 用更大的 tile、更深的流水（TMA 多级 buffer）的原因。
+1. WAR is broken: the issue writes to the previous round's stage, and some warp may still be running `ldmatrix` on that stage (it has not reached the barrier yet). RAW still holds, but the new tile overwrites data that another warp is reading.
+2. Tiles 0 .. t+2 have been committed, t+3 groups in total, with at most 2 pending, so tiles 0 .. t have arrived; tiles t+1 and t+2 may still be in flight. This covers only this thread's own copies, which is why `__syncthreads()` must follow.
+3. k_tiles = 1, so the prologue commits 2 groups (tile 0 and an empty tile 1), and the loop commits 1 more at t = 0 (tile 2, empty). 3 in total, 2 of them empty.
+4. Shared memory stages are reused. Skipping the copy leaves the previous tile's data, which then enters the dot product and gives wrong results. (On first use, it would be uninitialized values.)
+5. The bytes needed per cycle grow about 4×, to about 120 B/cycle/SM. With the same latency (about 1000 cycles), about 120 KB must be in flight, that is, 7–8 tiles (16 KB each). This is why Part 3 uses larger tiles and deeper pipelines (TMA multistage buffers).
 </details>
 
-## 9. 延伸阅读
+## 9. Further reading
 
-- PTX ISA：[Data Movement and Conversion Instructions: cp.async](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async)，以及同节的 `cp.async.commit_group`、`cp.async.wait_group`
-- CUDA C++ Programming Guide：[Asynchronous Data Copies](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/async-copies.html)（`cuda::memcpy_async` 是同一硬件的 C++ 接口）；[Shared Memory 与 carveout](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory)
-- Vasily Volkov，*Understanding Latency Hiding on GPUs*（2016）：Little 定律与占用率
-- 上游源码（`third_party/` 中固定版本）：
-  - `third_party/cutlass/include/cute/arch/copy_sm80.hpp`：`SM80_CP_ASYNC_CACHEGLOBAL_ZFILL`，即本关的 `cp_async_16_zfill`；
-  - `third_party/cutlass/include/cutlass/gemm/threadblock/mma_multistage.h`：CUTLASS 2.x 的多级流水 GEMM 主循环；
-  - `third_party/cutlass/include/cutlass/gemm/threadblock/threadblock_swizzle.h`：CTA 光栅化；
-  - `third_party/flash-attention/csrc/flash_attn/src/flash_fwd_kernel.h`：FA2 前向中 K/V 的 `cp_async_fence` / `cp_async_wait<1>` 预取。
+- PTX ISA: [Data Movement and Conversion Instructions: cp.async](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async), plus `cp.async.commit_group` and `cp.async.wait_group` in the same section
+- CUDA C++ Programming Guide: [Asynchronous Data Copies](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/async-copies.html) (`cuda::memcpy_async` is the C++ interface to the same hardware); [Shared Memory and carveout](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory)
+- Vasily Volkov, *Understanding Latency Hiding on GPUs* (2016): Little's law and occupancy
+- Upstream source (pinned versions in `third_party/`):
+  - `third_party/cutlass/include/cute/arch/copy_sm80.hpp`: `SM80_CP_ASYNC_CACHEGLOBAL_ZFILL`, the equivalent of this lab's `cp_async_16_zfill`;
+  - `third_party/cutlass/include/cutlass/gemm/threadblock/mma_multistage.h`: the multistage pipelined GEMM main loop of CUTLASS 2.x;
+  - `third_party/cutlass/include/cutlass/gemm/threadblock/threadblock_swizzle.h`: CTA rasterization;
+  - `third_party/flash-attention/csrc/flash_attn/src/flash_fwd_kernel.h`: the K/V prefetch with `cp_async_fence` / `cp_async_wait<1>` in the FA2 forward pass.

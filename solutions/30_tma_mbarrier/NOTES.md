@@ -1,42 +1,42 @@
-# 30_tma_mbarrier 答案说明
+# 30_tma_mbarrier solution notes
 
-## 设计选择
+## Design choices
 
-- **支持域**：FP32，`rows % 4 == 0`、`cols % 4 == 0`。这是 TMA 的硬性要求：x 和 y 的行距（`cols·4`、`rows·4` 字节）都必须是 16 的倍数。尾部 tile 完全交给 TMA：load 越界填 0（且计入 tx 字节），store 越界跳过，kernel 中没有边界判断。没有扩展到 BF16：2 字节元素的转置需要在寄存器里重排半字（`prmt`），与本关的机制无关。
-- **原语**：`include/lab/mbarrier.cuh`、`include/lab/tma.cuh`，答案只 `#include` 它们。地址转换函数命名为 `lab::shared_addr`，避免与 `mma_sync.cuh` 的 `lab::smem_u32` 在同一翻译单元中重定义。
-- **step 1**：一个 CTA 一个 32×32 tile，4 个 warp。展示最小协议：init + `fence.mbarrier_init` + `__syncthreads`；`arrive.expect_tx` + TMA load；`try_wait.parity 0`；generic 写 `out` 后每个线程 `fence.proxy.async` 再 `__syncthreads`；TMA store + commit + `wait_group 0`。转置是标量的、有 32 路 bank conflict，故意留给 step 3。
-- **step 2**：persistent。warp 0 中 `elect.sync` 选出的一个线程是 producer；`kRows/32` 个 consumer warp 各管 tile 的 32 行，各自存自己的 32×32 输出 box，用自己的 bulk group 管理两个 out buffer（`wait_group.read 1`）。因此初始化后整个 kernel 没有 CTA 级 barrier：`full[s]`（count 1 + tx）与 `empty[s]`（count = consumer warp 数，每 warp lane 0 在 `__syncwarp` 后 arrive 一次）就是全部同步。producer 首圈等 `empty` 的 parity 1，利用“前一个 phase 视为完成”，与 CUTLASS `PipelineTmaAsync` 相同。
-- **step 3**：x、y 两个 map 都用 128B swizzle；每个 lane 处理两个 4×4 块 `(R, C) = (l%8, (l%8 + l/8 + 4t)%8)`，float4 读、寄存器转置、float4 写。用脚本逐一验证过：每 8 个 lane 一组时，读和写的物理 chunk 两两不同。配置 `Config<256, 2, true>`（box 32×256，2 级，9 warp，128 KB，每 SM 1 个 CTA）。
-- **generic 读 → TMA 覆盖不加 proxy fence**：consumer 读 `in[s]` 后经 mbarrier arrive/wait 交给 producer 再发 TMA，与 CUTLASS 的 consumer_release 一致。generic 写 → TMA store 读则每个写线程都执行 `fence.proxy.async.shared::cta`。
-- **退出前 `bulk_wait_group<0>`**（不是 `.read`）：保守写法，确保 store 全部完成；代价是每个 consumer warp 末尾多等一次写延迟，对 persistent kernel 可以忽略。31 关用 CUTLASS 的 `.read` 写法，讲义两处都有说明。
+- **Supported domain**: FP32, `rows % 4 == 0`, `cols % 4 == 0`. This is a hard TMA requirement: the row pitches of x and y (`cols·4` and `rows·4` bytes) must both be multiples of 16. Tail tiles are left entirely to the TMA: loads fill out-of-bounds elements with 0 (and count them in the tx bytes), stores skip them, and the kernel has no bounds checks. Not extended to BF16: transposing 2-byte elements needs half-word shuffling in registers (`prmt`), which has nothing to do with the mechanism of this lab.
+- **Primitives**: `include/lab/mbarrier.cuh` and `include/lab/tma.cuh`; the solution only `#include`s them. The address conversion function is named `lab::shared_addr` to avoid a redefinition with `lab::smem_u32` of `mma_sync.cuh` in the same translation unit.
+- **step 1**: one 32×32 tile per CTA, 4 warps. Shows the minimal protocol: init + `fence.mbarrier_init` + `__syncthreads`; `arrive.expect_tx` + TMA load; `try_wait.parity 0`; after the generic writes to `out`, every thread does `fence.proxy.async` and then `__syncthreads`; TMA store + commit + `wait_group 0`. The transpose is scalar and has 32-way bank conflicts, deliberately left for step 3.
+- **step 2**: persistent. One thread elected with `elect.sync` in warp 0 is the producer; `kRows/32` consumer warps each own 32 rows of the tile, each stores its own 32×32 output box and manages two out buffers with its own bulk group (`wait_group.read 1`). So after initialization the kernel has no CTA-level barrier: `full[s]` (count 1 + tx) and `empty[s]` (count = number of consumer warps; lane 0 of each warp arrives once after `__syncwarp`) are the only synchronization. The producer waits for parity 1 on `empty` in its first lap, relying on "the previous phase counts as complete", the same as CUTLASS `PipelineTmaAsync`.
+- **step 3**: both maps, x and y, use 128B swizzle; each lane handles two 4×4 blocks `(R, C) = (l%8, (l%8 + l/8 + 4t)%8)`: float4 reads, register transpose, float4 writes. Verified one by one with a script: in groups of 8 lanes, the physical chunks of both reads and writes are pairwise distinct. Configuration `Config<256, 2, true>` (box 32×256, 2 stages, 9 warps, 128 KB, 1 CTA per SM).
+- **No proxy fence for generic read → TMA overwrite**: the consumer reads `in[s]`, hands it to the producer through an mbarrier arrive/wait, and only then is the TMA issued, consistent with CUTLASS's consumer_release. For generic write → TMA store read, every writing thread executes `fence.proxy.async.shared::cta`.
+- **`bulk_wait_group<0>` before exit** (not `.read`): a conservative choice that makes sure all stores complete; the cost is one extra write latency at the end of each consumer warp, negligible for a persistent kernel. Lab 31 uses CUTLASS's `.read` form; the lessons explain this in both places.
 
-## 各 step 的性能（4 号卡，CUDA Graph，每个 step 各测 2–3 次）
+## Performance per step (GPU 4, CUDA Graph, each step measured 2–3 times)
 
-| step | `big` GB/s | `wide` GB/s | `vs copy` | 说明 |
+| step | `big` GB/s | `wide` GB/s | `vs copy` | Notes |
 |---|---|---|---|---|
-| 1 | ≈ 1950 | ≈ 1950 | ≈ 0.30 | bank conflict 限制（每条 LDS 约 31 次额外 wavefront） |
-| 2 | ≈ 2100 | ≈ 2100 | ≈ 0.33 | 同上：流水只换来约 8%，转置本身是瓶颈 |
-| 3（`<128,4>`，早先测量） | ≈ 5600 | ≈ 5600 | ≈ 0.87 | 只加 swizzle + 4×4 转置 |
-| 3（答案 `<256,2>`） | ≈ 6190 | ≈ 6095 | ≈ 0.96 / 0.95 | |
-| `copy`（`y.copy_(x)`） | ≈ 6430 | ≈ 6430 | 1 | 实际 HBM 上限 |
-| `torch`（`y.copy_(x.t())`） | ≈ 1860–1905 | ≈ 1885–1905 | ≈ 0.29 | |
+| 1 | ≈ 1950 | ≈ 1950 | ≈ 0.30 | Limited by bank conflicts (about 31 extra wavefronts per LDS) |
+| 2 | ≈ 2100 | ≈ 2100 | ≈ 0.33 | Same as above: the pipeline gains only about 8%; the transpose itself is the bottleneck |
+| 3 (`<128,4>`, earlier measurement) | ≈ 5600 | ≈ 5600 | ≈ 0.87 | Only swizzle + 4×4 transpose added |
+| 3 (solution `<256,2>`) | ≈ 6190 | ≈ 6095 | ≈ 0.96 / 0.95 | |
+| `copy` (`y.copy_(x)`) | ≈ 6430 | ≈ 6430 | 1 | Practical HBM upper bound |
+| `torch` (`y.copy_(x.t())`) | ≈ 1860–1905 | ≈ 1885–1905 | ≈ 0.29 | |
 
-- 同机 00 关步骤 4 约 5910 GB/s（`vs copy` ≈ 0.92），所以 TMA 在带宽上只领先约 5%（`--cold` 约 2%）。讲义如实写了这一点，把收益表述为“1 个发起线程、9 个 warp 达到同样带宽”。
-- `perf_target` 是 `{"baseline": "copy", "ratio": 0.85}`：`copy` 与答案都受 HBM 限制，比值稳定。`torch` 不适合当门槛：早先一次（3 号卡）测量中 step 1/2 只有 ≈ 1030/1060 GB/s，torch 在约 1.0 与 1.8 TB/s 之间跳动，而 step 3 与 copy 不变。假设（未验证）：那次 GPU 处于较低 SM 时钟，受 bank conflict / 延迟限制的 kernel（torch 转置、step 1/2）随 SM 时钟变慢，HBM 限制的 kernel 不受影响。本次测量时 SM 时钟为 1965 MHz（最大值），各次结果稳定。
-- 调参（`big`）：`<32,4>` ≈ 5180，`<64,4>` ≈ 5650，`<128,2>` ≈ 5720，`<128,3>` ≈ 5720，`<128,4>` ≈ 5630，`<128,6>` ≈ 5600，`<192,3>` ≈ 5790，`<256,2>` ≈ 6200，`<256,3>` ≈ 5770，`<256,4>` ≈ 5750。更多在途字节并不更快；原因未查明。
-- NCU（`big`）：step 1/2 shared load bank conflict ≈ 6.6e7（LDS ≈ 2.1e6 条）；step 3 load ≈ 7.3e5、store ≈ 1.0e6（LDS/STS 各 ≈ 5.2e5 条）。换一种 lane 分配后计数几乎不变，推测残余计数来自与 TMA 访问的仲裁，未证实。
+- On the same machine, lab 00 step 4 reaches about 5910 GB/s (`vs copy` ≈ 0.92), so TMA leads in bandwidth by only about 5% (about 2% with `--cold`). The lesson states this honestly and describes the gain as "1 issuing thread and 9 warps reach the same bandwidth".
+- `perf_target` is `{"baseline": "copy", "ratio": 0.85}`: `copy` and the solution are both HBM-bound, so the ratio is stable. `torch` is not suitable as a gate: in an earlier measurement (GPU 3), step 1/2 reached only ≈ 1030/1060 GB/s and torch jumped between about 1.0 and 1.8 TB/s, while step 3 and copy did not change. Hypothesis (unverified): the GPU was at a lower SM clock that time, and kernels limited by bank conflicts / latency (the torch transpose, step 1/2) slowed down with the SM clock, while HBM-bound kernels were not affected. During this measurement the SM clock was 1965 MHz (the maximum), and all results were stable.
+- Tuning (`big`): `<32,4>` ≈ 5180, `<64,4>` ≈ 5650, `<128,2>` ≈ 5720, `<128,3>` ≈ 5720, `<128,4>` ≈ 5630, `<128,6>` ≈ 5600, `<192,3>` ≈ 5790, `<256,2>` ≈ 6200, `<256,3>` ≈ 5770, `<256,4>` ≈ 5750. More bytes in flight is not faster; the cause was not found.
+- NCU (`big`): step 1/2 shared load bank conflicts ≈ 6.6e7 (LDS ≈ 2.1e6 instructions); step 3 load ≈ 7.3e5, store ≈ 1.0e6 (LDS/STS ≈ 5.2e5 instructions each). A different lane assignment barely changes the counts; the residual counts presumably come from arbitration with TMA accesses, not confirmed.
 
-## 验证
+## Verification
 
-- `./lab check 30 --solution`：3 个 step × 7 个 case 全部精确通过。
-- `selftest 30 --perf` 通过；骨架在 make_plan 处报 `TODO(1)`。
-- compute-sanitizer：memcheck / racecheck / synccheck 在 `tail` 上（3 个 step）、racecheck 在 `ring` 上（step 2、3）均无报错。
-- **sanitizer 的盲区**（实验）：删掉 consumer 的 `fence_proxy_async` 后，测试（`ring` × 3 次）和 racecheck 都通过；删掉 producer 的 `empty` 等待后 `ring` 结果错误，但 racecheck 仍报 0 hazard。racecheck 不跟踪 async proxy（TMA）的 shared memory 访问。讲义 §4.7、自测题 6 用了这个结论。
-- `./lab sass 30 --solution`：无 spill；有 `UTMALDG`、`UTMASTG`、`SYNCS`。
-- 骨架：在临时副本中按 TODO(1)、(2)、(3) 逐步填入，第 n 步只依赖前 n 组 TODO，填完与答案同速；骨架已恢复为原样。
+- `./lab check 30 --solution`: 3 steps × 7 cases all pass exactly.
+- `selftest 30 --perf` passes; the skeleton reports `TODO(1)` at make_plan.
+- compute-sanitizer: memcheck / racecheck / synccheck on `tail` (all 3 steps) and racecheck on `ring` (steps 2, 3) report no errors.
+- **Sanitizer blind spot** (experiment): after deleting the consumer's `fence_proxy_async`, the tests (`ring` × 3 runs) and racecheck all pass; after deleting the producer's wait on `empty`, `ring` gives wrong results, but racecheck still reports 0 hazards. racecheck does not track shared memory accesses by the async proxy (TMA). Lesson §4.7 and self-check question 6 use this finding.
+- `./lab sass 30 --solution`: no spill; contains `UTMALDG`, `UTMASTG`, `SYNCS`.
+- Skeleton: in a temporary copy, TODO(1), (2), (3) were filled in step by step; step n depends only on the first n groups of TODOs, and once filled in it runs as fast as the solution; the skeleton has been restored to its original state.
 
-## 已知局限
+## Known limitations
 
-- 只支持 FP32、行列都是 4 的倍数。
-- tile 顺序是简单的行优先（`t → (t / tiles_c, t % tiles_c)`），没有研究 DRAM 页局部性。
-- 2 级优于 3–4 级的原因没有查明。
+- Only FP32, with rows and columns both multiples of 4.
+- The tile order is simple row-major (`t → (t / tiles_c, t % tiles_c)`); DRAM page locality was not studied.
+- Why 2 stages beat 3–4 stages was not found out.

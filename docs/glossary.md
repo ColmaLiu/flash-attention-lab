@@ -1,122 +1,122 @@
-# 术语表
+# Glossary
 
-按主题分组。“首次出现”指第一次讲解这个概念的关卡；
+Grouped by topic. "First appears" is the lab that first explains the concept.
 
-## 线程与执行
+## Threads and execution
 
-| 术语 | 英文 | 解释 | 首次出现 |
-|---|---|---|---|
-| kernel | kernel | 由 host 发起、在 GPU 上被许多线程同时执行的 `__global__` 函数 | [从零开始](starting-from-zero.md) |
-| host | host | 发起 GPU 工作的 CPU 代码 | [从零开始](starting-from-zero.md) |
-| 线程块 / CTA | thread block / Cooperative Thread Array | 一组共享 shared memory、可以用 `__syncthreads()` 同步的线程。CTA 是 PTX 中的叫法 | [00](../course/00_transpose/README.md) |
-| grid | grid | 一次 launch 的全部 block | [00](../course/00_transpose/README.md) |
-| warp | warp | 32 个线程一组，一起执行同一条指令 | [00](../course/00_transpose/README.md) |
-| lane | lane | 线程在 warp 内的编号 0–31。注意 TMEM 的 “lane” 是另一个意思（见下） | [00](../course/00_transpose/README.md) |
-| warpgroup | warpgroup | 连续 4 个 warp（128 个线程），起始 warp 编号是 4 的倍数 | [32](../course/32_ws_gemm/README.md) |
-| SM | Streaming Multiprocessor | 执行 warp 的硬件单元，B200 有 148 个 | [00](../course/00_transpose/README.md) |
-| SMSP | SM sub-partition | SM 的四分之一，有自己的 warp 调度器 | [20](../course/20_mma_gemm/README.md) |
-| 驻留 / 占用率 | residency / occupancy | 一个 SM 上同时存在的 warp 数（占最多 64 个的比例），受寄存器、shared memory、线程数限制 | [00](../course/00_transpose/README.md) |
-| 波 / 轮 | wave | grid 中的 block 数除以能同时驻留的 block 数。最后一轮不满时有 SM 空闲 | [10](../course/10_simt_gemm/README.md) |
-| stream | stream | GPU 工作队列。同一个 stream 内按顺序执行 | [从零开始](starting-from-zero.md) |
-| CUDA Graph | CUDA Graph | 把一串 launch 录制下来、整体回放，去掉逐次 launch 的开销 | [工具指南](tools.md) |
-| persistent kernel | persistent kernel | grid 只有“能驻留的 block 数”那么大，每个 block 循环处理多个 tile | [30](../course/30_tma_mbarrier/README.md) |
-| warp specialization | warp specialization | 同一个 block 中不同 warp 担任不同角色（TMA、MMA、epilogue、softmax） | [32](../course/32_ws_gemm/README.md) |
-| 生产者 / 消费者 | producer / consumer | 往 buffer 里放数据的一方 / 取数据的一方 | [30](../course/30_tma_mbarrier/README.md) |
-| `elect.sync` | elect | warp 中所有活跃线程一起执行，恰好选出一个线程 | [30](../course/30_tma_mbarrier/README.md) |
-| `setmaxnreg` | — | 运行时在 warpgroup 之间重新分配寄存器 | [32](../course/32_ws_gemm/README.md)（介绍）、40 |
-| LPT 调度 | Longest Processing Time first | 先发射工作量最大的块，减少最后一轮的空闲 | [43](../course/43_fa4_schedule/README.md) |
+| Term | Meaning | First appears |
+|---|---|---|
+| kernel | A `__global__` function launched by the host and executed by many GPU threads at the same time | [Starting from zero](starting-from-zero.md) |
+| host | The CPU code that launches GPU work | [Starting from zero](starting-from-zero.md) |
+| thread block / CTA (Cooperative Thread Array) | A group of threads that share shared memory and can synchronize with `__syncthreads()`. CTA is the PTX name | [00](../course/00_transpose/README.md) |
+| grid | All blocks of one launch | [00](../course/00_transpose/README.md) |
+| warp | A group of 32 threads that execute the same instruction together | [00](../course/00_transpose/README.md) |
+| lane | A thread's index 0–31 within its warp. The TMEM "lane" means something else (see below) | [00](../course/00_transpose/README.md) |
+| warpgroup | 4 consecutive warps (128 threads) whose first warp index is a multiple of 4 | [32](../course/32_ws_gemm/README.md) |
+| SM (Streaming Multiprocessor) | The hardware unit that executes warps; B200 has 148 | [00](../course/00_transpose/README.md) |
+| SMSP (SM sub-partition) | One quarter of an SM, with its own warp scheduler | [20](../course/20_mma_gemm/README.md) |
+| residency / occupancy | The number of warps present on one SM at the same time (as a fraction of the maximum 64), limited by registers, shared memory and thread count | [00](../course/00_transpose/README.md) |
+| wave | The number of blocks in the grid divided by the number of blocks that can be resident at once. When the last wave is not full, some SMs sit idle | [10](../course/10_simt_gemm/README.md) |
+| stream | A GPU work queue. Work in the same stream runs in order | [Starting from zero](starting-from-zero.md) |
+| CUDA Graph | Records a sequence of launches and replays it as a whole, removing the per-launch overhead | [Tools guide](tools.md) |
+| persistent kernel | The grid is only as large as "the number of blocks that can be resident", and each block loops over several tiles | [30](../course/30_tma_mbarrier/README.md) |
+| warp specialization | Different warps in the same block take different roles (TMA, MMA, epilogue, softmax) | [32](../course/32_ws_gemm/README.md) |
+| producer / consumer | The side that puts data into a buffer / the side that takes data out | [30](../course/30_tma_mbarrier/README.md) |
+| `elect.sync` (elect) | All active threads of a warp execute it together, and it picks exactly one thread | [30](../course/30_tma_mbarrier/README.md) |
+| `setmaxnreg` | Redistributes registers between warpgroups at run time | [32](../course/32_ws_gemm/README.md) (introduced), 40 |
+| LPT scheduling (Longest Processing Time first) | Issue the blocks with the most work first, to reduce idle time in the last wave | [43](../course/43_fa4_schedule/README.md) |
 
-## 存储
+## Memory
 
-| 术语 | 英文 | 解释 | 首次出现 |
-|---|---|---|---|
-| global memory / HBM | global memory / High Bandwidth Memory | 所有线程可访问的显存。B200 是 HBM3e，标称 8 TB/s | [00](../course/00_transpose/README.md) |
-| shared memory（smem） | shared memory | 同一 block 的线程共享的片上存储，每 SM 228 KB | [00](../course/00_transpose/README.md) |
-| 寄存器 | register | 每个线程私有，每 SM 共 65536 个 32 位寄存器 | [01](../course/01_softmax/README.md) |
-| local memory / spill | local memory / register spill | 寄存器放不下时，编译器把变量放进 local memory（实际在显存中） | [01](../course/01_softmax/README.md) |
-| L2 | L2 cache | 全芯片共享的缓存，B200 为 126 MB | [00](../course/00_transpose/README.md) |
-| sector | sector | 内存在 L1/L2/HBM 之间移动的最小单位，32 字节 | [00](../course/00_transpose/README.md) |
-| 合并访存 | coalescing | 一个 warp 的访问落在连续地址上，只需要很少的 sector | [00](../course/00_transpose/README.md) |
-| bank / bank conflict | bank / bank conflict | shared memory 分成 32 个 bank；一个 warp 的多个线程访问同一 bank 的不同地址时要排队 | [00](../course/00_transpose/README.md) |
-| padding | padding | 给 shared memory 数组每行多留几个元素，改变行间距来避开 bank conflict | [00](../course/00_transpose/README.md) |
-| swizzle | swizzle | 用 XOR 打乱 shared memory 中 16 字节块的位置，避开 bank conflict | [20](../course/20_mma_gemm/README.md)、[30](../course/30_tma_mbarrier/README.md) |
-| 在途访存 | bytes in flight | 已发出、尚未返回的访存量。带宽 = 在途字节数 / 延迟（Little 定律） | [00](../course/00_transpose/README.md) |
-| contiguous | contiguous | 张量按行主序紧密排列，最后一维连续 | [00](../course/00_transpose/README.md) |
-| K-major / MN-major | K-major / MN-major | 矩阵操作数中连续的那一维是 K（归约维）还是 M/N | [10](../course/10_simt_gemm/README.md)、[34](../course/34_fa3/README.md) |
-| scratch | scratch | `make_plan` 中分配的临时 global buffer（`lab::Scratch`），初始内容是垃圾值 | [11](../course/11_naive_attention/README.md) |
-| TMEM | Tensor Memory | 每 SM 128 lane × 512 列 × 32 bit 的存储，放 `tcgen05.mma` 的累加器 | [31](../course/31_tcgen05_gemm/README.md) |
-| TMEM lane / column | lane / column | TMEM 的行 / 列。warp w 只能访问 lane `32·(w%4)` 起的 32 行 | [31](../course/31_tcgen05_gemm/README.md) |
-| DSMEM | distributed shared memory | cluster 内的 CTA 访问彼此的 shared memory | [33](../course/33_2cta_gemm/README.md) |
+| Term | Meaning | First appears |
+|---|---|---|
+| global memory / HBM (High Bandwidth Memory) | Device memory that all threads can access. B200 has HBM3e, nominal 8 TB/s | [00](../course/00_transpose/README.md) |
+| shared memory (smem) | On-chip memory shared by the threads of one block, 228 KB per SM | [00](../course/00_transpose/README.md) |
+| register | Private to each thread; 65536 32-bit registers per SM | [01](../course/01_softmax/README.md) |
+| local memory / register spill | When registers run out, the compiler puts variables in local memory (which actually lives in device memory) | [01](../course/01_softmax/README.md) |
+| L2 (L2 cache) | The cache shared by the whole chip, 126 MB on B200 | [00](../course/00_transpose/README.md) |
+| sector | The smallest unit moved between L1/L2/HBM, 32 bytes | [00](../course/00_transpose/README.md) |
+| coalesced access (coalescing) | The accesses of one warp fall on contiguous addresses and need only a few sectors | [00](../course/00_transpose/README.md) |
+| bank / bank conflict | shared memory is split into 32 banks; when several threads of one warp access different addresses in the same bank, they queue | [00](../course/00_transpose/README.md) |
+| padding | Leave a few extra elements at the end of each row of a shared memory array, changing the row stride to avoid bank conflicts | [00](../course/00_transpose/README.md) |
+| swizzle | Permute the positions of 16-byte chunks in shared memory by XOR to avoid bank conflicts | [20](../course/20_mma_gemm/README.md), [30](../course/30_tma_mbarrier/README.md) |
+| bytes in flight | The amount of memory traffic issued but not yet returned. Bandwidth = bytes in flight / latency (Little's law) | [00](../course/00_transpose/README.md) |
+| contiguous | The tensor is packed in row-major order, with the last dimension contiguous | [00](../course/00_transpose/README.md) |
+| K-major / MN-major | Whether the contiguous dimension of a matrix operand is K (the reduction dimension) or M/N | [10](../course/10_simt_gemm/README.md), [34](../course/34_fa3/README.md) |
+| scratch | A temporary global buffer allocated in `make_plan` (`lab::Scratch`); its initial contents are garbage | [11](../course/11_naive_attention/README.md) |
+| TMEM (Tensor Memory) | Storage of 128 lanes × 512 columns × 32 bit per SM that holds the accumulators of `tcgen05.mma` | [31](../course/31_tcgen05_gemm/README.md) |
+| TMEM lane / column | A row / column of TMEM. Warp w can access only the 32 rows starting at lane `32·(w%4)` | [31](../course/31_tcgen05_gemm/README.md) |
+| DSMEM (distributed shared memory) | CTAs in a cluster access each other's shared memory | [33](../course/33_2cta_gemm/README.md) |
 
-## 异步搬运与同步
+## Asynchronous copies and synchronization
 
-| 术语 | 英文 | 解释 | 首次出现 |
-|---|---|---|---|
-| `__syncthreads()` | CTA barrier | block 内所有线程到齐后才继续 | [00](../course/00_transpose/README.md) |
-| warp shuffle | warp shuffle | warp 内线程之间直接交换寄存器的值（`__shfl_xor_sync`） | [01](../course/01_softmax/README.md) |
-| `cp.async` | asynchronous copy | global → shared 的异步拷贝，不经过寄存器 | [21](../course/21_pipeline_gemm/README.md) |
-| commit group / wait_group | — | 把已发出的 `cp.async` 打包成组；等待到最多 N 组未完成 | [21](../course/21_pipeline_gemm/README.md) |
-| 流水 / 多级 buffer | pipeline / multi-stage buffer | 用多块 buffer 轮流装数据，让搬运和计算重叠 | [21](../course/21_pipeline_gemm/README.md) |
-| 环形 buffer | ring buffer | S 块 buffer 按 0, 1, …, S−1, 0, … 循环使用 | [21](../course/21_pipeline_gemm/README.md) |
-| TMA | Tensor Memory Accelerator | 一个线程发起、硬件整块搬运多维数据的单元 | [30](../course/30_tma_mbarrier/README.md) |
-| tensor map | tensor map / `CUtensorMap` | 128 字节的 TMA 描述符，在 host 上编码 | [30](../course/30_tma_mbarrier/README.md) |
-| box | box | 一次 TMA 搬运的数据块 | [30](../course/30_tma_mbarrier/README.md) |
-| mbarrier | mbarrier | shared memory 中的 8 字节同步对象，记录 phase、待到达次数、待完成字节数 | [30](../course/30_tma_mbarrier/README.md) |
-| phase / parity | phase / parity | mbarrier 每完成一轮，phase 加 1；等待者用 phase 的奇偶（parity）判断是否完成 | [30](../course/30_tma_mbarrier/README.md) |
-| expect_tx / complete_tx | transaction count | 告诉 mbarrier 还要等多少字节 / TMA 写完后扣除这些字节 | [30](../course/30_tma_mbarrier/README.md) |
-| full / empty barrier | — | 环形 buffer 中“数据已装好”/“buffer 已用完可以覆盖”的两组 mbarrier | [30](../course/30_tma_mbarrier/README.md) |
-| proxy / proxy fence | proxy / `fence.proxy.async` | 普通 ld/st 属于 generic proxy，TMA 与 tcgen05 属于 async proxy；两者交接 shared memory 时要 fence | [30](../course/30_tma_mbarrier/README.md) |
-| cluster | thread block cluster | 一组保证同时运行、在同一 GPC 上的 CTA | [33](../course/33_2cta_gemm/README.md) |
-| multicast | TMA multicast | 一次 TMA 读取写进 cluster 中多个 CTA 的 shared memory | [33](../course/33_2cta_gemm/README.md) |
+| Term | Meaning | First appears |
+|---|---|---|
+| `__syncthreads()` (CTA barrier) | Continues only after all threads of the block have arrived | [00](../course/00_transpose/README.md) |
+| warp shuffle | Threads in a warp exchange register values directly (`__shfl_xor_sync`) | [01](../course/01_softmax/README.md) |
+| `cp.async` (asynchronous copy) | Asynchronous global → shared copy that does not pass through registers | [21](../course/21_pipeline_gemm/README.md) |
+| commit group / wait_group | Packs the issued `cp.async` into a group; waits until at most N groups are incomplete | [21](../course/21_pipeline_gemm/README.md) |
+| pipeline / multi-stage buffer | Several buffers take turns holding data so that copying and computing overlap | [21](../course/21_pipeline_gemm/README.md) |
+| ring buffer | S buffers used in the cycle 0, 1, …, S−1, 0, … | [21](../course/21_pipeline_gemm/README.md) |
+| TMA (Tensor Memory Accelerator) | A unit that moves a whole block of multidimensional data in hardware, launched by one thread | [30](../course/30_tma_mbarrier/README.md) |
+| tensor map (`CUtensorMap`) | A 128-byte TMA descriptor, encoded on the host | [30](../course/30_tma_mbarrier/README.md) |
+| box | The block of data moved by one TMA copy | [30](../course/30_tma_mbarrier/README.md) |
+| mbarrier | An 8-byte synchronization object in shared memory that records the phase, the pending arrival count and the pending byte count | [30](../course/30_tma_mbarrier/README.md) |
+| phase / parity | Each time an mbarrier completes a round, its phase increases by 1; waiters use whether the phase is odd or even (the parity) to tell whether it has completed | [30](../course/30_tma_mbarrier/README.md) |
+| expect_tx / complete_tx (transaction count) | Tells the mbarrier how many more bytes to wait for / subtracts those bytes after TMA finishes writing | [30](../course/30_tma_mbarrier/README.md) |
+| full / empty barrier | The two sets of mbarriers in a ring buffer: "data is loaded" / "buffer is used up and may be overwritten" | [30](../course/30_tma_mbarrier/README.md) |
+| proxy / proxy fence (`fence.proxy.async`) | Ordinary ld/st belong to the generic proxy, TMA and tcgen05 belong to the async proxy; handing shared memory between the two needs a fence | [30](../course/30_tma_mbarrier/README.md) |
+| cluster (thread block cluster) | A group of CTAs that are guaranteed to run at the same time on the same GPC | [33](../course/33_2cta_gemm/README.md) |
+| multicast (TMA multicast) | One TMA read is written into the shared memory of several CTAs in the cluster | [33](../course/33_2cta_gemm/README.md) |
 
 ## Tensor Core
 
-| 术语 | 英文 | 解释 | 首次出现 |
-|---|---|---|---|
-| Tensor Core | Tensor Core | 专门做小矩阵乘加的硬件单元 | [20](../course/20_mma_gemm/README.md) |
-| `mma.sync` | warp-level MMA | 一个 warp 同步完成一次 16×8×16 的矩阵乘加，操作数和累加器都在寄存器 | [20](../course/20_mma_gemm/README.md) |
-| fragment | fragment | `mma.sync` 的一个操作数分散在 32 个线程寄存器中的那一份 | [20](../course/20_mma_gemm/README.md) |
-| `ldmatrix` | ldmatrix | 从 shared memory 按 fragment 布局装 8×8 矩阵 | [20](../course/20_mma_gemm/README.md) |
-| `tcgen05` | 5th-generation Tensor Core | Blackwell 的 Tensor Core 指令族：一个线程发起、异步完成、累加器在 TMEM | [31](../course/31_tcgen05_gemm/README.md) |
-| smem descriptor | shared memory descriptor | 64 位，描述 shared memory 中操作数的起始地址与 swizzle 布局 | [31](../course/31_tcgen05_gemm/README.md) |
-| instruction descriptor | instruction descriptor | 32 位，描述 MMA 的形状与数据类型 | [31](../course/31_tcgen05_gemm/README.md) |
-| `tcgen05.commit` | commit | MMA 全部完成后到达指定 mbarrier | [31](../course/31_tcgen05_gemm/README.md) |
-| SS-MMA / TS-MMA | — | A 操作数来自 shared memory（SS）或 TMEM（TS）的 `tcgen05.mma` | [31](../course/31_tcgen05_gemm/README.md)、40 |
-| CTA pair / 2-CTA MMA | `cta_group::2` | cluster 中相邻两个 CTA 合作完成一条 M = 256 的 MMA | [33](../course/33_2cta_gemm/README.md) |
-| epilogue | epilogue | 主循环之后把累加器转换、写回 global memory 的阶段 | [31](../course/31_tcgen05_gemm/README.md) |
-| tile | tile | 一次处理的矩阵子块 | [10](../course/10_simt_gemm/README.md) |
-| 光栅化 | rasterization | tile 编号到 (行, 列) 的映射顺序，影响 L2 复用 | [21](../course/21_pipeline_gemm/README.md)、[32](../course/32_ws_gemm/README.md) |
+| Term | Meaning | First appears |
+|---|---|---|
+| Tensor Core | A hardware unit dedicated to small matrix multiply-adds | [20](../course/20_mma_gemm/README.md) |
+| `mma.sync` (warp-level MMA) | One warp synchronously completes one 16×8×16 matrix multiply-add; operands and accumulators are all in registers | [20](../course/20_mma_gemm/README.md) |
+| fragment | The share of one `mma.sync` operand held in the registers of 32 threads | [20](../course/20_mma_gemm/README.md) |
+| `ldmatrix` | Loads 8×8 matrices from shared memory in fragment layout | [20](../course/20_mma_gemm/README.md) |
+| `tcgen05` (5th-generation Tensor Core) | The Blackwell Tensor Core instruction family: launched by one thread, completes asynchronously, accumulators in TMEM | [31](../course/31_tcgen05_gemm/README.md) |
+| smem descriptor (shared memory descriptor) | 64 bits; describes the start address and swizzle layout of an operand in shared memory | [31](../course/31_tcgen05_gemm/README.md) |
+| instruction descriptor | 32 bits; describes the shape and data types of the MMA | [31](../course/31_tcgen05_gemm/README.md) |
+| `tcgen05.commit` (commit) | Arrives on the given mbarrier after all MMAs complete | [31](../course/31_tcgen05_gemm/README.md) |
+| SS-MMA / TS-MMA | A `tcgen05.mma` whose A operand comes from shared memory (SS) or TMEM (TS) | [31](../course/31_tcgen05_gemm/README.md), 40 |
+| CTA pair / 2-CTA MMA (`cta_group::2`) | Two adjacent CTAs in a cluster cooperate on one MMA with M = 256 | [33](../course/33_2cta_gemm/README.md) |
+| epilogue | The stage after the main loop that converts the accumulators and writes them back to global memory | [31](../course/31_tcgen05_gemm/README.md) |
+| tile | The matrix sub-block processed at one time | [10](../course/10_simt_gemm/README.md) |
+| rasterization | The order in which tile indices map to (row, column); affects L2 reuse | [21](../course/21_pipeline_gemm/README.md), [32](../course/32_ws_gemm/README.md) |
 
-## 性能分析
+## Performance analysis
 
-| 术语 | 英文 | 解释 | 首次出现 |
-|---|---|---|---|
-| 算术强度 | arithmetic intensity | 每搬 1 字节做多少次浮点运算（FLOP/B） | [10](../course/10_simt_gemm/README.md) |
-| roofline / 屋脊点 | roofline / ridge point | 性能上限 = min(峰值算力, 算术强度 × 带宽)；两者相等的点叫屋脊点 | [10](../course/10_simt_gemm/README.md) |
-| 标称峰值 | nominal peak | 数据手册给的峰值，实际 kernel 达不到 | [00](../course/00_transpose/README.md) |
-| ILP / TLP | instruction / thread-level parallelism | 一个线程内能同时进行的独立指令 / 同时驻留的线程 | [00](../course/00_transpose/README.md) |
-| SASS | SASS | GPU 真正执行的机器指令 | [工具指南](tools.md) |
-| PTX | Parallel Thread Execution | NVIDIA 的虚拟指令集，由 `ptxas` 翻译成 SASS | [01](../course/01_softmax/README.md) |
-| MUFU / SFU | multi-function unit / special function unit | 计算 `exp2`、`rcp` 等特殊函数的单元，每 SM 每周期 16 个 | [01](../course/01_softmax/README.md) |
-| uniform 寄存器 | uniform register | warp 内共享一份的标量寄存器，TMA、tcgen05 的地址与描述符放在这里 | [工具指南](tools.md) |
+| Term | Meaning | First appears |
+|---|---|---|
+| arithmetic intensity | How many floating-point operations are performed per byte moved (FLOP/B) | [10](../course/10_simt_gemm/README.md) |
+| roofline / ridge point | Performance upper bound = min(peak compute, arithmetic intensity × bandwidth); the point where the two are equal is the ridge point | [10](../course/10_simt_gemm/README.md) |
+| nominal peak | The peak from the datasheet; real kernels do not reach it | [00](../course/00_transpose/README.md) |
+| ILP / TLP (instruction / thread-level parallelism) | Independent instructions that can be in progress at once within one thread / threads resident at once | [00](../course/00_transpose/README.md) |
+| SASS | The machine code the GPU actually executes | [Tools guide](tools.md) |
+| PTX (Parallel Thread Execution) | NVIDIA's virtual instruction set, translated into SASS by `ptxas` | [01](../course/01_softmax/README.md) |
+| MUFU / SFU (multi-function unit / special function unit) | The unit that computes special functions such as `exp2` and `rcp`, 16 per SM per cycle | [01](../course/01_softmax/README.md) |
+| uniform register | A scalar register shared as one copy by the whole warp; addresses and descriptors for TMA and tcgen05 go here | [Tools guide](tools.md) |
 
-## attention 与数值
+## Attention and numerics
 
-| 术语 | 英文 | 解释 | 首次出现 |
-|---|---|---|---|
-| attention | scaled dot-product attention | `O = softmax(scale·QKᵀ)·V` | [11](../course/11_naive_attention/README.md) |
-| S / P / O | scores / probabilities / output | 分数矩阵、softmax 后的概率矩阵、输出 | [11](../course/11_naive_attention/README.md) |
-| scale | softmax scale | 分数的缩放系数，通常为 `1/√D` | [11](../course/11_naive_attention/README.md) |
-| causal mask | causal mask | 第 i 个 query 只看位置 ≤ i 的 key | [11](../course/11_naive_attention/README.md) |
-| LSE | log-sum-exp | 每行 `m + ln(ℓ)`，即 softmax 分母的自然对数；输出形状 `[B,H,N]` FP32 | [11](../course/11_naive_attention/README.md) |
-| safe softmax | safe softmax | 先减去行最大值再求指数，避免溢出 | [01](../course/01_softmax/README.md) |
-| online softmax | online softmax | 一遍扫描同时维护最大值 m 与和 ℓ，遇到更大的值时重新缩放 | [01](../course/01_softmax/README.md) |
-| 重新缩放 / correction | rescale / correction | 最大值变大时，把已累加的 ℓ 和 O 乘以 `exp(m_old − m_new)` | [12](../course/12_fa1/README.md) |
-| 延迟归一化 | deferred normalization | 循环中不除以 ℓ，最后只除一次 | [12](../course/12_fa1/README.md)、[22](../course/22_fa2/README.md) |
-| 循环交换 | loop interchange | FA2 把 Q 块放在外层循环，O 留在片上 | [22](../course/22_fa2/README.md) |
-| IO 复杂度 | IO complexity | 算法需要的 HBM 读写量 | [12](../course/12_fa1/README.md) |
-| oracle | oracle | 用 FP64 直接按定义计算的参考结果，判断正确性 | [11](../course/11_naive_attention/README.md) |
-| atol / rtol | absolute / relative tolerance | 判定通过的条件 `|实际 − 参考| ≤ atol + rtol·|参考|` | [attention 的数学](attention-math.md#7-怎样判断结果正确) |
-| ulp | unit in the last place | 浮点数最后一位的单位，用来描述 `ex2.approx` 等的误差 | [01](../course/01_softmax/README.md) |
-| BF16 / FP16 / FP8（E4M3） | — | 16 位 / 16 位 / 8 位浮点格式。BF16 指数位多、尾数位少 | [20](../course/20_mma_gemm/README.md)、44 |
-| descale | descale | FP8 输入的缩放系数，乘回才得到真实值 | [44](../course/44_fa4_fp8/README.md) |
+| Term | Meaning | First appears |
+|---|---|---|
+| attention (scaled dot-product attention) | `O = softmax(scale·QKᵀ)·V` | [11](../course/11_naive_attention/README.md) |
+| S / P / O (scores / probabilities / output) | The score matrix, the probability matrix after softmax, and the output | [11](../course/11_naive_attention/README.md) |
+| scale (softmax scale) | The scaling factor of the scores, usually `1/√D` | [11](../course/11_naive_attention/README.md) |
+| causal mask | Query i sees only keys at positions ≤ i | [11](../course/11_naive_attention/README.md) |
+| LSE (log-sum-exp) | `m + ln(ℓ)` for each row, that is, the natural log of the softmax denominator; output shape `[B,H,N]` FP32 | [11](../course/11_naive_attention/README.md) |
+| safe softmax | Subtract the row maximum before taking exponentials, to avoid overflow | [01](../course/01_softmax/README.md) |
+| online softmax | One pass that maintains both the maximum m and the sum ℓ, rescaling when a larger value appears | [01](../course/01_softmax/README.md) |
+| rescale / correction | When the maximum grows, multiply the accumulated ℓ and O by `exp(m_old − m_new)` | [12](../course/12_fa1/README.md) |
+| deferred normalization | Do not divide by ℓ inside the loop; divide only once at the end | [12](../course/12_fa1/README.md), [22](../course/22_fa2/README.md) |
+| loop interchange | FA2 puts the Q blocks in the outer loop, keeping O on chip | [22](../course/22_fa2/README.md) |
+| IO complexity | The amount of HBM reads and writes an algorithm needs | [12](../course/12_fa1/README.md) |
+| oracle | A reference result computed directly from the definition in FP64, used to judge correctness | [11](../course/11_naive_attention/README.md) |
+| atol / rtol (absolute / relative tolerance) | The pass condition `|actual − reference| ≤ atol + rtol·|reference|` | [Attention math](attention-math.md#7-how-to-tell-whether-a-result-is-correct) |
+| ulp (unit in the last place) | The unit of the last digit of a floating-point number, used to describe the error of `ex2.approx` and the like | [01](../course/01_softmax/README.md) |
+| BF16 / FP16 / FP8 (E4M3) | 16-bit / 16-bit / 8-bit floating-point formats. BF16 has more exponent bits and fewer mantissa bits | [20](../course/20_mma_gemm/README.md), 44 |
+| descale | The scaling factor of an FP8 input; multiply it back to get the true value | [44](../course/44_fa4_fp8/README.md) |

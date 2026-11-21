@@ -1,90 +1,90 @@
-# 41_fa4_softmax 参考答案说明
+# 41_fa4_softmax reference solution notes
 
-## 设计选择
+## Design choices
 
-**流水结构完全沿用 40 关步骤 3。** 16 个 warp（2 × softmax WG、correction WG、MMA、TMA、2 个空闲）、TMEM 布局、K/V 单环、全部
-mbarrier 与 parity、`setmaxnreg` 192/80/48 都不变；40 关的步骤 1–2 配置（P 经 shared memory、无 correction WG）删掉了。
-本关只改 softmax 求 P 的算术和 correction 的一个条件，所以三个 step 的差别都可以归因到 softmax。
+**The pipeline structure is taken over unchanged from lab 40 step 3.** 16 warps (2 × softmax WG, correction WG, MMA, TMA, 2 idle), the TMEM layout, the single K/V ring,
+all mbarriers and parities, and `setmaxnreg` 192/80/48 are all unchanged; the lab 40 step 1–2 configurations (P through shared memory, no correction WG) were removed.
+This lab changes only the arithmetic that computes P in softmax and one condition in correction, so the differences among the three steps can all be attributed to softmax.
 
-**软件 `exp2`（`exp2_poly2`）。** 与 FA4 `utils.py` 的 `ex2_emulation_2` 同一做法：`max(x, −127)` 钳位，`x + 1.5·2^23` 向下舍入
-（`__fadd2_rd`）把 ⌊x⌋ 放进低位，`f = x − ⌊x⌋` 精确，3 次 Horner，`bits(p) + (bits(r) << 23)` 拼指数（ptxas 合成 `LEA`）。
-用 CUDA 12.8 的 `float2` 内建函数（`__ffma2_rn`、`__fadd2_rn/rd`）而不是内联 PTX。f = x − n 写成 `__ffma2_rn(n, (−1, −1), x)`：写成 `x + (−n)` 时 `make_float2(-n.x, -n.y)` 要两条标量取负，每对多 2 条指令（审查后改正），可读性更好，SASS 与内联 PTX 版本相同
-（`FFMA2`、`FADD2`、`FADD2.RM`）。系数是自己用 numpy（Lawson 迭代求相对误差的 minimax，c0 固定为 1）算的，
-没有抄上游的 `POLY_EX2`；两者在第 3 位有效数字上不同，最大误差同量级。
+**Software `exp2` (`exp2_poly2`).** The same approach as `ex2_emulation_2` in FA4's `utils.py`: clamp with `max(x, −127)`, add `x + 1.5·2^23` rounded down
+(`__fadd2_rd`) to put ⌊x⌋ into the low bits, `f = x − ⌊x⌋` exactly, 3-step Horner, and splice the exponent with `bits(p) + (bits(r) << 23)` (ptxas fuses it into `LEA`).
+It uses the CUDA 12.8 `float2` intrinsics (`__ffma2_rn`, `__fadd2_rn/rd`) instead of inline PTX. f = x − n is written as `__ffma2_rn(n, (−1, −1), x)`: written as `x + (−n)`, `make_float2(-n.x, -n.y)` needs two scalar negations, 2 more instructions per pair (corrected after review). The intrinsics are more readable, and the SASS is the same as the inline PTX version
+(`FFMA2`, `FADD2`, `FADD2.RM`). The coefficients were computed by us with numpy (a Lawson iteration for the relative-error minimax, with c0 fixed to 1),
+not copied from upstream's `POLY_EX2`; the two differ in the 3rd significant digit, and the maximum errors are of the same order.
 
-- c0 必须恰好为 1：x = −∞ 钳位成 −127 后 f = 0，结果的位模式是 `bits(c0) − (127 << 23)`，只有 c0 = 1.0 时得 +0
-  （c0 = 0.99999 时得到 NaN；已用变异测试确认）。
-- 次数按 FP16 P 的单位舍入 2^−11 选 3 次（误差 2^−13.5）。2 次（2^−8.9）对 BF16 够用、对 FP16 不够；未做“按 dtype
-  选次数”的版本。
+- c0 must be exactly 1: x = −∞ is clamped to −127, so f = 0 and the result's bit pattern is `bits(c0) − (127 << 23)`, which is +0 only when c0 = 1.0
+  (c0 = 0.99999 gives NaN; confirmed by a mutation test).
+- The degree is chosen from the unit roundoff 2^−11 of FP16 P: degree 3 (error 2^−13.5). Degree 2 (2^−8.9) is enough for BF16 but not for FP16; there is no version that
+  "chooses the degree by dtype".
 
-**混合比例。** 每 32 列（一次 `tcgen05.ld`）的 16 对中 `kPolyPairs = 3` 对用多项式（φ = 18.75%），由 `use_poly` 在编译期均匀
-分布（q = 5、10、15）。初次扫描（旧版 f = x + (−n)）k = 0、2、3、4、5、6、8、16：k = 3 最好，k ≥ 4 溢出。审查后改用一条 FFMA2 求 f，重测
-k = 3/4/5：`perf` 0.90/0.89/0.89×、`perf_d64` 0.93/0.95/0.95×，差别在波动内；k = 4、5 仍有 4、6 个 kernel 溢出 8 字节，
-所以保留不溢出的 k = 3。溢出从 k = 4 开始，扫描无法检验讲义 §3.6 模型的平衡点 φ ≈ 0.39。FA4 的 `ex2_emu_freq` 配置对应
-12.5–19%。没有尝试 FA4 的“首尾 fragment 不模拟”
-（`ex2_emu_start_frg`）变体。
+**Mix ratio.** In each 32 columns (one `tcgen05.ld`), `kPolyPairs = 3` of the 16 pairs use the polynomial (φ = 18.75%), spread evenly at compile time by `use_poly`
+(q = 5, 10, 15). First sweep (old version, f = x + (−n)) with k = 0, 2, 3, 4, 5, 6, 8, 16: k = 3 was best, and k ≥ 4 spilled. After review, f was changed to one FFMA2, and
+k = 3/4/5 were measured again: `perf` 0.90/0.89/0.89×, `perf_d64` 0.93/0.95/0.95×, differences within noise; k = 4 and 5 still spill 8 bytes in 4 and 6 kernels,
+so we keep k = 3, which does not spill. Because spills start at k = 4, the sweep cannot test the balance point φ ≈ 0.39 of the model in lesson §3.6. FA4's `ex2_emu_freq` configurations correspond to
+12.5–19%. We did not try FA4's "do not emulate the first and last fragments"
+(`ex2_emu_start_frg`) variant.
 
-**打包的 `FFMA2`/`FADD2`。** 算 x（`s·scale_log2 − base`）和求和也用打包指令（四个 `float2` 部分和）。k = 0（全 MUFU + 打包）
-与 40 关相当，说明打包本身不是收益来源；它的作用是给多项式让出发射槽。
+**Packed `FFMA2`/`FADD2`.** Computing x (`s·scale_log2 − base`) and the sum also use packed instructions (four `float2` partial sums). k = 0 (all MUFU + packing)
+is on par with lab 40, which shows that packing itself is not the source of the gain; its role is to free issue slots for the polynomial.
 
-**条件 rescale（步骤 3）。** softmax 的 m 是“基准”而不是真最大值：`(m_new − m)·scale_log2 > τ = 8` 才移动并给出
-α = 2^((m − m_new)·scale_log2)，否则 α = 1。块 0 的 m = −∞ 使差为 +∞，必然移动；全 −∞ 时 NaN > τ 为假，α = 1，不会
-出 NaN（实际不会出现：块 0 总有可见 key）。LSE 用基准 m 计算（`m·scale + ln ℓ`），对任意基准都精确。correction 用
-`__any_sync(α ≠ 1)` 以 warp 为单位决定（`tcgen05.ld/st` 是 `.sync.aligned`），跳过时仍 arrive `p_ready`。
-与 FA4 的 `SoftmaxSm100.update_row_max`（`rescale_threshold`）和 `correction_loop`（`vote_ballot_sync(scale < 1.0)`）相同。
-τ = 8 满足 FP16 的 P ≤ 256 < 65504 和多项式的 x ≤ 127。
+**Conditional rescale (step 3).** The m of softmax is a "reference", not the true max: only when `(m_new − m)·scale_log2 > τ = 8` does it move and give
+α = 2^((m − m_new)·scale_log2); otherwise α = 1. In block 0, m = −∞ makes the difference +∞, so it always moves; if everything is −∞, NaN > τ is false, α = 1, and no
+NaN appears (this does not happen in practice: block 0 always has visible keys). LSE is computed with the reference m (`m·scale + ln ℓ`), which is exact for any reference. Correction uses
+`__any_sync(α ≠ 1)` to decide per warp (`tcgen05.ld/st` are `.sync.aligned`), and still arrives on `p_ready` when it skips.
+This is the same as FA4's `SoftmaxSm100.update_row_max` (`rescale_threshold`) and `correction_loop` (`vote_ballot_sync(scale < 1.0)`).
+τ = 8 satisfies P ≤ 256 < 65504 for FP16 and x ≤ 127 for the polynomial.
 
-对照：只保留投票、τ = 0 时 `perf` ≈ 0.91×、`perf_d64` ≈ 0.94×（步骤 2 为 0.89×、0.94×，τ = 8 为 0.97×、0.96×）。
+Control: keeping only the vote with τ = 0 gives `perf` ≈ 0.91× and `perf_d64` ≈ 0.94× (step 2 is 0.89×, 0.94×; τ = 8 is 0.97×, 0.96×).
 
-**新增 pattern（`labkit/kinds/attention.py`，只增加分支）。** `growing_max`：q_i = a_i u + 噪声、k_j = g(j) u + 噪声，
-g(j) = 2j/128，每行最大值每块上涨约 1.4–4.3（log₂ 单位），单块不超过 τ，累计超过；`jump_max`：g 在 key 3n/5 + 50（块中间）
-处跳到 200，跳变约 145–430。a_i/√d ∈ [0.5, 1.5) 每行不同，使同一 warp 中的行在不同块修正。`docs/authoring.md` 的
-pattern 列表已补上这两个名字。
+**New patterns (`labkit/kinds/attention.py`, only new branches added).** `growing_max`: q_i = a_i u + noise, k_j = g(j) u + noise,
+g(j) = 2j/128; each row's max rises by about 1.4–4.3 per block (log₂ units), never more than τ in a single block, but more than τ in total; `jump_max`: g jumps to 200 at key 3n/5 + 50 (the middle of a block),
+a jump of about 145–430. a_i/√d ∈ [0.5, 1.5) differs per row, so the rows of one warp get corrected in different blocks. The pattern list in `docs/authoring.md`
+now includes these two names.
 
-## 各 step 的性能（相对 cuDNN，CUDA Graph，7 号卡，同一次 bench）
+## Performance of each step (relative to cuDNN, CUDA Graph, GPU 7, same bench run)
 
-| 版本 | `perf` | `perf_causal` | `perf_d64` | `perf_8k` |
+| Version | `perf` | `perf_causal` | `perf_d64` | `perf_8k` |
 |---|---|---|---|---|
-| 40 关步骤 3 | ≈ 0.85× | ≈ 0.94× | ≈ 0.80× | ≈ 0.83× |
-| 步骤 1（全多项式） | ≈ 0.58× | ≈ 0.69× | ≈ 0.61× | ≈ 0.56× |
-| 步骤 2（k = 3） | ≈ 0.89× | ≈ 0.99× | ≈ 0.94× | ≈ 0.87× |
-| 步骤 3（+ τ = 8） | ≈ 0.97× | ≈ 1.03× | ≈ 0.96× | ≈ 0.93× |
+| Lab 40 step 3 | ≈ 0.85× | ≈ 0.94× | ≈ 0.80× | ≈ 0.83× |
+| Step 1 (all polynomial) | ≈ 0.58× | ≈ 0.69× | ≈ 0.61× | ≈ 0.56× |
+| Step 2 (k = 3) | ≈ 0.89× | ≈ 0.99× | ≈ 0.94× | ≈ 0.87× |
+| Step 3 (+ τ = 8) | ≈ 0.97× | ≈ 1.03× | ≈ 0.96× | ≈ 0.93× |
 | FA4 | ≈ 1.15× | ≈ 1.33× | ≈ 1.13–1.15× | ≈ 1.03–1.10× |
 
-Nsight Compute（`perf`）：Tensor Core 忙碌 40 关 57% → 步骤 1 40% → 步骤 2 60% → 步骤 3 65%；`pipe_xu` 57% → 0.3% →
-49% → 53%；`smsp__inst_executed_pipe_xu.sum` 步骤 2–3 为 40 关的 81%（104/128 的 P + α），验证了混合比例。
+Nsight Compute (`perf`): Tensor Core busy, lab 40 57% → step 1 40% → step 2 60% → step 3 65%; `pipe_xu` 57% → 0.3% →
+49% → 53%; `smsp__inst_executed_pipe_xu.sum` for steps 2–3 is 81% of lab 40 (104/128 for P + α), which confirms the mix ratio.
 
-`perf_target` 取 0.85（最差的 `perf_8k` 约 0.93×，留出 cuDNN 波动的余量）。
+`perf_target` is 0.85 (the worst case, `perf_8k`, is about 0.93×, leaving margin for cuDNN variation).
 
-## 误差（相对 FP64 oracle，同一份输入）
+## Error (against the FP64 oracle, same input)
 
-`exp2` 本身（GPU 上穷举 [−127, 8] 的全部 FP32 输入）：`MUFU.EX2` 1.46·10⁻⁷，3 次多项式 8.57·10⁻⁵（= 系数本身在 [0,1) 上的
-误差，范围约简与拼接无额外误差），2 次 2.05·10⁻³，4 次 2.97·10⁻⁶；−∞ 与 −127 得 +0，(−127, −126) 得非负次正规数。
+`exp2` itself (exhaustive over all FP32 inputs in [−127, 8] on the GPU): `MUFU.EX2` 1.46·10⁻⁷, degree-3 polynomial 8.57·10⁻⁵ (= the error of the coefficients themselves on [0,1);
+range reduction and splicing add no error), degree 2 2.05·10⁻³, degree 4 2.97·10⁻⁶; −∞ and −127 give +0, and (−127, −126) gives non-negative subnormals.
 
-attention 输出：O 的最大误差四种变体几乎相同（由 O 的 16 位舍入主导）；LSE 的最大误差由全 MUFU 的约 10⁻⁶ 升到
-10⁻⁵–1.3·10⁻⁴（≈ 多项式的相对误差），仍比 LSE 容差 10⁻³ 小一个数量级。逐 case 数字见讲义 §7.3。容差未改动。
+Attention output: the maximum error of O is nearly the same for the four variants (dominated by the 16-bit rounding of O); the maximum error of LSE rises from about 10⁻⁶ with all MUFU to
+10⁻⁵–1.3·10⁻⁴ (≈ the relative error of the polynomial), still an order of magnitude below the LSE tolerance 10⁻³. Per-case numbers are in lesson §7.3. The tolerances were not changed.
 
-## 验证
+## Verification
 
-- `./lab check 41 --solution`：3 个 step × 30 个 case 全部通过（含新增的 `peaked_fp16`、`growing`、`growing_causal`、
-  `jump`、`jump_causal`，以及 40 关审查后新增的 `tile1_position`、`causal_n_bound`）。
-- 变异测试（在临时副本中，结束后骨架恢复为字节一致）：魔数加法改就近舍入 → LSE 超差（`one_block`、`medium` 等，误差
-  ≈ 2–3·10⁻³）；c0 = 0.99999 → 有 mask 的 case 出 NaN；去掉钳位 → `n1` 错；条件与上一块最大值比较 → `growing`（FP16）
-  出 NaN（`growing_causal` 为 BF16，不溢出，能通过）；从不移动基准 → `jump`、`jump_causal`、`growing` 出 NaN；投票后用
-  lane 0 的 α → `growing`、`growing_causal`、`jump_causal` 错。
-- 骨架：把 TODO(1)、(2)、(3a)、(3b) 依次换成答案代码后，`--step n` 通过、`--step n+1` 报 TODO；只填 3a 时 step 3 停在
-  TODO(3)（correction warp 的 trap），不挂起。
-- `./lab sass 41 --solution`：24 个 kernel STACK 均为 0；步骤 1 每个 kernel 1 条 `MUFU.EX2`（α）、320 条 `FFMA2`；
-  步骤 2–3 每个 kernel 105 条 `MUFU.EX2`、112 条 `FFMA2`。
-- `./lab sanitize --solution`：memcheck、racecheck、synccheck 在 `two_tiles`、`growing_causal`（步骤 3）和 `causal_tail`（步骤 1、2）
-  上 0 错误；racecheck 看不见 TMA/TMEM 访问，同步与 40 关完全相同（40 关讲义 §5.6）。
-- `./lab selftest 41` 通过；`./lab selftest 41 --perf`（目标 0.85）通过，该次实测 `perf_causal` 1.03×、`perf_d64` 0.96×、
-  `perf_8k` 0.95×（`perf` 见上表 ≈ 0.97×）。
-- `python -m pytest -q`：本关相关测试通过；唯一失败来自同时在写的 42 关（`course/42_fa4_2cta/README.md` 尚不存在）。
+- `./lab check 41 --solution`: 3 steps × 30 cases all pass (including the new `peaked_fp16`, `growing`, `growing_causal`,
+  `jump`, `jump_causal`, and `tile1_position`, `causal_n_bound`, which were added after the lab 40 review).
+- Mutation tests (in a temporary copy; afterwards the skeleton was restored byte for byte): round-to-nearest for the magic-number add → LSE out of tolerance (`one_block`, `medium`, etc., error
+  ≈ 2–3·10⁻³); c0 = 0.99999 → cases with a mask produce NaN; no clamp → `n1` fails; condition compared with the previous block's max → `growing` (FP16)
+  produces NaN (`growing_causal` is BF16, does not overflow, and passes); the reference never moves → `jump`, `jump_causal`, `growing` produce NaN; using
+  lane 0's α after the vote → `growing`, `growing_causal`, `jump_causal` fail.
+- Skeleton: after replacing TODO(1), (2), (3a), (3b) one at a time with solution code, `--step n` passes and `--step n+1` reports the TODO; with only 3a filled in, step 3 stops at
+  TODO(3) (the trap in the correction warp) and does not hang.
+- `./lab sass 41 --solution`: STACK is 0 in all 24 kernels; step 1 has 1 `MUFU.EX2` (α) and 320 `FFMA2` per kernel;
+  steps 2–3 have 105 `MUFU.EX2` and 112 `FFMA2` per kernel.
+- `./lab sanitize --solution`: memcheck, racecheck and synccheck report 0 errors on `two_tiles`, `growing_causal` (step 3) and `causal_tail` (steps 1, 2);
+  racecheck cannot see TMA/TMEM accesses, and the synchronization is exactly the same as lab 40 (lab 40 lesson §5.6).
+- `./lab selftest 41` passes; `./lab selftest 41 --perf` (target 0.85) passes, with that run measuring `perf_causal` 1.03×, `perf_d64` 0.96×,
+  `perf_8k` 0.95× (`perf` ≈ 0.97×, see the table above).
+- `python -m pytest -q`: the tests related to this lab pass; the only failure comes from lab 42, which was being written at the same time (`course/42_fa4_2cta/README.md` did not exist yet).
 
-## 已知局限
+## Known limitations
 
-- 混合比例对 D = 64/128、causal/非 causal 都用 k = 3，没有分别调；扫描每点只测一次。
-- softmax 的寄存器上限 192 限制了 k；没有尝试改变寄存器分配（例如 correction 降到 64）来放开更大的 k。
-- 依赖同一线程 MMA 的按序执行、causal 时 tile 0 多算一块等，与 40 关相同。
-- 条件 rescale 对随机数据几乎不修正；对最大值持续上涨的输入（`growing_max`）仍需每 2–5 块修正一次。
+- The mix ratio is k = 3 for D = 64/128 and for causal/non-causal alike, without separate tuning; each sweep point was measured only once.
+- The softmax register limit of 192 limits k; we did not try changing the register allocation (for example lowering correction to 64) to allow a larger k.
+- Reliance on in-order execution of MMAs from the same thread, tile 0 computing one extra block for causal, etc., are the same as lab 40.
+- Conditional rescale almost never corrects on random data; for inputs whose max keeps rising (`growing_max`) it still corrects once every 2–5 blocks.
