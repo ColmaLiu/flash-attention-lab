@@ -62,7 +62,7 @@ warp 等待、`elect.sync` 一个 lane 发射后降到约 40 周期，`perf` 约
 
 ## 验证
 
-- `./lab check 40 --solution`：3 个 step × 23 个 case 全部通过；`./lab selftest 40` 与 `selftest 40 --perf`（目标 0.72）通过；
+- `./lab check 40 --solution`：3 个 step × 25 个 case 全部通过；`./lab selftest 40` 与 `selftest 40 --perf`（目标 0.72）通过；
 - `./lab sanitize --solution` 的 memcheck、racecheck、synccheck 在 `two_tiles`、`causal_tail` 上（全部 step）0 错误；
   racecheck 看不见 TMA/TMEM 访问，同步论证见讲义 §5.6 的表；
 - `./lab sass 40 --solution`：24 个 kernel STACK 均为 0；步骤 1–2 每线程 164–168 个寄存器，步骤 3 启动值 128（各角色由

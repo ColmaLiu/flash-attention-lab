@@ -10,9 +10,9 @@
 // rows, head, batch) = (blockIdx.x, .y, .z). Tile t (0, 1) of the pair holds
 // rows q0 + 128 t .. q0 + 128 t + 127.
 //
-//   warps 0-3   softmax warpgroup 0: thread r owns row r of tile 0 (TMEM lane
-//   r) warps 4-7   softmax warpgroup 1: thread r owns row r of tile 1 warps
-//   8-11  (step 3) correction warpgroup: rescales O^0 and O^1 in TMEM,
+//   warps 0-3   softmax WG 0: thread r owns row r of tile 0 (TMEM lane r)
+//   warps 4-7   softmax WG 1: thread r owns row r of tile 1
+//   warps 8-11  (step 3) correction warpgroup: rescales O^0 and O^1 in TMEM,
 //               then the epilogue (normalize, O via smem + TMA store, LSE)
 //   MMA warp    every tcgen05.mma in the ping-pong order (all 32 lanes wait,
 //               one elected lane issues)

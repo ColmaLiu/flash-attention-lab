@@ -43,12 +43,12 @@ namespace {
 using bf16 = __nv_bfloat16;
 using fp16 = __half;
 
-constexpr int kBM = 128;    // query rows per tile = MMA M = TMEM lanes
-constexpr int kBN = 128;    // keys per K/V block = N of S = K of P.V
-constexpr int kTiles = 2;   // Q tiles per CTA
-constexpr int kPanel = 64;  // 64 16-bit elements = one 128-byte swizzle row
-constexpr int kUmmaK = 16;  // K of one tcgen05.mma for 16-bit inputs
-constexpr int kPCol = 64;   // P^t (128 x 16-bit = 64 columns) at S^t + 64
+constexpr int kBM = 128;   // query rows per tile = MMA M = TMEM lanes
+constexpr int kBN = 128;   // keys per K/V block = N of S = K of P.V
+constexpr int kTiles = 2;  // Q tiles per CTA
+constexpr int kPanel = 64; // 64 16-bit elements = one 128-byte swizzle row
+constexpr int kUmmaK = 16; // K of one tcgen05.mma for 16-bit inputs
+constexpr int kPCol = 64;  // P^t (128 x 16-bit = 64 columns) at S^t + 64
 
 // ===========================================================================
 // Small local helpers (the same as labs 22 and 34).
@@ -82,14 +82,14 @@ template <class T> __device__ __forceinline__ uint32_t pack2(float x, float y) {
 // Per-row statistics handed from the softmax to the correction warpgroup
 // (step 3), in shared memory after the K/V ring.
 struct Stats {
-  float alpha[kTiles][kBM];                 // alpha^t_j of the current block
+  float alpha[kTiles][kBM]; // alpha^t_j of the current block
   float fin_m[kTiles][kBM], fin_l[kTiles][kBM]; // final m and l
 };
 
 template <int D_, int Step> struct Config {
   static constexpr int kD = D_;
   static constexpr int kPanels = D_ / kPanel;
-  static constexpr bool kPInTmem = Step >= 2;   // step 2: P over S in TMEM
+  static constexpr bool kPInTmem = Step >= 2;    // step 2: P over S in TMEM
   static constexpr bool kCorrection = Step >= 3; // step 3: correction WG
 
   // Warp roles.
@@ -107,9 +107,9 @@ template <int D_, int Step> struct Config {
 
   // One ring of shared-memory stages for K_0, V_0, K_1, V_1, ... (item u:
   // K_{u/2} if u is even, V_{u/2} if odd), as many as fit.
-  static constexpr int kQBytes = kBM * D_ * 2;   // one Q tile
-  static constexpr int kKVBytes = kBN * D_ * 2;  // one K or V block
-  static constexpr int kPBytes = kBM * kBN * 2;  // one P tile (step 1)
+  static constexpr int kQBytes = kBM * D_ * 2;  // one Q tile
+  static constexpr int kKVBytes = kBN * D_ * 2; // one K or V block
+  static constexpr int kPBytes = kBM * kBN * 2; // one P tile (step 1)
   static constexpr int kStages =
       kPInTmem ? (D_ == 128 ? 4 : 8) : (D_ == 128 ? 3 : 6);
   static constexpr int kQOff = 0;
@@ -133,17 +133,17 @@ template <int D_, int Step> struct Config {
 // Every mbarrier of the kernel. "count" = arrivals per phase. j = K/V block.
 template <int Stages> struct Barriers {
   // TMA -> MMA. count 1 (arrive_expect_tx by the TMA lane) + tx bytes.
-  uint64_t q_full[kTiles];      // Q^t landed (one phase)
-  uint64_t kv_full[Stages];     // ring item u landed in stage u % Stages
+  uint64_t q_full[kTiles];  // Q^t landed (one phase)
+  uint64_t kv_full[Stages]; // ring item u landed in stage u % Stages
   // MMA -> TMA. count 1 (tcgen05.commit): the MMAs that read the stage are
   // complete. K_j is released after Q^1 K_j^T, V_j after P^1_j V_j.
   uint64_t kv_empty[Stages];
   // MMA -> softmax t. count 1 (tcgen05.commit after Q^t K_j^T): S^t_j is in
   // TMEM. Because commit tracks EVERY earlier MMA of the issuing thread and
   // P^t_{j-1} V_{j-1} was issued before Q^t K_j^T, it also means: O^t holds
-  // blocks 0..j-1 and P^t_{j-1} has been read. Phase j, parity j & 1.
+  // blocks 0..j-1 and P^t_{j-1} has been read. One phase per block.
   uint64_t s_full[kTiles];
-  // softmax t (+ correction) -> MMA. Phase j, parity j & 1. Count 128 (each
+  // softmax t (+ correction) -> MMA. One phase per block. Count 128 (each
   // softmax thread of WG t) in steps 1-2, 256 (+ each correction thread) in
   // step 3. Complete = P^t_j written (smem + fence.proxy.async, or TMEM +
   // wait::st), every tcgen05.ld of S^t_j done (S^t may be overwritten), and
@@ -152,7 +152,7 @@ template <int Stages> struct Barriers {
   // MMA -> epilogue. count 1 (tcgen05.commit after the last P^t V): O^t is
   // final, and every MMA reading Q^t has completed. One phase.
   uint64_t o_full[kTiles];
-  // softmax t -> correction (step 3). count 128. Phase j: alpha^t_j is in
+  // softmax t -> correction (step 3). count 128. Block j: alpha^t_j is in
   // st.alpha[t][]. No "empty" barrier is needed: softmax writes alpha^t_{j+1}
   // only after s_full phase j+1, which needs p_ready phase j, which needs
   // every correction thread's arrival after it read alpha^t_j.
@@ -449,8 +449,8 @@ __global__ void __launch_bounds__(C::kThreads, 1)
   lab::tcgen05_fence_after_thread_sync();
   const uint32_t tmem = bar.tmem_slot;
   // This warp's TMEM lane slice (only meaningful for warpgroups 0-2).
-  const uint32_t lane_addr = tmem + (static_cast<uint32_t>(32 * (warp % 4))
-                                     << 16);
+  const uint32_t lane_addr =
+      tmem + (static_cast<uint32_t>(32 * (warp % 4)) << 16);
 
   if (warp >= C::kMmaWarp) {
     // ============================================ MMA, TMA (and idle) warps
@@ -500,19 +500,20 @@ __global__ void __launch_bounds__(C::kThreads, 1)
       for (int t = 0; t < kTiles; ++t) {
         // TODO(1b) -- lesson section 5.3: wait for Q^t (q_full[t]), tcgen05
         // fence; the leader computes S^t_0 = Q^t K_0^T into S^t (mma_qk)
-        // and commits s_full[t]; __syncwarp(). After the loop, the leader
-        // releases K_0 (which barrier? it was read by both tiles).
+        // and commits s_full[t]; __syncwarp().
         (void)k0;
         LAB_TODO(1);
       }
+      // TODO(1b, continued): the leader releases K_0 (ring item 0, read by
+      // both tiles). Forgetting it is a TIMEOUT, not a TODO message.
       // Block j: for each tile, P^t_j V_j, then (same TMEM columns) S^t_{j+1}.
       // Tensor Core order: PV^0_j QK^0_{j+1} PV^1_j QK^1_{j+1} PV^0_{j+1} ...
       // While softmax 0 works on S^0_{j+1}, the Tensor Core runs PV^1_j and
       // QK^1_{j+1}, and vice versa: the two warpgroups ping-pong.
       for (int j = 0; j < blocks; ++j) {
         const bool more = j + 1 < blocks;
-        const T *v = acquire(2 * j + 1);                    // V_j
-        const T *k = more ? acquire(2 * j + 2) : nullptr;   // K_{j+1}
+        const T *v = acquire(2 * j + 1);                  // V_j
+        const T *k = more ? acquire(2 * j + 2) : nullptr; // K_{j+1}
 #pragma unroll 1
         for (int t = 0; t < kTiles; ++t) {
           // TODO(1c) -- lesson sections 5.3-5.4. All lanes: wait until
@@ -530,7 +531,7 @@ __global__ void __launch_bounds__(C::kThreads, 1)
           LAB_TODO(1);
         }
         // TODO(1c, continued): if there is a next block, the leader releases
-        // K_{j+1} (item 2j + 2).
+        // K_{j+1} (item 2j + 2). Forgetting it is a TIMEOUT, not a TODO.
       }
     }
   } else if (warp < 4 * kTiles) {
@@ -596,8 +597,7 @@ __global__ void __launch_bounds__(C::kThreads, 1)
     } else {
       lab::mbar_wait(&bar.o_full[t], 0);
       lab::tcgen05_fence_after_thread_sync();
-      store_o_and_lse<T, C>(&o_map, sq(t), o_addr, r, head, batch, qt, m, l,
-                            p);
+      store_o_and_lse<T, C>(&o_map, sq(t), o_addr, r, head, batch, qt, m, l, p);
     }
   } else {
     // ======================================= correction warpgroup (step 3)

@@ -90,7 +90,14 @@ softmax 1   │       │ SM¹_j │       │SM¹_j+1│
 
 ### 3.3 手算：每 SM 一块要多久
 
-`perf` case（B·H = 64，N = 4096，D = 128）：每个 CTA 两个 tile、32 个 K/V 块，共 1024 个 CTA、148 个 SM，约 7 轮。若 `T = 2048` 周期，一个 CTA 约 6.6 万周期；按约 1.9 GHz，7 轮约 0.24 ms。cuDNN 约 0.45 ms，FA4 约 0.40 ms。本关最终约 0.55 ms，对应 `T ≈ 3400` 周期——§7.2 会用插桩把这 3400 周期拆开。
+`perf` case（B·H = 64，N = 4096，D = 128）：每个 CTA 两个 tile、32 个 K/V 块，共 1024 个 CTA、148 个 SM，约 7 轮。用周期来算（不依赖频率）：
+
+| | 每块 T | 每 SM 合计（7 轮 × 32 块 × T） |
+|---|---|---|
+| 理想（§3.2） | 2048 | ≈ 46 万周期 |
+| 本关步骤 3（Nsight Compute 不锁频时测得 `sm__cycles_elapsed.avg` ≈ 83 万） | ≈ 3700（含每个 CTA 的序幕、收尾） | ≈ 83 万周期 |
+
+满载时 SM 时钟约 1.64 GHz（同一次测量的 `sm__cycles_elapsed.avg.per_second`，低于标称最高频率），83 万周期 ≈ 0.50 ms（bench 测得约 0.55 ms，含 kernel 之间的间隙）。§7.2 用插桩把稳态的一块（≈ 3450 周期）拆开。
 
 ## 4. 硬件与指令
 
@@ -173,7 +180,7 @@ setmaxnreg.dec.sync.aligned.u32 N;   // 降到 N，多出来的还回池里
 
 | 版本 | warp 数 | 角色 | 每线程寄存器上限 | 合计 |
 |---|---|---|---|---|
-| 步骤 1–2 | 10（320 线程） | 2 × softmax、MMA、TMA | ptxas 给出 168（不能更多：寄存器按 4 个 warp 一组分配，320 线程按 384 计，64K / 384 ≈ 170） | — |
+| 步骤 1–2 | 10（320 线程） | 2 × softmax、MMA、TMA | ptxas 给出 168（SM 的 64K 寄存器分在 4 个子分区，每个 16K；warp i 在子分区 i % 4，10 个 warp 时有的子分区要放 3 个 warp：16384 / (3·32) ≈ 170，按 8 取整为 168） | — |
 | 步骤 3 | 16（512 线程） | softmax ×2 | 192 | 2 × 128 × 192 = 49152 |
 | | | correction | 80 | 128 × 80 = 10240 |
 | | | MMA、TMA、2 个空闲 warp | 48 | 128 × 48 = 6144 |
@@ -203,7 +210,7 @@ __syncwarp();
 | TS MMA 的 A 地址每个 K 片前进 16 列 | 只用到一半的 P，另一半读到 S 的残余：O 错 |
 | `pack2` 两个参数顺序反了 | 相邻两个 key 的 P 交换：`causal_position`、`position` 错 |
 | `tcgen05.st` 之后没有 `wait::st` 就 arrive | MMA 偶尔读到旧 P |
-| 一个 warpgroup 只有部分 warp 执行 `setmaxnreg` | 未定义行为（多数时候挂起） |
+| 一个 warpgroup 只有部分 warp 执行 `setmaxnreg` | 未定义行为（PTX ISA 的要求；本关没有测试具体表现） |
 | `setmaxnreg` 的总和超过 512 | `inc` 永远等不到寄存器：挂起 |
 | `p_ready` 的 count 在步骤 3 仍是 128 | correction 和 softmax 的 arrive 超出一个阶段：parity 错乱，挂起或结果错 |
 | 把最终的 m、ℓ 也用 `stats_full` 交给 correction | 两个阶段可能连着完成，correction 等的 parity 永远不来（§5.6） |
@@ -326,7 +333,7 @@ parity 不会追尾的理由和 34 关相同：每个 barrier 的第 j+1 阶段�
 
 **racecheck 看不见 TMA 和 TMEM 的访问**：上面的表就是本关同步正确性的全部论证，请逐行核对。
 
-### 5.7 全部角色的时间线（D = 128，稳态，一格约 256 周期）
+### 5.7 全部角色的时间线（D = 128，稳态，示意，不按比例）
 
 ```
 TMA          │K₂ V₂ ……（提前 2 块）…………………………………………………………………………
@@ -385,7 +392,7 @@ correction   │   ×α¹   │   ×α⁰   │         │   ×α¹   │   ×�
 
 | 现象 | 可能原因 |
 |---|---|
-| `TIMEOUT`（步骤 1） | 环的 parity；MMA 和 TMA 对 item 的编号不一致（K 是偶数、V 是奇数）；`p_ready` 的 parity |
+| `TIMEOUT`（步骤 1） | 环的 parity；MMA 和 TMA 对 item 的编号不一致（K 是偶数、V 是奇数）；`p_ready` 的 parity；忘了 TODO(1b)/(1c) 的 “continued” 部分——序幕后释放 K₀、每块末释放 K_{j+1}（这两处没有 `LAB_TODO`，漏掉时 TMA warp 永远等不到空 stage） |
 | 只有 tile 1 的行错（N > 128 的 case） | Q¹ 的坐标（`q0 + 128`）；S¹/O¹ 的 TMEM 列；softmax WG 1 的 `qt` |
 | `n1`、`one_block` 对，`two_tiles` 错 | 同上；或 tile 1 用了 tile 0 的 P 或 S |
 | `ring`、`position` 错，单块 case 对 | K/V 的 item 下标或 stage |

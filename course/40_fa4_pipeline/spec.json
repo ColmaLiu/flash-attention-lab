@@ -71,6 +71,18 @@
       "purpose": "N=200：tile 1 只有 72 行有效，第二个 K/V 块只有 72 个有效 key。"
     },
     {
+      "name": "tile1_position",
+      "shape": [
+        2,
+        190,
+        2,
+        128
+      ],
+      "dtype": "bf16",
+      "pattern": "position",
+      "purpose": "非 causal、D=128、N=190：tile 1 只有 62 行；V[j]=j/N 会暴露 P¹ 的打包顺序（相邻两个 key 交换）与 P¹ 的 TMEM 列。"
+    },
+    {
       "name": "short_tail",
       "shape": [
         1,
@@ -225,6 +237,18 @@
       "dtype": "bf16",
       "causal": true,
       "purpose": "causal 且 N 不是块的倍数：对角 mask 与尾部 mask 同时生效，第二对 tile 只有 44 行。"
+    },
+    {
+      "name": "causal_n_bound",
+      "shape": [
+        1,
+        640,
+        2,
+        64
+      ],
+      "dtype": "fp16",
+      "causal": true,
+      "purpose": "causal、N=640：最后一对 tile（行 512..767）的块数由 N 决定（5 块），不是由对角线决定（6 块）；该对的 tile 1 全部越界，tile 0 的最后一块同时有对角 mask 和尾部 mask。"
     },
     {
       "name": "causal_position",
