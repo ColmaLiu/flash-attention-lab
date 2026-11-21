@@ -1,12 +1,14 @@
-.venv/
+# Regenerable: build cache, downloaded tools, measurements, profiles
 .cache/
+artifacts/
+# Per-learner progress (./lab list)
+progress/
+# Python
 __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
-artifacts/
-progress/results/
-build/
-dist/
+.ruff_cache/
+# Editor setup written by scripts/configure_clangd.py
 compile_commands.json
 .vscode/

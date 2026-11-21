@@ -172,7 +172,7 @@ GEMM 统一为 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 都是 K-major，与 QKᵀ
 - 库基线：cuBLAS（经 torch）、cuDNN SDPA（强制后端，失败即报错）、FA4（`flash_attn.cute`，可选安装，未安装则显示“不可用”）；
 - 维护者的答案性能门槛只在 `selftest --perf` 中检查，不出现在学生输出里。
 
-进度：`progress/results/<ID>.json` 记录每个 step 的通过状态与该关源码指纹。指纹只包含 `students/<ID>/` 与其 include 的 `include/lab/` 文件。
+进度：`progress/<ID>.json` 记录每个 step 的通过状态与该关源码指纹。指纹只包含 `students/<ID>/` 与其 include 的 `include/lab/` 文件。
 
 ## 7. 质量保证
 

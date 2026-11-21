@@ -23,7 +23,7 @@ markers = ["gpu: needs the selected B200 GPU"]
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-extend-exclude = ["third_party", "students", "artifacts", ".cache", "progress/results"]
+extend-exclude = ["third_party", "students", "artifacts", ".cache", "progress"]
 force-exclude = true
 
 [tool.ruff.lint]

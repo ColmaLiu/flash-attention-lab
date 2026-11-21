@@ -98,6 +98,6 @@ LAB_GPU=3 ./lab check 00
 | `artifacts/bench/` | 每次 `bench` 的完整结果（JSON，含源码指纹） |
 | `artifacts/profiles/` | Nsight Compute 报告 |
 | `artifacts/sass/` | `./lab sass` 导出的 SASS |
-| `progress/results/` | 你的每关、每步通过状态（`./lab list` 读取） |
+| `progress/` | 你的每关、每步通过状态（`./lab list` 读取） |
 
 进度记录包含源码指纹。改了代码之后，`./lab list` 会提示 “code changed since last check”。

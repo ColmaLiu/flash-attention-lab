@@ -375,7 +375,7 @@ def _perf_gate(lab, timeout):
 
 
 def _clean(yes):
-    """Remove regenerable output only; never students/ or progress/results/."""
+    """Remove regenerable output only; never students/ or progress/."""
     import shutil
 
     targets = [

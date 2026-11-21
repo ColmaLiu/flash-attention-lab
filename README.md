@@ -144,7 +144,7 @@ third_party/          固定版本的 CUTLASS 与 FlashAttention 源码，供对
 docs/                 全局文档
 scripts/              bootstrap.sh（安装）、activate.sh（激活环境）
 tests/                基础设施测试
-artifacts/  .cache/  progress/results/      bench/profile 结果、编译缓存、进度（Git 忽略）
+artifacts/  .cache/  progress/              bench/profile 结果、编译缓存、进度（Git 忽略）
 ```
 
 `include/lab/` 中的原语遵循“前面写过的，后面提供”：例如你在 20 关自己实现 `ldmatrix` 和 `mma.sync` 的封装，从 21 关起直接 `#include "lab/mma_sync.cuh"`。

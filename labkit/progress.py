@@ -1,4 +1,4 @@
-"""Per-lab progress of the student code, stored in progress/results/<ID>.json."""
+"""Per-lab progress of the student code, stored in progress/<ID>.json."""
 
 import json
 import time
@@ -6,7 +6,7 @@ import time
 from . import ROOT
 from .build import fingerprint
 
-DIR = ROOT / "progress" / "results"
+DIR = ROOT / "progress"
 
 
 def _path(lab):

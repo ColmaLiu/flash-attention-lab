@@ -33,5 +33,5 @@
 
 - 通过 `./lab` 使用独立 Conda 环境 `flash-attention-lab`（可用 `LAB_CONDA_ENV` 修改）。不改 base 环境、系统工具链或其他用户的进程。
 - 只用一张 GPU：由 `LAB_GPU` 选择，并在已有 `CUDA_VISIBLE_DEVICES` 范围内。先用 `nvidia-smi` 找空闲的卡。
-- 日志、测量结果、profile 报告、个人进度写入 Git 忽略的目录（`artifacts/`、`.cache/`、`progress/results/`）。
+- 日志、测量结果、profile 报告、个人进度写入 Git 忽略的目录（`artifacts/`、`.cache/`、`progress/`）。
 - 只有学习者明确要求时才提交；提交的授权不包含推送。
