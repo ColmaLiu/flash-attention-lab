@@ -52,7 +52,7 @@ include/lab/<name>.cuh    （仅引入新原语的关卡）公共原语的参考
 - **case 设计**：
   - 每个 case 写清 `purpose`，即它针对哪一类错误；
   - 必须覆盖尾部（非 tile 倍数）、B 与 H 均大于 1、causal/非 causal、各 dtype 与 D；
-  - 每关 1–3 个 perf case，规模要大到能体现 HBM 或 Tensor Core 的瓶颈：输入超过 L2（126 MB），或 attention 达到 N ≥ 4096、B·H ≥ 16。
+  - 每关 1–3 个 perf case（attention 的部分 4 可到 5 个，分别覆盖非 causal、causal、D=64、长序列和小 B·H 调度），规模要大到能体现 HBM 或 Tensor Core 的瓶颈：输入超过 L2（126 MB），或 attention 达到 N ≥ 4096、B·H ≥ 16。
 - **perf_target**：答案在全部 perf case 上相对该基线的最低比值（`基线耗时 / 答案耗时`），由 `./lab selftest --perf` 检查。中间关卡设一个能说明机制成立的值；每类算子的最终关卡设为 0.9，即 transpose `30_tma_mbarrier`、softmax `01_softmax`、GEMM `33_2cta_gemm`、attention `43_fa4_schedule`。
 
 ## 3. 学生骨架
