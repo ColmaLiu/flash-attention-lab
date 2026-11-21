@@ -6,7 +6,7 @@
 
 ### 所有 step 共用
 
-- **一个 `exp_shifted(x, m) = ex2.approx.ftz((x - m) * log2 e)`。** 先减后乘：`x - m` 在 `x`、`m` 相近时精确（Sterbenz），乘法只引入一次舍入。曾试过 FlashAttention 源码里常见的 `fmaf(x, log2e, -m * log2e)`，它在 `shifted` case（`x ≈ 5000`）上把 `m * log2e ≈ 7200` 舍入到 2⁻¹¹ 的倍数，相对误差达到约 2.5e-4，超过 1e-4 的容差，实测失败。attention 的 logit 一般不大且输出是 BF16，所以 FA 用 FMA 形式没有问题；本关是 FP32 输出，用先减后乘。
+- **一个 `exp_shifted(x, m) = ex2.approx.ftz((x - m) * log2 e)`。** 先减后乘：`x - m` 在 `x`、`m` 相近时精确（Sterbenz），乘法只引入一次舍入。曾试过 FlashAttention 源码里常见的 `fmaf(x, log2e, -m * log2e)`：它把 `m * log2e ≈ 7200` 舍入成 FP32，误差 `δ(m)` 最多 2⁻¹²，结果是 `e^(x-m) · 2^(-δ(m))`。步骤 1、2 整行只有一个平移量，这个因子在 `e / l` 中抵消，`shifted` 仍然通过；步骤 3、4 合并不同平移量 `m_t` 的部分状态，`e^(m_t - M)` 消不掉各自的 `2^(-δ(m_t))`，实测 `shifted` 相对误差约 2.5–4e-4，超过 1e-4 的容差。attention 的 logit 一般不大（`δ` 约 1e-6）且输出是 BF16，所以 FA 用 FMA 形式没有问题；本关是 FP32 输出，四个 step 统一用先减后乘。
 - **直接写 `ex2.approx.ftz.f32`**，而不是 `exp2f`：`exp2f` 为了正确处理结果为次正规数的情况会多出 `FSETP` 和两条带谓词的 `FMUL`；`ftz` 把小于 2⁻¹²⁶ 的结果冲成 0，相对 1e-8 的绝对容差可以忽略。
 - **`-inf` 的处理集中在两处**：`merge()` 中新最大值为 `-inf` 时返回空状态；步骤 4 中线程局部最大值为 `-inf` 时用 0 作平移。这两处都对应 FlashAttention 源码里的 `Check_inf` / `max == -INFINITY ? 0 : max`。
 

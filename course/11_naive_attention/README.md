@@ -214,7 +214,7 @@ S/P 的流量是 Q/K/V/O 的 64 倍。一个融合的 kernel（例如 12 关的 
 ./lab profile 11
 ```
 
-`./lab bench 11 --step 1` 只计时前一步已完成的 kernel（此时与库基线的比值不是完整 attention 的比值）；`./lab profile 11 --step 1` 或 `--step 2` 会列出每个 kernel 的时间和字节数。
+`./lab bench 11 --step 1` 和 `--step 2` 只计时到该步为止已完成的 kernel，而 TFLOP/s 仍按完整 attention 的计算量算、`vs` 仍是与完整 attention 库基线的耗时之比。所以这两步 bench 输出的 TFLOP/s 和 `vs` 都对应一个没做完的 kernel，没有意义，只看耗时本身。`./lab profile 11 --step 1` 或 `--step 2` 会列出每个 kernel 的时间和字节数。
 
 ### 常见错误
 

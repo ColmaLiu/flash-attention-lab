@@ -42,7 +42,7 @@ __global__ void gemm_naive(const float *__restrict__ a,
 //   3. acc += as[ty][kk] * bs[tx][kk] for kk in 0..31
 //   4. __syncthreads() — why is this second one needed?
 // After the loop, write acc if (m0 + ty, n0 + tx) is inside C.
-// The tiles are padded to 33 floats per row: step 3 of the compute reads a
+// The tiles are padded to 33 floats per row: item 3 above reads a
 // column of bs across the warp (tx varies). Work out the banks (lab 00 §4.3).
 // ---------------------------------------------------------------------------
 constexpr int kTile = 32;
@@ -120,8 +120,9 @@ __global__ void __launch_bounds__(kThreads)
 
 // Provided: four consecutive elements src[row][col .. col+3] of a
 // [rows, cols] row-major matrix, zero outside it. With vec == true and all
-// four inside, this is one 16-byte load; vec requires cols % 4 == 0 so that
-// every row starts 16-byte aligned (col must be a multiple of 4).
+// four inside, this is one 16-byte load; vec requires cols % 4 == 0 and a
+// 16-byte aligned src so that every row starts 16-byte aligned (col must be
+// a multiple of 4).
 __device__ __forceinline__ float4 load4(const float *__restrict__ src, int row,
                                         int col, int rows, int cols, bool vec) {
   float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -165,8 +166,9 @@ __device__ __forceinline__ void store4(float *__restrict__ dst, int row,
 // For each K slice:
 //   1. Load: thread tid reads ONE float4 of A with load4: tile row
 //      lr = tid / 2, k columns lk = (tid % 2) * 4 .. +3, i.e. A[m0 + lr][k0 +
-//      lk ..]; same for B. Pass vec = (k % 4 == 0). Store the four values
-//      transposed: as[lk + 0][lr] = v.x, ..., as[lk + 3][lr] = v.w.
+//      lk ..]; same for B. Pass vec = k_vec (run() sets it when K % 4 == 0
+//      and A, B are 16-byte aligned). Store the four values transposed:
+//      as[lk + 0][lr] = v.x, ..., as[lk + 3][lr] = v.w.
 //   2. __syncthreads()
 //   3. For each kk: af[0..3] = as[kk][ty*4 .. +3] and af[4..7] =
 //      as[kk][64 + ty*4 .. +3], each as ONE float4 read (reinterpret_cast
@@ -174,13 +176,14 @@ __device__ __forceinline__ void store4(float *__restrict__ dst, int row,
 //      outer product as step 3.
 //   4. __syncthreads()
 // After the loop, write each row's two groups of 4 columns with store4
-// (vec = (n % 4 == 0)).
+// (vec = n_vec: N % 4 == 0 and C 16-byte aligned).
 // ---------------------------------------------------------------------------
 constexpr int kPadT = 4;
 
 __global__ void __launch_bounds__(kThreads)
     gemm_vec(const float *__restrict__ a, const float *__restrict__ b,
-             float *__restrict__ c, int m, int n, int k) {
+             float *__restrict__ c, int m, int n, int k, bool k_vec,
+             bool n_vec) {
   __shared__ __align__(16) float as[kBK][kBM + kPadT];
   __shared__ __align__(16) float bs[kBK][kBN + kPadT];
   int tid = threadIdx.x;
@@ -199,6 +202,10 @@ Plan make_plan(const lab::GemmProblem &p) {
               "this lab uses FP32 A, B and C");
   LAB_REQUIRE(p.m > 0 && p.n > 0 && p.k > 0, "M, N, K must be positive");
   return {};
+}
+
+static bool aligned16(const void *ptr) {
+  return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
 }
 
 void run(const Plan &, const lab::GemmProblem &p, cudaStream_t stream) {
@@ -225,7 +232,13 @@ void run(const Plan &, const lab::GemmProblem &p, cudaStream_t stream) {
   }
   default: {
     dim3 grid((p.n + kBN - 1) / kBN, (p.m + kBM - 1) / kBM);
-    gemm_vec<<<grid, kThreads, 0, stream>>>(a, b, c, p.m, p.n, p.k);
+    // 16-byte accesses need every row start aligned: K % 4 == 0 and A, B
+    // 16-byte aligned for the loads along K; N % 4 == 0 and C aligned for
+    // the stores along N. Otherwise load4/store4 fall back to scalars.
+    bool k_vec = p.k % 4 == 0 && aligned16(a) && aligned16(b);
+    bool n_vec = p.n % 4 == 0 && aligned16(c);
+    gemm_vec<<<grid, kThreads, 0, stream>>>(a, b, c, p.m, p.n, p.k, k_vec,
+                                            n_vec);
     break;
   }
   }

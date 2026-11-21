@@ -33,9 +33,11 @@ __device__ __forceinline__ float ex2(float x) {
 
 // e^(x - m) = 2^((x - m) * log2 e). Subtract first: x - m is exact when x and
 // m are close (Sterbenz lemma), so a large common offset (the `shifted` case,
-// x ~ 5000) does not cost precision. fmaf(x, log2e, -m * log2e) would round
-// m * log2e ~ 7200 to a multiple of 2^-11 and lose up to ~2e-4 relative
-// accuracy, which fails the `shifted` case.
+// x ~ 5000) does not cost precision. fmaf(x, log2e, -m * log2e) rounds
+// m * log2e ~ 7200 to FP32 and returns e^(x-m) * 2^(-d(m)), |d(m)| <= 2^-12.
+// With one shift per row (steps 1-2) the factor cancels in e / l; when states
+// with different shifts are merged (steps 3-4) it does not, and `shifted`
+// fails with ~3e-4 relative error.
 __device__ __forceinline__ float exp_shifted(float x, float m) {
   return ex2((x - m) * kLog2e);
 }

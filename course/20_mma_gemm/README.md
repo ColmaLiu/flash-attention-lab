@@ -69,7 +69,7 @@ D[16×8] += A[16×16] · B[16×8]          （B 在这里按 k×n 理解）
 | `wgmma.mma_async` | 仅 Hopper（SM90） | 4 个 warp | shared memory / 寄存器 | 寄存器 |
 | `tcgen05.mma` | Blackwell（SM100） | 一个线程 | shared memory / TMEM | TMEM |
 
-B200 仍然支持 `mma.sync`，但它是“旧路径”。在 7 号卡上用一个只发 `mma.sync` 的微基准测得：
+B200 仍然支持 `mma.sync`，但它是“旧路径”。在本机上用一个只发 `mma.sync` 的微基准测得：
 
 | | BF16 吞吐 | 相对标称 2250 TFLOP/s |
 |---|---|---|
@@ -164,7 +164,7 @@ ldmatrix.sync.aligned.m8n8.x4.shared.b16 {r0,r1,r2,r3}, [addr];
 |---|---|
 | 只在部分 lane 上执行（放在 `if (lane < 16)` 里） | 未定义行为，可能挂起 |
 | 传 generic 指针当地址 | 地址错，读到别处；要用 `__cvta_generic_to_shared` 转成 32 位 shared 地址 |
-| 一行跨越 16 字节对齐边界 | 未定义行为 |
+| 行地址不是 16 字节对齐 | 未定义行为 |
 | `.x4` 时 lane 16–31 的地址没有设好 | 第 2、3 个矩阵读错 |
 
 ### 4.5 bank conflict 与 XOR swizzle
@@ -301,7 +301,7 @@ bank conflict 应该降到接近 0，wavefront 数降为 step 2 的 1/4。
 
 ## 7. 性能
 
-7 号卡实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS BF16→FP32 的耗时除以本版本耗时；“占 mma.sync 上限”是 TFLOP/s 除以 §4.1 的 560 TFLOP/s）：
+本机实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS BF16→FP32 的耗时除以本版本耗时；“占 mma.sync 上限”是 TFLOP/s 除以 §4.1 的 560 TFLOP/s）：
 
 | 版本 | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | 占 mma.sync 上限 |
 |---|---|---|---|

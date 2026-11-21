@@ -159,7 +159,8 @@ __global__ void __launch_bounds__(kThreads)
 
 // Four consecutive elements src[row][col .. col+3] of a [rows, cols]
 // row-major matrix, zero outside it. `vec` says whether 16-byte loads are
-// allowed (cols % 4 == 0 keeps every row 16-byte aligned).
+// allowed (cols % 4 == 0 and a 16-byte aligned base keep every row aligned;
+// run() checks both).
 __device__ __forceinline__ float4 load4(const float *__restrict__ src, int row,
                                         int col, int rows, int cols, bool vec) {
   float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -209,20 +210,20 @@ __device__ __forceinline__ void store4(float *__restrict__ dst, int row,
 // Thread (tx, ty) owns rows {ty*4 .. ty*4+3} and {64 + ty*4 .. 64 + ty*4+3},
 // columns likewise with tx: two float4 per operand per kk. Splitting the 8
 // values into two groups 64 apart makes the 16 tx of a warp read one
-// contiguous 256-byte run (2 wavefronts, the minimum) instead of 16 runs
-// 32 bytes apart.
+// contiguous 256-byte run instead of 16 runs 32 bytes apart. ncu measures 4
+// wavefronts per bs read (16 distinct float4) and 2 per as read (one address
+// per half-warp), both equal to its "ideal" count: no bank conflicts.
 constexpr int kPadT = 4;
 
 __global__ void __launch_bounds__(kThreads)
     gemm_vec(const float *__restrict__ a, const float *__restrict__ b,
-             float *__restrict__ c, int m, int n, int k) {
+             float *__restrict__ c, int m, int n, int k, bool k_vec,
+             bool n_vec) {
   __shared__ __align__(16) float as[kBK][kBM + kPadT];
   __shared__ __align__(16) float bs[kBK][kBN + kPadT];
   int tid = threadIdx.x;
   int tx = tid % 16, ty = tid / 16;
   int m0 = blockIdx.y * kBM, n0 = blockIdx.x * kBN;
-  bool k_vec = (k % 4) == 0;
-  bool n_vec = (n % 4) == 0;
 
   // Loader mapping: thread tid reads one float4 of A (and one of B):
   // tile row tid / 2, k columns (tid % 2) * 4 .. +3.
@@ -290,6 +291,10 @@ Plan make_plan(const lab::GemmProblem &p) {
   return {};
 }
 
+static bool aligned16(const void *ptr) {
+  return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
+}
+
 void run(const Plan &, const lab::GemmProblem &p, cudaStream_t stream) {
   auto a = static_cast<const float *>(p.a);
   auto b = static_cast<const float *>(p.b);
@@ -314,7 +319,13 @@ void run(const Plan &, const lab::GemmProblem &p, cudaStream_t stream) {
   }
   default: {
     dim3 grid((p.n + kBN - 1) / kBN, (p.m + kBM - 1) / kBM);
-    gemm_vec<<<grid, kThreads, 0, stream>>>(a, b, c, p.m, p.n, p.k);
+    // 16-byte accesses need every row start aligned: K % 4 == 0 and A, B
+    // 16-byte aligned for the loads along K; N % 4 == 0 and C aligned for
+    // the stores along N. Otherwise load4/store4 fall back to scalars.
+    bool k_vec = p.k % 4 == 0 && aligned16(a) && aligned16(b);
+    bool n_vec = p.n % 4 == 0 && aligned16(c);
+    gemm_vec<<<grid, kThreads, 0, stream>>>(a, b, c, p.m, p.n, p.k, k_vec,
+                                            n_vec);
     break;
   }
   }

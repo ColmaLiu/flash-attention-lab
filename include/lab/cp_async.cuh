@@ -22,7 +22,7 @@ namespace lab {
 // Starts copying 16 bytes from global `src` to shared `dst` and returns
 // immediately; the data is not visible until a matching wait_group.
 // Both addresses must be 16-byte aligned. .cg caches in L2 only (bypasses
-// L1), the only cache mode allowed for 16-byte copies besides .ca.
+// L1) and requires cp-size 16; .ca (also caches in L1) allows 4, 8 or 16.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ void cp_async_16(void *dst, const void *src) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(

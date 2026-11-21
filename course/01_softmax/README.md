@@ -204,7 +204,7 @@ __device__ float ex2(float x) {           // 骨架已提供
 __device__ float exp_shifted(float x, float m) { return ex2((x - m) * kLog2e); }
 ```
 
-- `ex2.approx.f32` 的最大误差是 2 ulp（相对误差约 2.4 × 10⁻⁷）；`ex2(-inf) = 0`。
+- PTX ISA 对 `ex2.approx.f32` 的说明是：在全部输入范围内，与正确舍入的结果相比最大误差为 2 ulp（“The maximum ulp error is 2 ulp from correctly rounded result across the full range of inputs”），相对误差不超过约 2.4 × 10⁻⁷；`ex2(-inf) = +0`。
 - `.ftz`（flush to zero）：结果小于 2⁻¹²⁶ ≈ 1.2 × 10⁻³⁸ 时直接返回 0，省掉次正规数的处理。
 - 本关容差是 `|err| ≤ 1e-8 + 1e-4 · |expected|`（FP64 的 `torch.softmax` 作参考），这两项误差都远小于它。
 
@@ -218,7 +218,12 @@ __device__ float exp_shifted(float x, float m) { return ex2((x - m) * kLog2e); }
 
 `-use_fast_math` 会把 `expf(t)` 换成 `__expf(t)`，即 `ex2(t * log₂e)`，CUDA 文档给出的误差界是 `2 + ⌊1.173·|t|⌋` ulp：参数越大越不准。先减去最大值之后，对结果有贡献的元素的 `t = x - m` 都接近 0（`t < -100` 的项小于 e⁻¹⁰⁰，可以忽略），误差界也就很小。
 
-**先减后乘。** `shifted` case 每行加了 5000。`x - m` 两个相近的数相减是精确的（Sterbenz 引理：`m/2 ≤ x ≤ 2m` 时 `x - m` 没有舍入），乘以 `log₂e` 只有一次舍入，相对误差约 6 × 10⁻⁸。很多代码（包括 FlashAttention 的源码）写成一条 FMA：`fmaf(x, log2e, -m * log2e)`，省一条指令。但 `m · log₂e ≈ 7200` 先被舍入到 2⁻¹¹ ≈ 4.9 × 10⁻⁴ 的倍数，指数误差最多约 2.4 × 10⁻⁴，输出的相对误差约 1.7 × 10⁻⁴。我们实测这种写法在 `shifted` 上失败，最大相对误差约 2.5 × 10⁻⁴。attention 里 logit 通常不大、输出是 BF16，所以 FA 用 FMA 没问题；本关输出是 FP32，就用先减后乘。
+**先减后乘。** `shifted` case 每行加了 5000。`x - m` 两个相近的数相减是精确的（Sterbenz 引理：`m/2 ≤ x ≤ 2m` 时 `x - m` 没有舍入），乘以 `log₂e` 只有一次舍入，相对误差约 6 × 10⁻⁸。很多代码（包括 FlashAttention 的源码）写成一条 FMA：`fmaf(x, log2e, -m * log2e)`，省一条指令。这时 `m · log₂e ≈ 7200` 先被舍入成 FP32，记舍入误差为 `δ(m)`，`|δ(m)|` 最多是半个 ulp，即 2⁻¹² ≈ 2.4 × 10⁻⁴。于是 FMA 写法算出的是 `e^{x-m} · 2^{-δ(m)}`：多了一个只依赖平移量 `m` 的因子。
+
+- **步骤 1、2**：整行只用一个平移量 `M`，分子 `e^{x-M}` 和分母 `Σ e^{x-M}` 带着同一个因子 `2^{-δ(M)}`，相除后正好抵消。FMA 写法在这两步也能通过 `shifted`。
+- **步骤 3、4**：部分状态各用自己的平移量 `m_t`（步骤 3 是每个线程逐元素更新的 running max，步骤 4 是线程的局部最大值），`l_t` 里带着 `2^{-δ(m_t)}`；合并时乘的 `e^{m_t - M}` 也用 FMA 写法算，只多出 `2^{-δ(M)}`，消不掉 `2^{-δ(m_t)}`。不同的 `m_t` 舍入误差不同，分母就成了带不同权重的和，与分子不再抵消。本机实测这种写法在步骤 3、4 的 `shifted` 上失败，最大相对误差约 2.5–4 × 10⁻⁴。
+
+attention 里 logit 通常只有几十，`δ` 在 10⁻⁶ 量级，输出又是 BF16，所以 FA 用 FMA 没问题；本关输出是 FP32、容差 1e-4，就用先减后乘。另一种写法“先把 `x` 乘以 `log₂e` 再减”更糟：每个元素的 `x · log₂e` 各自舍入，误差连步骤 1、2 也抵消不掉。
 
 ### 4.5 向量化访存与缓存提示
 
@@ -339,7 +344,8 @@ chunk  k=0: lane 0 1 2 ... 31 | k=1: lane 0 1 ... 31
 |---|---|
 | `large` 出现 NaN | 没有减去最大值，`e^{x}` 溢出 |
 | `masked`、`one_col`、`masked_short` 出现 NaN | `(-inf) - (-inf)`：`merge` 或步骤 4 的局部平移没有处理 `m = -inf` |
-| 只有 `shifted` 失败，误差约 2e-4 | 用了 `fmaf(x, log2e, -m * log2e)` 或先把 `x` 乘以 `log2e` 再减 |
+| 步骤 3、4 只有 `shifted` 失败，相对误差约 2e-4–4e-4 | 用了 `fmaf(x, log2e, -m * log2e)`：各部分状态平移量的舍入误差在合并时消不掉（4.4 节） |
+| 所有步骤只有 `shifted` 失败 | 先把 `x` 乘以 `log2e` 再减：每个元素的舍入误差各不相同 |
 | 结果偶尔错、不稳定 | 读完 `smem` 后缺少 `__syncthreads()`，下一次归约覆盖了还没读的值 |
 | `TIMEOUT` 或结果错，只在 block 一行的配置 | `__syncthreads()` 放在了部分线程不执行的分支里（例如没有元素的线程提前 `return`） |
 | 步骤 2 只有 lane 0 结果对 | 用了 `__shfl_down_sync` 的归约，结果只在 lane 0；本关的写法要求每个 lane 都拿到结果 |
@@ -382,7 +388,7 @@ torch 在这三个 case 上分别约为标称峰值的 35%、56%、77%。步骤 
 3. 合并 `(m_A, l_A) = (-inf, 0)` 与 `(m_B, l_B) = (5, 2)` 时，`merge` 的公式里会出现哪些 `e^{…}`？会产生 NaN 吗？如果两个都是 `(-inf, 0)` 呢？
 4. warp shuffle butterfly 有 5 轮。如果一个 warp 中只有 20 个 lane 执行到 `__shfl_xor_sync(0xffffffff, …)`，会怎样？本关的代码如何避免这种情况？
 5. 步骤 4 中 rows32768 用 1024 线程 × 32 个 float。为什么不用 512 线程 × 64 个 float 来让每 SM 驻留更多行？
-6. FlashAttention 的源码用 `exp2f(s * scale_log2 - max_scaled)`（一条 FMA）。为什么它在 attention 中可以接受，在本关的 `shifted` case 上却不行？
+6. FlashAttention 的源码用 `exp2f(s * scale_log2 - max_scaled)`（一条 FMA）。为什么它在 attention 中可以接受，在本关步骤 3、4 的 `shifted` case 上却不行？步骤 1、2 为什么又没问题？
 
 <details>
 <summary>参考答案</summary>
@@ -392,7 +398,7 @@ torch 在这三个 case 上分别约为标称峰值的 35%、56%、77%。步骤 
 3. `m = 5`，`l = 0 · e^{-inf - 5} + 2 · e^{0} = 0 · 0 + 2 = 2`，没有 NaN。两个都是 `(-inf, 0)` 时 `m = -inf`，`e^{(-inf) - (-inf)} = e^{NaN}`，`0 · NaN = NaN`，所以 `merge` 要在 `m = -inf` 时直接返回 `(-inf, 0)`。
 4. 掩码声明 32 个 lane 都参与，而有 lane 没执行到，行为未定义（可能读到垃圾或挂起）。本关所有线程都执行 shuffle，没有元素的线程带着单位元 `-inf`、0 或 `(-inf, 0)` 参与。
 5. 寄存器文件每 SM 只有 256 KB，一行 128 KB 的数据本身就占了一半；加上地址、循环变量等，两行放不下。512 × 64 的配置每线程要 100 个以上寄存器，每 SM 仍只能驻留一行，而且每个 SM 上的 warp 更少。要多驻留一行，得把一部分数据放进 shared memory，或者把一行拆给多个 SM（第 33 关的 cluster）。
-6. FMA 写法先把 `m · log₂e` 舍入成 FP32，指数的绝对误差最多是它所在区间的半个 ulp。attention 的 logit 通常只有几十，这个误差在 10⁻⁶ 量级，而输出是 BF16（相对精度约 4 × 10⁻³），可以忽略；`shifted` 中 `m · log₂e ≈ 7200`，半个 ulp 是 2⁻¹² ≈ 2.4 × 10⁻⁴，输出相对误差约 1.7 × 10⁻⁴，超过了本关 1e-4 的相对容差。
+6. FMA 写法先把 `m · log₂e` 舍入成 FP32，误差 `δ(m)` 最多是它所在区间的半个 ulp，算出的是 `e^{x-m} · 2^{-δ(m)}`。步骤 1、2 整行只有一个平移量 `M`，分子分母带同一个因子 `2^{-δ(M)}`，相除抵消。步骤 3、4 的部分状态用不同的平移量 `m_t`，各自带 `2^{-δ(m_t)}`，合并时乘的 `e^{m_t - M}` 消不掉它们，分母成了带不同权重的和。`shifted` 中 `m · log₂e ≈ 7200`，半个 ulp 是 2⁻¹² ≈ 2.4 × 10⁻⁴，这些权重的差别让输出相对误差达到 10⁻⁴ 量级（实测约 2.5–4 × 10⁻⁴），超过本关 1e-4 的相对容差。FA 同样是 online softmax，但 attention 的 logit 通常只有几十，`δ` 在 10⁻⁶ 量级，而输出是 BF16（相对精度约 4 × 10⁻³），可以忽略。
 
 </details>
 

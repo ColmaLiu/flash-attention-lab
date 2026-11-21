@@ -75,8 +75,3 @@ d = 64 / 128 时分别用 67 KB / 116 KB，需要 `cudaFuncSetAttribute` 放开 
 - `Br`、`Bc` 固定为 64，没有按 d 或 SRAM 预算调整；d = 128 时每 SM 只能驻留 1 个 CTA。
 - 并行度为 B·H，B·H 远小于 148 时 GPU 大部分空闲（这是本关要展示的现象）。
 - 每个 j 都重新加载并转置 K_j，Q_i 和 O_i 的加载没有与计算流水重叠（`cp.async` 在 21 关）。
-- harness 的 `check_case` 在默认流上用 NaN 填充输出，再在另一个非阻塞流上运行 kernel，两者之间
-  没有同步。本 kernel 会先写 O = 0 再读回 O，若填充晚于 kernel 开始执行，就会读到 NaN。实测在新
-  进程的第一次检查中偶发（第一次启动填充 kernel 较慢）；设置 `CUDA_LAUNCH_BLOCKING=1` 或在填充后
-  同步即可消除。这是基础设施问题，不是 kernel 的竞争；racecheck 只覆盖 shared memory，HBM 状态的
-  顺序靠上面“读写顺序”一节的论证保证。

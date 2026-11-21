@@ -226,10 +226,9 @@ void run(const Plan &plan, const lab::AttentionProblem &p,
 
   // TODO(3) — step 3: O(i, d) = sum_j P(i, j) V(j, d), written to o
   // ([B, N, H, D], the same layout as Q).
-  //   gemm() computes C(m, n) = alpha * sum_k A(m, k) B(n, k). Here A = P
-  //   (m = i, k = j) and B(n, k) must be V(k, n), i.e. n = d and k = j.
-  //   Express "V read by (d, j)" purely with Strides: no transpose kernel,
-  //   no copy. Then call gemm() with M = N, N = D, K = N and alpha = 1.
+  //   gemm() computes C(m, n) = alpha * sum_k A(m, k) B(n, k), with A = P.
+  //   Hint: V has to be read as a (d, j) matrix. Express that purely with
+  //   Strides: no transpose kernel, no copy.
   LAB_TODO(3);
 }
 

@@ -33,6 +33,5 @@
 ## 已知局限
 
 - efficient 基线的 FP32 路径用 Tensor Core 3xTF32（源码推断：`gemm_kernel_utils.h` 中 `DefaultGemmType<ArchTag, float>` 选 `OpMultiplyAddFastF32`），所以它和本答案的差距不全来自 IO。
-- `./lab bench --step 1/2` 不可用：`runner.bench` 计时前总是校验 O，而 probe step 不写 O。讲义改用 `./lab profile --step n` 看前两步。
 - PV 的 grid 在 D = 64 时只有 B·H·⌈N/64⌉ 个 block，SM 占用偏低；split-K 或更小的 M tile 能改善，但不是本关内容。
 - softmax 对 N = 1 之类的短行仍用 128 线程，大部分线程空闲；对本关的规模无影响。

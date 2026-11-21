@@ -75,7 +75,7 @@ cp.async.cg.shared.global [dst], [src], 16, src_size;
 | 部分 | 含义 |
 |---|---|
 | `cp.async` | 从 global 拷贝到 shared，**不经过寄存器**，发出后线程立即继续执行（SASS 中是 `LDGSTS`） |
-| `.cg` | 只缓存在 L2（绕过 L1）。另一种是 `.ca`（也缓存在 L1）。16 字节拷贝两种都可以 |
+| `.cg` | 只缓存在 L2（绕过 L1），只允许 cp-size = 16。另一种是 `.ca`（也缓存在 L1），cp-size 可以是 4、8、16 |
 | `16` | 拷贝大小（cp-size），只能是 4、8、16；`.cg` 只能是 16。`dst`、`src` 都要按大小对齐 |
 | `src_size` | 可选。只从 `src` 读 `src_size` 个字节，剩下的 `16 − src_size` 个字节**填零** |
 
@@ -186,7 +186,7 @@ pid: 0  1  2  3                 pid: 0  4  8 12
                                     16 20 ...       ← 下一组
 ```
 
-最后一组可能不满 kGroup 行（`raster` case：11 行 tile，最后一组 3 行）。
+上图只是示意，取 kGroup = 4 是为了画得下；答案用 `kGroupM = 8`。最后一组可能不满 kGroup 行（`raster` case：11 行 tile，kGroup = 8 时最后一组 3 行）。
 
 ## 6. 分步练习
 
@@ -226,6 +226,8 @@ pid: 0  1  2  3                 pid: 0  4  8 12
 | 更大的 CTA tile | `128, 256, 32, 2, 4, 3` |
 | 更多 stage | `128, 128, 64, 2, 2, 4` |
 
+`Step3` 的默认配置就是步骤 2 的配置，所以写完 TODO(3a) 后 `./lab check 21 --step 3` 就会通过。通过只说明光栅化写对了；这一步的重点是调参：比较各配置的 `bench`，用 profile 解释快慢。
+
 ```bash
 ./lab check 21
 ./lab bench 21 --step 3 --case square
@@ -250,7 +252,7 @@ pid: 0  1  2  3                 pid: 0  4  8 12
 
 ## 7. 性能
 
-7 号卡实测（CUDA Graph；`vs cublas` 越大越好；“占 mma.sync 上限”是 TFLOP/s 除以 20 关 §4.1 测得的 560 TFLOP/s）：
+本机实测（CUDA Graph；`vs cublas` 越大越好；“占 mma.sync 上限”是 TFLOP/s 除以 20 关 §4.1 测得的 560 TFLOP/s）：
 
 | 版本 | `square` `vs cublas` | `wide` `vs cublas` | 占 mma.sync 上限 |
 |---|---|---|---|
