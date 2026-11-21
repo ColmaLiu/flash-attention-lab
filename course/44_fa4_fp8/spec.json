@@ -1,0 +1,407 @@
+{
+  "id": "44_fa4_fp8",
+  "title": "FP8 前向：E4M3 的 Q/K/V、descale、P 的 FP8 量化与误差",
+  "part": 4,
+  "kind": "attention",
+  "prerequisites": [
+    "40_fa4_pipeline"
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "title": "FP8 的 Q·Kᵀ（kind::f8f6f4），descale 折进 scale，S 写入 probe",
+      "cases": [
+        "n1",
+        "one_block",
+        "two_tiles",
+        "tile1_tail",
+        "short_tail",
+        "scale",
+        "peaked_d64",
+        "medium"
+      ],
+      "probe": {
+        "oracle": "fp8_scores",
+        "axes": [
+          "b",
+          "h",
+          "i",
+          "j"
+        ]
+      }
+    },
+    {
+      "step": 2,
+      "title": "P 乘 2⁸ 量化为 E4M3 写回 TMEM，FP8 的 P·V（TS），epilogue 撤销缩放",
+      "cases": "all"
+    },
+    {
+      "step": 3,
+      "title": "误差分析：ℓ 改为累加量化后的 P",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "n1",
+      "shape": [
+        1,
+        1,
+        1,
+        64
+      ],
+      "dtype": "e4m3",
+      "purpose": "N=1：tile 1 的 128 行全部越界（TMA 填零、store 跳过）；O = v_descale·V₈，LSE = scale·q_descale·k_descale·q₈·k₈。"
+    },
+    {
+      "name": "one_block",
+      "shape": [
+        2,
+        128,
+        3,
+        64
+      ],
+      "dtype": "e4m3",
+      "purpose": "N=128：只有 tile 0 有效，B>1、H>1：8 位 tensor map（UINT8、box 行 = D 字节）的坐标与 grid 映射。"
+    },
+    {
+      "name": "two_tiles",
+      "shape": [
+        2,
+        256,
+        3,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "position",
+      "purpose": "N=256 一对 tile、两个块，D=128：tile 1 的 Q 坐标、S¹/O¹ 的 TMEM 列、P¹ 的 32 列位置。"
+    },
+    {
+      "name": "tile1_tail",
+      "shape": [
+        1,
+        200,
+        2,
+        128
+      ],
+      "dtype": "e4m3",
+      "purpose": "N=200：tile 1 只有 72 行有效，第二个块只有 72 个有效 key（TMA 填零的 FP8 是 +0）。"
+    },
+    {
+      "name": "tile1_position",
+      "shape": [
+        2,
+        190,
+        2,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "position",
+      "purpose": "D=128、N=190：V[j]=j/N 暴露 P 的字节顺序（一列 4 个 key，key 4c 在最低字节）。"
+    },
+    {
+      "name": "short_tail",
+      "shape": [
+        1,
+        37,
+        2,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "position",
+      "purpose": "N=37、D=128：一行 128 字节恰好一个 128B swizzle 行；91 个填充 key 必须被 mask。"
+    },
+    {
+      "name": "scale",
+      "shape": [
+        1,
+        256,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "large_logits",
+      "scale": 1.0,
+      "purpose": "scale=1、logit 上百：两个 descale 必须折进 softmax 的 scale；不减最大值会溢出。"
+    },
+    {
+      "name": "uniform",
+      "shape": [
+        2,
+        300,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "uniform",
+      "purpose": "Q=0、D=64：每个 P 都是 2⁸ = 256（E4M3 可精确表示），O 是 V 的均值，LSE = ln N：P 的缩放必须在 ℓ 和 LSE 中一致地撤销。"
+    },
+    {
+      "name": "ones_v",
+      "shape": [
+        1,
+        513,
+        4,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "ones_v",
+      "purpose": "V=1：O = Σp̂/ℓ。步骤 2（ℓ 用 FP32 的 p）误差约 1e-2；步骤 3（ℓ 用量化后的 p̂）O 恰好为 1。"
+    },
+    {
+      "name": "position",
+      "shape": [
+        2,
+        520,
+        3,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "position",
+      "purpose": "V[j]=j/N、D=64、5 个块：64B swizzle 的 V 描述符（SBO=512）、K/V 环的下标。"
+    },
+    {
+      "name": "peaked",
+      "shape": [
+        1,
+        777,
+        2,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "large_logits",
+      "purpose": "D=128、7 个块、logit 很大：P 集中在少数 key 上，E4M3 的相对误差（≤ 2⁻⁴）直接进入 O：误差最大的 case 之一。"
+    },
+    {
+      "name": "peaked_d64",
+      "shape": [
+        2,
+        513,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "large_logits",
+      "purpose": "D=64、N=513：64B swizzle 的 Q/K 描述符（每 K 片前进 32 字节、SBO=512）。"
+    },
+    {
+      "name": "ring",
+      "shape": [
+        1,
+        1536,
+        1,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "position",
+      "purpose": "12 个块、24 个 ring item：环形 buffer 绕多圈（FP8 的环有 8 级）。"
+    },
+    {
+      "name": "medium",
+      "shape": [
+        2,
+        1024,
+        4,
+        128
+      ],
+      "dtype": "e4m3",
+      "purpose": "中等规模随机数据，D=128。"
+    },
+    {
+      "name": "medium_d64",
+      "shape": [
+        2,
+        1024,
+        4,
+        64
+      ],
+      "dtype": "e4m3",
+      "purpose": "中等规模随机数据，D=64。"
+    },
+    {
+      "name": "causal_n1",
+      "shape": [
+        1,
+        1,
+        1,
+        128
+      ],
+      "dtype": "e4m3",
+      "causal": true,
+      "purpose": "causal 且 N=1：唯一的 query 只看见自己。"
+    },
+    {
+      "name": "causal_pair",
+      "shape": [
+        1,
+        256,
+        1,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "large_logits",
+      "causal": true,
+      "purpose": "causal、一对 tile、logit 很大：tile 0 的第 2 个块全部被 mask（P 全为 0，不能产生 NaN）。"
+    },
+    {
+      "name": "causal_tail",
+      "shape": [
+        2,
+        300,
+        3,
+        64
+      ],
+      "dtype": "e4m3",
+      "causal": true,
+      "purpose": "causal 且 N 不是块的倍数：对角 mask 与尾部 mask 同时生效。"
+    },
+    {
+      "name": "causal_n_bound",
+      "shape": [
+        1,
+        640,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "causal": true,
+      "purpose": "causal、N=640：最后一对 tile 的块数由 N 决定（5 块），不是由对角线决定。"
+    },
+    {
+      "name": "causal_position",
+      "shape": [
+        2,
+        333,
+        2,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "position",
+      "causal": true,
+      "purpose": "causal、V[j]=j/N、D=128：mask 或 P 的字节顺序偏一位就会读到别的位置值。"
+    },
+    {
+      "name": "causal_peaked",
+      "shape": [
+        2,
+        517,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "large_logits",
+      "causal": true,
+      "purpose": "causal 且 logit 很大：被 mask 的元素不能参与最大值；行首几行只有很少的 key，P 的量化误差最大。"
+    },
+    {
+      "name": "causal_uniform",
+      "shape": [
+        1,
+        200,
+        2,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "uniform",
+      "causal": true,
+      "purpose": "causal 且 Q=0：O[i] 是 V[0..i] 的均值，LSE[i] = ln(i+1)。"
+    },
+    {
+      "name": "causal_ones_v",
+      "shape": [
+        2,
+        190,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "ones_v",
+      "causal": true,
+      "purpose": "causal 且 V=1：第 0 行只有一个 key（P̂ = 256）。"
+    },
+    {
+      "name": "causal_medium",
+      "shape": [
+        1,
+        1024,
+        8,
+        128
+      ],
+      "dtype": "e4m3",
+      "causal": true,
+      "purpose": "中等规模 causal，D=128。"
+    },
+    {
+      "name": "causal_medium_d64",
+      "shape": [
+        2,
+        1024,
+        4,
+        64
+      ],
+      "dtype": "e4m3",
+      "causal": true,
+      "purpose": "中等规模 causal，D=64。"
+    },
+    {
+      "name": "perf",
+      "shape": [
+        4,
+        4096,
+        16,
+        128
+      ],
+      "dtype": "e4m3",
+      "perf": true,
+      "purpose": "B·H=64、N=4096、D=128：与 40 关同一形状，FP8。"
+    },
+    {
+      "name": "perf_causal",
+      "shape": [
+        4,
+        4096,
+        16,
+        128
+      ],
+      "dtype": "e4m3",
+      "perf": true,
+      "causal": true,
+      "purpose": "同上但 causal。"
+    },
+    {
+      "name": "perf_d64",
+      "shape": [
+        4,
+        4096,
+        32,
+        64
+      ],
+      "dtype": "e4m3",
+      "perf": true,
+      "purpose": "D=64：MMA 只占一小部分，softmax（MUFU）更是瓶颈。"
+    },
+    {
+      "name": "perf_8k",
+      "shape": [
+        2,
+        8192,
+        16,
+        128
+      ],
+      "dtype": "e4m3",
+      "perf": true,
+      "purpose": "N=8192、D=128：主循环占绝对多数。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "fa4",
+    "ratio": 0.63
+  },
+  "profile_metrics": [
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
+    "smsp__inst_executed_pipe_xu.sum",
+    "sm__inst_executed_pipe_xu.avg.pct_of_peak_sustained_active",
+    "dram__bytes_read.sum",
+    "sm__warps_active.avg.pct_of_peak_sustained_active"
+  ]
+}

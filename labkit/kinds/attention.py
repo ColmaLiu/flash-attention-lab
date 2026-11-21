@@ -115,7 +115,16 @@ def tolerance(case):
         return {"o": (2e-5, 1e-4), "lse": (1e-4, 1e-5)}
     o = {"fp16": (2e-3, 5e-3), "bf16": (1e-2, 2e-2)}[_o_dtype(case)]
     if case.dtype == "e4m3":
-        o = (5e-2, 1e-1)  # P is quantized to E4M3 (about 2 significant bits)
+        # P is quantized to E4M3 before P V: 3 mantissa bits, unit roundoff
+        # u = 2^-4, so every weight of the convex combination O = sum_j w_j
+        # V_j carries a relative error up to u and |err O| ~ u |V_j - O| in
+        # rows dominated by a few keys (large_logits, causal first rows).
+        # Tolerance (u, 2u) with V ~ N(0, 1): lab 44 measured 0.75 of this
+        # budget for its kernel and for FA4 FP8 (P scale 2^8), 0.95 for a P
+        # scale of 448; (5e-2, 1e-1) left 6% headroom and rejected the 448
+        # variant. Q/K/V quantization is not counted: the oracle uses the
+        # dequantized inputs.
+        o = (2.0**-4, 2.0**-3)
     return {"o": o, "lse": (1e-3, 1e-4)}
 
 
@@ -192,7 +201,14 @@ def _fa4(inputs, options, case):
         raise EnvironmentError_(f"FA4 not installed: {exc}") from exc
     q, k, v = inputs["q"], inputs["k"], inputs["v"]
     extra = {}
+    fwd = flash_attn_func
     if case.dtype == "e4m3":
+        # flash_attn_func has no descale arguments in the pinned FA4; the FP8
+        # forward (SM100 only, O in BF16) is reached through _flash_attn_fwd,
+        # as in flash_attn/cute/benchmark_flash_attention_fp8.py. Descales are
+        # per (batch, kv head) FP32 tensors.
+        from flash_attn.cute.interface import _flash_attn_fwd as fwd
+
         extra = {
             "q_descale": torch.full(
                 (q.shape[0], q.shape[2]), options["q_descale"], device="cuda"
@@ -207,7 +223,7 @@ def _fa4(inputs, options, case):
     result = {}
 
     def launch():
-        out = flash_attn_func(
+        out = fwd(
             q,
             k,
             v,
@@ -289,3 +305,28 @@ def probe_fa3_scores(inputs, options, case):
     block (N <= 128); no mask or softmax yet.
     """
     return _scores11(inputs, options), (1e-3, 1e-3)
+
+
+def probe_fp8_scores(inputs, options, case):
+    """Lab 44 step 1: the probe holds S = scale * Q K^T, [B, H, N, N], in real
+    units, i.e. with Q = q_descale * q8 and K = k_descale * k8.
+
+    E4M3 x E4M3 products are exact in FP32 and accumulated in FP32 by
+    tcgen05.mma, so the only error is FP32 summation over D <= 128 terms; no
+    mask is applied (every (i, j) is checked, so only non-causal cases).
+    """
+    qd, kd = options.get("q_descale", 1.0), options.get("k_descale", 1.0)
+    return _scores11(inputs, options) * (qd * kd), (1e-3, 1e-3)
+
+
+def probe_fa4c_scores(inputs, options, case):
+    """Lab 42 step 1: the probe holds S = scale * Q K_0^T for the FIRST K/V
+    block only, [B, H, N, min(N, 128)]: every query row against keys
+    0 .. min(N, 128) - 1.
+
+    Unlike labs 22/34, N may exceed 128: the rows of all four Q tiles of a
+    CTA pair (512 rows per cluster) are checked against the 128 keys whose
+    halves come from the two CTAs' shared memory. No mask (non-causal cases).
+    """
+    s = _scores11(inputs, options)
+    return s[..., : min(s.shape[-1], 128)].contiguous(), (1e-3, 1e-3)

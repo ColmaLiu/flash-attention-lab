@@ -122,6 +122,25 @@ __device__ __forceinline__ uint64_t make_smem_desc_mnmajor_sw128(
          | (uint64_t(2) << 61);                        // SWIZZLE_128B
 }
 
+// MN-major operand with 64-byte swizzle (added in 42_fa4_2cta): what TMA
+// writes with a 32-element 16-bit box row and CU_TENSOR_MAP_SWIZZLE_64B.
+// Canonical layout (CUTLASS mma_traits_sm100.hpp, LayoutType::B64), in
+// elements: ((8, 4, m), (8, k)) : ((1, 8, LBO), (32, SBO)), i.e. 32 MN
+// elements (64 bytes) form one swizzled row; 8 rows along K form a 512-byte
+// atom; atoms follow each other along K at SBO = 512 bytes; the next 32-wide
+// MN panel starts LBO bytes further (only used when the operand's M or N
+// held by this CTA exceeds 32). To select K rows k0 .. k0 + 15, add k0 * 64
+// bytes. Atoms must be 512-byte aligned (base offset 0).
+__device__ __forceinline__ uint64_t make_smem_desc_mnmajor_sw64(
+    const void *smem, uint32_t lbo_bytes, uint32_t sbo_bytes = 512) {
+  const uint64_t addr = shared_addr(smem);
+  return ((addr >> 4) & 0x3FFF)                        // start address
+         | (uint64_t((lbo_bytes >> 4) & 0x3FFF) << 16) // LBO: MN panels
+         | (uint64_t((sbo_bytes >> 4) & 0x3FFF) << 32) // SBO: 8-row K groups
+         | (uint64_t(1) << 46)                         // version = 1 (SM100)
+         | (uint64_t(4) << 61);                        // SWIZZLE_64B
+}
+
 // ===========================================================================
 // Instruction descriptor for tcgen05.mma .kind::f16 (32 bits).
 // PTX: "Instruction descriptor" (tcgen05).
@@ -183,6 +202,87 @@ __device__ __forceinline__ void mma_f16_ts(uint32_t d_tmem, uint32_t a_tmem,
       "{\n\t.reg .pred p;\n\t"
       "setp.ne.b32 p, %4, 0;\n\t"
       "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p;\n\t}" ::"r"(
+          d_tmem),
+      "r"(a_tmem), "l"(b_desc), "r"(idesc), "r"(accumulate ? 1 : 0)
+      : "memory");
+}
+
+// ===========================================================================
+// 8-bit operands: tcgen05.mma .kind::f8f6f4 (added in 44_fa4_fp8).
+// PTX: "tcgen05.mma" (.kind::f8f6f4), "Instruction descriptor".
+//
+// Same instruction shapes as .kind::f16 (M = 128, N = 16..256), but one MMA
+// consumes K = 32 elements of 8 bits -- again 32 bytes per row, so a K slice
+// moves the descriptor start address by the same 32 bytes as a 16-element
+// 16-bit slice. Accumulation is FP32 in TMEM. E4M3 x E4M3 products are exact
+// in FP32.
+// ===========================================================================
+
+// K-major operand with 64-byte swizzle (added in 44_fa4_fp8): rows of 64
+// bytes (64 FP8 elements, e.g. a D = 64 row of Q or K), what TMA writes with
+// a 64-byte box row and CU_TENSOR_MAP_SWIZZLE_64B. 8 rows form a 512-byte
+// atom, atoms follow each other along M/N at SBO = 512 bytes. As for the
+// 128-byte K-major descriptor, LBO is unused (encoded as 16 bytes), a K slice
+// starting k_bytes into the row adds k_bytes to the start address, and the
+// atoms must be 512-byte aligned (base offset 0).
+__device__ __forceinline__ uint64_t
+make_smem_desc_kmajor_sw64(const void *smem, uint32_t sbo_bytes = 512) {
+  const uint64_t addr = shared_addr(smem);
+  return ((addr >> 4) & 0x3FFF)                        // start address
+         | (uint64_t(1) << 16)                         // LBO (ignored): 16 B
+         | (uint64_t((sbo_bytes >> 4) & 0x3FFF) << 32) // SBO
+         | (uint64_t(1) << 46)                         // version = 1 (SM100)
+         | (uint64_t(4) << 61);                        // SWIZZLE_64B
+}
+
+// Instruction descriptor for .kind::f8f6f4 with FP32 accumulation. The bit
+// positions are those of make_idesc_f16; only the meaning of the A/B format
+// fields (bits 7-9, 10-12) changes: 0 E4M3, 1 E5M2, 3 E2M3, 4 E3M2, 5 E2M1
+// (CUTLASS mma_sm100_desc.hpp, MXF8F6F4Format). The MN-major bits (15, 16)
+// are allowed for E4M3/E5M2 (not for the 6- and 4-bit formats), so V can be
+// used MN-major exactly as in the 16-bit P.V. Bits 13/14 (negate) stay 0.
+enum : uint32_t { kF8E4M3 = 0, kF8E5M2 = 1 };
+constexpr uint32_t make_idesc_f8f6f4(int m, int n, uint32_t a_format = kF8E4M3,
+                                     uint32_t b_format = kF8E4M3,
+                                     bool a_mn_major = false,
+                                     bool b_mn_major = false) {
+  return (uint32_t(1) << 4)                               // D format: F32
+         | ((a_format & 7) << 7) | ((b_format & 7) << 10) //
+         | (uint32_t(a_mn_major) << 15) | (uint32_t(b_mn_major) << 16) //
+         | (uint32_t(n >> 3) << 17) | (uint32_t(m >> 4) << 24);
+}
+
+// tcgen05.mma.cta_group::1.kind::f8f6f4 [d], a_desc, b_desc, idesc,
+// enable_input_d;
+//   D[M x N] (TMEM, FP32) = A[M x 32] * B[N x 32]^T + (accumulate ? D : 0)
+// with 8-bit A and B described by shared-memory descriptors (K = 32).
+// Issued by ONE thread; completion through tcgen05_commit, as mma_f16_ss.
+__device__ __forceinline__ void mma_f8f6f4_ss(uint32_t d_tmem, uint64_t a_desc,
+                                              uint64_t b_desc, uint32_t idesc,
+                                              bool accumulate) {
+  asm volatile(
+      "{\n\t.reg .pred p;\n\t"
+      "setp.ne.b32 p, %4, 0;\n\t"
+      "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, p;\n\t}" ::"r"(
+          d_tmem),
+      "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(accumulate ? 1 : 0)
+      : "memory");
+}
+
+// tcgen05.mma.cta_group::1.kind::f8f6f4 [d], [a_tmem], b_desc, idesc,
+// enable_input_d;   (TS form, A from Tensor Memory)
+// As mma_f16_ts, but A holds 8-bit elements, FOUR per 32-bit column: row i
+// of A is TMEM lane i, K element 4c + b is byte b (b = 0 least significant)
+// of column a_tmem.col + c. One MMA (K = 32) reads 8 columns. A must be
+// K-major (A-major bit 0); same tcgen05.wait::st + fence + sync rules as
+// mma_f16_ts before the MMA reads what tcgen05.st wrote.
+__device__ __forceinline__ void mma_f8f6f4_ts(uint32_t d_tmem, uint32_t a_tmem,
+                                              uint64_t b_desc, uint32_t idesc,
+                                              bool accumulate) {
+  asm volatile(
+      "{\n\t.reg .pred p;\n\t"
+      "setp.ne.b32 p, %4, 0;\n\t"
+      "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], [%1], %2, %3, p;\n\t}" ::"r"(
           d_tmem),
       "r"(a_tmem), "l"(b_desc), "r"(idesc), "r"(accumulate ? 1 : 0)
       : "memory");
