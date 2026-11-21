@@ -42,8 +42,9 @@ cluster）发现：两个 CTA 收到 `s_full` 的时间差 ≤ 32 ns，最后一
 约 2000–2300 ns 才通过 `p_ready`。SASS：`mbarrier.arrive.release.cluster` = `MEMBAR.ALL.CTA; MEMBAR.ALL.GPU;
 ERRBAR; CGAERRBAR; SYNCS.ARRIVE...`，每个线程每块每 tile 一次；默认的 `.release.cta` 只有 `SYNCS.ARRIVE`。
 CUTLASS（`ClusterBarrier::arrive(cta_id)`）和 FA4（pipeline `consumer_release`）用的都是默认语义，CuTe DSL
-`mbar.py` 注释里说明 cluster 作用域“实测更慢”、只在 DSMEM 交接数据时使用。本关交接的是 TMEM（`tcgen05.wait::st`
-+ `fence::before_thread_sync`），所以采用默认语义；讲义 §4.4 写明了它与 PTX 形式化内存模型的关系。
+`mbar.py` 注释里说明 cluster 作用域“实测更慢”，默认 CTA 依赖 barrier 计数与当前硬件/编译器行为。形式上跨 CTA 的
+`.release.cta` 与 `acquire.cluster` 不构成 synchronizes-with，TMEM 也不例外；有保证的只是 arrive 被计数、本线程
+的 `wait::st`/`wait::ld` 已完成。步骤 3 有意识地用这个形式保证换速度（讲义 §4.4），与 CUTLASS/FA4 相同。
 
 **未采用的尝试**（同次对比）：每 warp 一个远程 arrive（count 16）快约 1%，为与 FA4 一致保留每线程 arrive；leader
 本 CTA 的线程用本地 `mbarrier.arrive.shared::cta`、只有 peer 远程——略慢；MMA 用普通 `try_wait`（不带
@@ -66,9 +67,9 @@ CUTLASS（`ClusterBarrier::arrive(cta_id)`）和 FA4（pipeline `consumer_releas
 步骤 1 只算第一块、写 probe，计时没有意义。`perf_target` = cuDNN × 0.8；`selftest --perf`：perf 0.920、perf_causal 0.951、perf_d64 0.884、perf_8k 0.892（最差留约 10% 余量）。
 
 **主循环打平，固定开销输。** 全部 CTA 平均（`globaltimer` 插桩，未提交）：`perf` 主循环 41 关 ≈ 61.4 µs、本关
-≈ 61.4 µs；`perf_d64` ≈ 52.5 / 53.8 µs。setup ≈ 0.45 / 1.0 µs（`cta_group::2` 的 TMEM 分配是跨 CTA 软件协议），
+≈ 61.4 µs；`perf_d64` ≈ 52.5 / 53.8 µs。setup ≈ 0.45 / 1.0 µs（推测主要是 `cta_group::2` 的 TMEM 分配协议，未单独测），
 收尾 ≈ 1.1 / 1.8 µs（cluster barrier、`dealloc.cta_group::2`）。约 65 µs 的 CTA 寿命里多 ≈ 1.2 µs，与非 causal
-D = 128 的 1–4% 差距相符；persistent（43 关）只付一次。causal 另有 §3.3 的对角浪费（≈ 6% SM 时间）。
+D = 128 的 1–3% 差距（上限接近噪声）相符；persistent（43 关）只付一次。causal 另有 §3.3 的对角浪费（≈ 6% SM 时间）。
 
 **多项式比例。** 2-CTA 下扫了 `kPolyPairs` = 2、3、4、5、6：D = 128 时 3–5 在噪声内、2 和 6 变慢；D = 64 时 4 比 3
 快约 3%（`perf_d64` ≈ 0.81 → 0.785 ms），但 causal 的 D = 64 kernel 在 softmax 192 寄存器下溢出 24 字节，所以保留
@@ -91,7 +92,7 @@ Tensor Core ≈ 57% / 51%，`smsp__inst_executed_pipe_xu` 相同，`lts__t_secto
 
 ## 验证
 
-- `./lab check 42 --solution`：步骤 1 的 10 个 probe case、步骤 2–3 的 34 个 case 全部通过；`./lab selftest 42`、
+- `./lab check 42 --solution`：步骤 1 的 10 个 probe case、步骤 2–3 的 35 个 case 全部通过；`./lab selftest 42`、
   `selftest 42 --perf` 通过；`pytest` 中与本关有关的测试通过（`test_every_spec_parses_and_has_sources` 当前因并行
   编写中的 43 关缺 README 而失败）。
 - compute-sanitizer：memcheck、synccheck、racecheck 在步骤 1 的 `odd_tiles`、`two_tiles`，步骤 2–3 的 `odd_tiles`、
@@ -109,7 +110,7 @@ Tensor Core ≈ 57% / 51%，`smsp__inst_executed_pipe_xu` 相同，`lts__t_secto
 
 - 非 persistent 下 2-CTA 不比 41 关快（非 causal D = 128 打平到 −4%，D = 64 与 causal −5–7%），见上。
 - 依赖同一线程 MMA 的按序执行（40 关）。
-- `.release.cta` 的跨 CTA arrive 依赖“交接数据在 TMEM、已由 `wait::st` 完成”，与 CUTLASS/FA4 相同；形式上 PTX 内存
-  模型要求包含两个线程的作用域。
+- 步骤 3 的 `.release.cta` 跨 CTA arrive 在 PTX 内存模型下形式上不保证正确（即使数据在 TMEM）；依赖 barrier 计数
+  与当前硬件行为，与 CUTLASS/FA4 相同。形式正确的版本是步骤 2（约慢 1.2 倍）。
 - causal：cluster 的 512 行一起前进，对角浪费比 40 关多；tile 0 早停不省时间。
 - 非 persistent；N 很小时 peer 或 tile 1 全部越界仍参与 pair MMA。

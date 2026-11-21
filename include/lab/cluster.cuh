@@ -270,13 +270,16 @@ __device__ __forceinline__ void tma_load_4d_cg2(void *dst,
 // to the leader) use for cross-CTA handoffs. Compare mbar_arrive_cluster:
 // .release.cluster compiles to MEMBAR.ALL.GPU + ERRBAR + CGAERRBAR before
 // the arrive (SASS), which costs hundreds of nanoseconds per arrival on a
-// busy GPU; .release.cta compiles to the bare SYNCS.ARRIVE. Use this form
-// only when the data handed over does NOT go through generic-proxy memory
-// that the other CTA reads (e.g. TMEM written with tcgen05.st, ordered by
-// tcgen05.wait::st + tcgen05.fence::before_thread_sync, as in lab 42); it
-// still delivers the arrival itself. For shared/global data read by the
-// other CTA, use mbar_arrive_cluster (formally required by the PTX memory
-// model: the release must have a scope that contains both threads).
+// busy GPU; .release.cta compiles to the bare SYNCS.ARRIVE.
+// Formally (PTX memory model) a .release.cta arrive from another CTA is NOT
+// morally strong with the waiter's acquire.cluster, so it establishes no
+// synchronizes-with -- for any data, TMEM included, and the tcgen05 fence
+// rules rely on that same synchronization. What is guaranteed: the arrival
+// is counted, and this thread's tcgen05.wait::st / wait::ld have completed
+// its TMEM accesses before it issues the arrive. Using it for a handoff
+// relies on that plus current hardware behavior, as CUTLASS and FA4 do
+// (CuTe DSL cute/arch/mbar.py says the same). For a formally correct
+// handoff use mbar_arrive_cluster.
 __device__ __forceinline__ void mbar_arrive_remote(uint32_t addr) {
   asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" ::"r"(addr)
                : "memory");
@@ -293,9 +296,11 @@ __device__ __forceinline__ void mbar_arrive_remote(uint32_t addr) {
 //   D: rows 0..127 -> leader TMEM, 128..255 -> peer TMEM, columns d ..
 //      d + n - 1 in both.
 // Both CTAs' writers of A must tcgen05.wait::st, fence::before_thread_sync
-// and synchronize with the issuing thread (across the cluster: arrive
-// .release.cluster on the leader's mbarrier, try_wait.acquire.cluster),
-// which then executes tcgen05.fence::after_thread_sync.
+// and synchronize with the issuing thread, which then executes
+// tcgen05.fence::after_thread_sync. Across the cluster the formally correct
+// synchronization is mbar_arrive_cluster on the leader's mbarrier +
+// mbar_wait_cluster; mbar_arrive_remote (.release.cta) is what CUTLASS/FA4
+// use and relies on hardware behavior (see its comment).
 __device__ __forceinline__ void mma_f16_ts_cg2(uint32_t d_tmem, uint32_t a_tmem,
                                                uint64_t b_desc, uint32_t idesc,
                                                bool accumulate) {

@@ -17,7 +17,7 @@
 | 每个 CTA 装的 V_j | 128 个 key × D | **128 个 key × D/2 列**（另一半列在 peer） |
 | MMA warp | 每个 CTA 一个 | **只有 leader 有**；它替两个 CTA 发全部 MMA |
 | `p_ready` | 本 CTA 256 次 arrive | **leader 的 barrier 收两个 CTA 的 512 次 arrive** |
-| softmax、correction、epilogue | 每个 CTA 自己（41 关的算术） | 不变：每个 CTA 处理自己 TMEM 里的行；D = 64 的多项式比例重新调过（§7.3） |
+| softmax、correction、epilogue | 每个 CTA 自己（41 关的算术） | 不变：每个 CTA 处理自己 TMEM 里的行；多项式比例沿用 41 关（§7.3 解释为什么没改） |
 
 接口不变：FP16/BF16 的 Q、K、V、O，`[B,N,H,D]`，D = 64 或 128，causal 与非 causal，O 与 FP32 的 LSE。
 
@@ -32,7 +32,7 @@
 - 画出 pair 的数据布局：哪一行在哪个 CTA 的哪个 TMEM lane，K、V 的哪一半在哪个 CTA；
 - 列出每个 mbarrier 用的是哪个 CTA 的副本、谁 arrive、谁 wait；
 - 推导 2-CTA 省下的 shared memory、L2→SM 流量和 shared memory 读带宽；
-- 用实测解释：softmax 受 MUFU 限制时（40 关的 softmax）2-CTA 反而慢约 2–12%；换上 41 关的 softmax 后，非 causal 的主循环与 1-CTA 打平，整体仍差约 1–4%，D = 64 与 causal 差约 5–7%；以及按配置选择 1-CTA / 2-CTA 的依据。
+- 用实测解释：softmax 受 MUFU 限制时（40 关的 softmax）2-CTA 反而慢约 2–12%；换上 41 关的 softmax 后，非 causal 的主循环与 1-CTA 打平，整体仍差约 1–3%（上限接近噪声），D = 64 与 causal 差约 5–7%；以及按配置选择 1-CTA / 2-CTA 的依据。
 
 ## 2. 动机：41 关之后还剩什么
 
@@ -107,7 +107,7 @@ MMA 从 shared memory 读操作数的带宽（按每 SM 每周期 128 B、BF16 �
 
 - **两个 SM 被绑在一起**：pair tile t 的 PV 必须等**两个** CTA 的 softmax 都交出 P，S 也同时写进两个 CTA。每块的链上多了两次跨 SM 的交接（multicast commit 到 peer、peer 的 arrive 到 leader）。
 - **causal 的对角浪费翻倍**：一个 pair tile 是 256 行，一个 cluster 的两个 tile 一起前进（ping-pong），cluster 的时间由走得最远的 tile 1 决定：cluster c 走 `4c + 4` 块。40 关同样的 512 行由两个 CTA 分别走 `4c + 2` 和 `4c + 4` 块。N = 4096 时平均每 512 行的 SM 时间是 2·(4c+4) ≈ 36 块 vs (8c+6) ≈ 34 块，多约 6%。tile 0 少走两块（步骤 2 的 `tile_blocks`）省不回来：tile 1 照样要走完，tile 0 早停只是让 tile 1 最后两块没有 ping-pong 伙伴。
-- **cluster 启动**：一对 CTA 要同时有两个空闲 SM；TMEM 的 `cta_group::2` 分配是一段跨 CTA 的软件协议（33 关 NOTES）。实测 setup 从约 0.45 µs 变成约 1 µs，CTA 末尾的收尾从约 1.2 µs 变成约 1.9 µs（共 32 块、约 75 µs 的 CTA 寿命里很小）。
+- **cluster 启动**：一对 CTA 要同时有两个空闲 SM；TMEM 的 `cta_group::2` 分配是一段跨 CTA 的软件协议（33 关 NOTES）。实测（41 关 softmax，`perf`）setup 整体从约 0.45 µs 变成约 1.0 µs，CTA 末尾的收尾从约 1.1 µs 变成约 1.8 µs（CTA 寿命约 65 µs）。分配协议在多出的 setup 里占多少没有单独测。
 
 ## 4. 硬件与指令
 
@@ -163,15 +163,15 @@ arrive(map_shared_rank(&bar.p_ready[t], 0));
 .release.cta:      SYNCS.ARRIVE.TRANS64.RED.A1T0 [addr]
 ```
 
-`.release.cluster` 让这个线程之前的**所有**内存写在 cluster 范围可见，硬件用一次 GPU 范围的 `MEMBAR` 实现，要等本线程所有在途的访存完成。每块、每个 tile、512 个线程各做一次。§7.2 的插桩：步骤 2 里 leader 的 MMA 线程在最后一个线程 arrive 之后约 650–900 ns 才看到 `p_ready` 完成；步骤 3 约 100 ns。
+`.release.cluster` 让这个线程之前的**所有**内存写在 cluster 范围可见，硬件用一次 GPU 范围的 `MEMBAR` 实现，要等本线程所有在途的访存完成。每块、每个 tile、512 个线程各做一次。插桩（数据见 `solutions/42_fa4_2cta/NOTES.md`）：步骤 2 里 leader 的 MMA 线程在最后一个线程 arrive 之后约 650–900 ns 才看到 `p_ready` 完成；步骤 3 约 100 ns。
 
-为什么本关可以用 `.release.cta`：
+`.release.cta` 在形式上**不保证**正确，即使数据在 TMEM 里：
 
-- 交接的数据是 **TMEM**（P 和修正后的 O），不是 shared/global memory。它们由 `tcgen05.st` 写入，`tcgen05.wait::st` 等到写完，`tcgen05.fence::before_thread_sync` 把它们排在 arrive 之前；leader 一侧 wait 之后做 `tcgen05.fence::after_thread_sync`。
-- arrive 本身照样被计数；`p_ready` 的相位要等 512 次 arrive 全部到达才完成。
-- CUTLASS（`ClusterBarrier::arrive(cta_id, pred)`，`include/cutlass/arch/barrier.h`）和 FA4（pipeline 的 `consumer_release` 远程 arrive 到 leader）都用这个默认形式。CuTe DSL 的 `cute/arch/mbar.py` 里明确写着：远程 arrive 在形式上应该用 cluster 作用域，cluster 作用域“实测更慢”，所以默认 CTA，经 DSMEM 交接数据的协议才传 `scope=CLUSTER`。
+- PTX 内存模型中，peer 线程的 `.release.cta` arrive 与 leader 的 `try_wait.acquire.cluster` 作用域不同时包含两个线程，不是 morally strong，**没有 synchronizes-with**。tcgen05 的顺序规则（`fence::before_thread_sync` …… 线程同步 …… `fence::after_thread_sync`）依赖的正是这个线程同步，所以“数据在 TMEM”并不能补上形式上的缺口。
+- 有保证的只有两点：arrive 一定被计数（`p_ready` 的相位要等 512 次 arrive 全部到达）；本线程的 `tcgen05.wait::st` / `wait::ld` 在 arrive 之前已经让它自己的 TMEM 访问完成。
+- 其余依赖当前硬件与编译器的行为——这是一个硬件层面的论证：TMEM 的写在 `wait::st` 返回时已经完成，`SYNCS.ARRIVE` 在它之后发出，leader 看到相位完成之后才发 MMA。CUTLASS（`ClusterBarrier::arrive(cta_id, pred)`，`include/cutlass/arch/barrier.h`）和 FA4（pipeline 的 `consumer_release` 远程 arrive 到 leader）都这样做。CuTe DSL 的 `cute/arch/mbar.py` 注释说得很直白：远程 arrive 在形式上应该用 cluster 作用域；默认用 CTA 是因为现有协议依赖 barrier 计数和当前硬件/编译器行为，而 cluster 作用域“实测更慢”。
 
-需要说清楚的是：PTX 内存模型要求 release/acquire 的作用域同时包含两个线程，才算严格的 synchronizes-with。`.release.cta` 跨 CTA 使用，靠的是“数据在 TMEM、已由 wait::st 完成”这一点，与 CUTLASS/FA4 的做法一致。**如果你交接的是 shared memory 或 global memory 里的数据，必须用 `.release.cluster`**（例如 33 关之前讨论过的 DSMEM 写）。
+所以步骤 3 是一个**有意识的取舍**：用形式保证换约 1.2 倍的速度，与 CUTLASS/FA4 相同。要形式上正确，保留步骤 2 的 `.release.cluster`；交接 shared/global memory 里的数据（例如经 DSMEM 写对方的 smem）时更不能省。
 
 ### 4.5 常见误用
 
@@ -415,14 +415,14 @@ softmax 1 P │ exp P│      │ld max exp exp exp P│      │ld max …
 | setup / 收尾 | ≈ 0.45 / 1.1 µs | ≈ 1.0 / 1.8 µs |
 
 - 与 41 关相比，主循环的差距从 2-CTA 版 40 关的约 12% 缩到 0。软件 `exp2` 仍要在 FMA 流水线上做事，softmax 没有快到假实验那样，所以 MMA 一侧的余量只够抵消 pair 的耦合，还不能变成收益。
-- 剩下的约 1–4% 来自每个 CTA 一次性的开销：`cta_group::2` 的 TMEM 分配是跨 CTA 的软件协议，收尾多一次 cluster barrier，一对 CTA 要同时退出才能放进下一个 cluster。CTA 寿命约 65 µs，每个 CTA 多约 1.2 µs。persistent kernel（43 关）只付一次这笔开销。
+- 剩下的约 1–3%（上限接近噪声）来自每个 CTA 一次性的开销：setup 整体多约 0.55 µs（推测主要是 `cta_group::2` 的 TMEM 分配协议与 cluster barrier，未单独测），收尾多一次 cluster barrier 与 `dealloc.cta_group::2`，一对 CTA 要同时退出才能放进下一个 cluster。CTA 寿命约 65 µs，每个 CTA 多约 1.2 µs。persistent kernel（43 关）只付一次这笔开销。
 - **多项式比例要不要重调**：2-CTA 每个 SM 的 MMA 与 shared memory 负担更轻，平衡点可能移动。实测（`kPolyPairs` = 2、3、4、5、6）：D = 128 时 3、4、5 在噪声内，2 和 6 变慢；D = 64 时 4 比 3 快约 3%（主循环 53.8 → 51.8 µs，`perf_d64` ≈ 0.81 → 0.785 ms），但 4 让 causal 的 D = 64 kernel 在 192 个寄存器下溢出（`./lab sass` 的 STACK 24）。答案保留 41 关的 3。τ = 8 不改：它由 FP16 的上限决定（41 关 §3.5），不是性能参数。
 
 ### 7.4 1-CTA 还是 2-CTA：按配置选择
 
 | 配置 | 实测（步骤 3 相对 41 关） | 原因 | 选择 |
 |---|---|---|---|
-| 非 causal，D = 128 | ≈ 0.96–0.99× | 主循环打平，每 CTA 多约 1.2 µs 的固定开销 | 非 persistent 时差别在噪声附近；persistent 后（43 关）倾向 2-CTA |
+| 非 causal，D = 128 | ≈ 0.96–0.99× | 主循环打平，每 CTA 多约 1.2 µs 的固定开销 | 非 persistent 时差别接近噪声；persistent 后可能倾向 2-CTA（未经测试的预测，本课没有测 persistent + 2-CTA） |
 | 非 causal，D = 64 | ≈ 0.93–0.94× | 每块 MMA 只有一半，MMA 一侧更不是瓶颈 | 1-CTA |
 | causal | ≈ 0.93–0.95× | 一个 cluster 的 512 行一起前进，对角浪费比 1-CTA 多约 2 块 / 512 行（§3.3） | 1-CTA |
 
@@ -452,7 +452,7 @@ softmax 1 P │ exp P│      │ld max exp exp exp P│      │ld max …
 2. N 写整个 D：硬件把 N 对半分给两个 CTA。`cta_group::2` 的 B 总是按 N 分；QKᵀ 的 N 是 key，PV 的 N 是 D 的列（key 是 PV 的 K 维度，每个 CTA 都要全部 128 个 key）。
 3. `p_ready` 的唯一消费者是 leader 的 MMA 线程，所以只需要 leader 那份，两边的生产者都往那里 arrive；`s_full` 的消费者是两边各自的 softmax，所以 commit multicast 到两边各一份。count = 2 个 CTA × (128 个 softmax 线程 + 128 个 correction 线程)。
 4. 收完发给它的全部信号并且 leader 的 MMA 不再读写它：它的 TMA 排空了 `kv_empty`，softmax 等过每个 `s_full`，correction 等过 `o_full`（最后一个 commit，跟踪此前全部 MMA，包括读 peer 的 Q、K/V 和写 peer 的 TMEM），然后两边过 cluster barrier。
-5. 交接的数据在 TMEM，已由 `tcgen05.wait::st` 完成并由 `tcgen05.fence::before_thread_sync` 排在 arrive 之前；arrive 只需要被计数。若 peer 用普通 store 把数据写进 leader 的 shared memory（DSMEM），再 arrive 通知 leader 去读，就必须 `.release.cluster`（配合 leader 的 `.acquire.cluster`）。
+5. 形式上它不可接受：跨 CTA 的 `.release.cta` 与 `acquire.cluster` 不构成 synchronizes-with，TMEM 也不例外。有保证的只是 arrive 被计数、本线程的 `wait::st` 已完成它的 TMEM 写；其余依赖硬件行为，CUTLASS/FA4 也这样做，换来约 1.2 倍。若 peer 用普通 store 把数据写进 leader 的 shared memory（DSMEM），再 arrive 通知 leader 去读，就必须 `.release.cluster`（配合 leader 的 `.acquire.cluster`）。
 6. cluster c 的两个 pair tile 一起前进，时间由 tile 1 决定：4c + 4 块，两个 SM 都被占用。40 关同样的 512 行是两个 CTA，分别 4c + 2 和 4c + 4 块。N = 4096 平均每 512 行多约 2 块（≈ 6%）；tile 0 早停省不回来。
 </details>
 

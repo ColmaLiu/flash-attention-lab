@@ -89,7 +89,7 @@
         128
       ],
       "dtype": "fp16",
-      "purpose": "N=200：peer 的 tile 0 只有 72 行有效，第二个 K/V 块只有 72 个有效 key（落在 leader 的 K 一半里）。"
+      "purpose": "N=200：peer 的 tile 0 只有 72 行有效；第二个 K/V 块只有 72 个有效 key（key 128–199），其中 64 个在 leader 的 K 一半、8 个在 peer 的一半。"
     },
     {
       "name": "short_tail",
@@ -187,6 +187,18 @@
       "dtype": "bf16",
       "pattern": "position",
       "purpose": "12 个块、24 个 ring item：环形 buffer 绕多圈，两个 CTA 各自等自己的 kv_empty，parity 错会读到旧块或挂起。"
+    },
+    {
+      "name": "ring_d64",
+      "shape": [
+        1,
+        2560,
+        1,
+        64
+      ],
+      "dtype": "fp16",
+      "pattern": "position",
+      "purpose": "D=64、20 个块、40 个 ring item = 16 级环绕 2.5 圈：D=64 的环级数（16）与 parity；V 一半的 64B swizzle 在每一级都要对。"
     },
     {
       "name": "medium",
