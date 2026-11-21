@@ -1,0 +1,107 @@
+{
+  "id": "31_tcgen05_gemm",
+  "title": "tcgen05 与 TMEM：第五代 Tensor Core GEMM",
+  "part": 3,
+  "kind": "gemm",
+  "prerequisites": ["21_pipeline_gemm", "30_tma_mbarrier"],
+  "steps": [
+    {
+      "step": 1,
+      "title": "单个 128×128×64 tile：TMA → tcgen05.mma → TMEM → C",
+      "cases": ["one_tile", "small"]
+    },
+    {
+      "step": 2,
+      "title": "完整 K 循环：多级 TMA/mbarrier 流水",
+      "cases": "all"
+    },
+    {
+      "step": 3,
+      "title": "TMA store epilogue 与 128×256 tile",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "one_tile",
+      "shape": [128, 128, 64],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "恰好一个 tile、一个 K 块（4 条 MMA）：descriptor、instruction descriptor、TMEM 行列映射错任何一处，结果都不精确相等。"
+    },
+    {
+      "name": "small",
+      "shape": [100, 72, 40],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "三个方向都不满一个 tile：TMA 越界填零，expect_tx 仍是整个 box 的字节数；写回要裁掉越界的行列。"
+    },
+    {
+      "name": "long_k",
+      "shape": [128, 128, 1024],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "单个 tile、16 个 K 块：环形 buffer 绕 4 圈，full/empty 的 parity 或 refill 时机错了会读到旧数据。"
+    },
+    {
+      "name": "short_k",
+      "shape": [64, 96, 136],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "3 个 K 块，少于流水级数：prologue 不能装不存在的 tile，最后一块只有 8 列有效。"
+    },
+    {
+      "name": "aligned",
+      "shape": [256, 512, 512],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "多个 CTA、tile 的整数倍：检查 blockIdx 到 (m0, n0) 的映射和 TMA 坐标顺序（x = k，y = 行）。"
+    },
+    {
+      "name": "tail",
+      "shape": [133, 76, 40],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "M、N 都不是 tile 的倍数：第二行 CTA 只有 5 行有效，TMA store 必须裁掉其余行。"
+    },
+    {
+      "name": "raster",
+      "shape": [1300, 600, 264],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "11 × 3 个 CTA（BN = 256 时最后一列只有 88 列），K 尾部 8 列。"
+    },
+    {
+      "name": "random",
+      "shape": [640, 520, 1000],
+      "dtype": "bf16",
+      "purpose": "中等规模随机数据：误差与 cuBLAS 同量级。"
+    },
+    {
+      "name": "square",
+      "shape": [4096, 4096, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "Tensor Core 吞吐：137 GFLOP，与 21 关直接对比。"
+    },
+    {
+      "name": "wide",
+      "shape": [8192, 8192, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "550 GFLOP，A、B 共 128 MB：更多 tile，波次尾部的影响更小。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "cublas",
+    "ratio": 0.6
+  },
+  "profile_metrics": [
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
+    "lts__t_sector_hit_rate.pct",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum"
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "id": "30_tma_mbarrier",
+  "title": "TMA 与 mbarrier：异步搬运的转置",
+  "part": 3,
+  "kind": "transpose",
+  "prerequisites": ["00_transpose", "21_pipeline_gemm"],
+  "steps": [
+    {
+      "step": 1,
+      "title": "单 tile：TMA load → mbarrier → 转置 → TMA store",
+      "cases": "all"
+    },
+    {
+      "step": 2,
+      "title": "persistent 多级环形 buffer：full/empty barrier",
+      "cases": "all"
+    },
+    {
+      "step": 3,
+      "title": "128B swizzle 与 4×4 寄存器转置：消除 bank conflict",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "tiny",
+      "shape": [8, 12],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "比一个 box 还小：越界部分由 TMA 填零、写回时裁掉。值等于输入的线性下标，错了能看出读的是哪里。"
+    },
+    {
+      "name": "tail",
+      "shape": [36, 68],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "两个方向都比 32 的倍数多 4：尾部 box 的坐标与 expect_tx 字节数（越界部分也计入）。"
+    },
+    {
+      "name": "row",
+      "shape": [4, 260],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "只有 4 行：转置后是 4 列，区分 transpose 与 copy；y 的 box 大部分越界。"
+    },
+    {
+      "name": "tall",
+      "shape": [1028, 20],
+      "dtype": "fp32",
+      "purpose": "细长矩阵：tile 下标到 (行, 列) 的换算。"
+    },
+    {
+      "name": "square",
+      "shape": [1024, 1024],
+      "dtype": "fp32",
+      "purpose": "中等规模随机数据。"
+    },
+    {
+      "name": "ring",
+      "shape": [4096, 2048],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "每个 persistent CTA 处理约 7 个 tile：环形 buffer 绕圈，phase/parity 或 empty barrier 写错会读到旧 tile。坐标模式可以精确定位。"
+    },
+    {
+      "name": "big",
+      "shape": [8192, 8192],
+      "dtype": "fp32",
+      "perf": true,
+      "purpose": "256 MB 输入，远大于 126 MB L2：测 HBM 带宽利用率，与 00 关直接对比。"
+    },
+    {
+      "name": "wide",
+      "shape": [4096, 16384],
+      "dtype": "fp32",
+      "perf": true,
+      "purpose": "非方阵，同样 256 MB：y 的行（4096 个 float）比 x 的行短。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "torch",
+    "ratio": 0.9
+  },
+  "profile_metrics": [
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
+    "smsp__inst_executed_op_shared_ld.sum",
+    "smsp__inst_executed_op_shared_st.sum",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+    "dram__throughput.avg.pct_of_peak_sustained_elapsed"
+  ]
+}
