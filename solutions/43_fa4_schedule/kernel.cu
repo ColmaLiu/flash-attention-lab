@@ -25,9 +25,10 @@
 //         the masked tail.
 // step 2: persistent: grid = min(#tiles, #SMs), CTA b processes tiles
 //         b, b + G, b + 2G, ... Every role walks the same sequence; ring
-//         positions and barrier phases run on across tiles. Q^t smem and
-//         O^t TMEM get "empty" barriers so tile w + 1 can start while the
-//         epilogue of tile w still runs.
+//         positions and barrier phases run on across tiles. Q^t smem gets
+//         a q_empty barrier so tile w + 1 can start while the epilogue of
+//         tile w still runs (O^t TMEM is covered by p_ready); final_full and
+//         the final m, l are double-buffered by tile parity.
 // step 3: causal: tiles ordered heaviest first (LPT: last Q pair of every
 //         head first) and dealt out boustrophedon (odd rounds reversed), so
 //         every CTA gets about the same number of K/V blocks.
@@ -160,13 +161,14 @@ template <int Stages> struct Barriers {
   uint64_t p_ready[kTiles];
   // MMA -> epilogue, count 1: O^t final. Per tile.
   uint64_t o_full[kTiles];
-  // epilogue -> MMA, count 128: O^t read out of TMEM, the next tile's first
-  // P V may overwrite it. Per tile. (Step 2+.)
-  uint64_t o_empty[kTiles];
   // softmax t -> correction, count 128: alpha^t_j published. Per block.
   uint64_t stats_full[kTiles];
-  // softmax t -> correction, count 128: final m, l published. Per tile.
-  uint64_t final_full[kTiles];
+  // softmax t -> correction, count 128: final m, l published. Per tile,
+  // double-buffered by tile parity like st.fin_*: with 1-block tiles the
+  // softmax can publish tile w + 1 before the correction warpgroup has
+  // waited for tile w, so one barrier would complete two phases and the
+  // waiter would miss one (lesson section 5.4). Slot it & 1, phase it >> 1.
+  uint64_t final_full[2][kTiles];
   uint32_t tmem_slot;
 };
 
@@ -424,12 +426,14 @@ __device__ __forceinline__ void rescale_o_row(uint32_t o_addr, float alpha) {
 // to global memory (each thread writes its row's D contiguous elements, in
 // 16-byte stores), LSE = scale * m + ln(l). Unlike labs 34-41, O is not
 // staged in the Q buffer: the next tile's Q may already be loading there.
-// Returns after the last tcgen05.ld; `o_empty` (if given) is arrived as
-// soon as O^t has been read, before the global stores.
+// The next tile's first P V may overwrite O^t only after these tcgen05.ld:
+// no extra barrier needed -- MMA waits p_ready (count 256, including these
+// 128 correction threads) before that P V, and the correction warpgroup
+// arrives p_ready for the next tile only after this epilogue (fenced).
 template <class T, class C>
-__device__ __forceinline__ void
-store_o_and_lse(uint32_t o_addr, int qt, int r, int head, int batch, float m,
-                float l, uint64_t *o_empty, const Params &p) {
+__device__ __forceinline__ void store_o_and_lse(uint32_t o_addr, int qt, int r,
+                                                int head, int batch, float m,
+                                                float l, const Params &p) {
   const int row = qt + r;
   const bool valid = row < p.n;
   const float inv = 1.f / l;
@@ -439,11 +443,6 @@ store_o_and_lse(uint32_t o_addr, int qt, int r, int head, int batch, float m,
   for (int c = 0; c < C::kD; c += 32) {
     float o[32];
     lab::tmem_ld_32x32b_x32_sync(o_addr + c, o);
-    if (c + 32 == C::kD && o_empty != nullptr) {
-      // All of this thread's reads of O^t are complete (ld + wait::ld).
-      lab::tcgen05_fence_before_thread_sync();
-      lab::mbar_arrive(o_empty);
-    }
     if (valid) {
 #pragma unroll
       for (int q = 0; q < 4; ++q) {
@@ -492,9 +491,9 @@ __global__ void __launch_bounds__(C::kThreads, 1)
       lab::mbar_init(&bar.s_full[t], 1);
       lab::mbar_init(&bar.p_ready[t], 2 * kBM);
       lab::mbar_init(&bar.o_full[t], 1);
-      lab::mbar_init(&bar.o_empty[t], kBM);
       lab::mbar_init(&bar.stats_full[t], kBM);
-      lab::mbar_init(&bar.final_full[t], kBM);
+      lab::mbar_init(&bar.final_full[0][t], kBM);
+      lab::mbar_init(&bar.final_full[1][t], kBM);
     }
     for (int s = 0; s < S; ++s) {
       lab::mbar_init(&bar.kv_full[s], 1);
@@ -591,8 +590,6 @@ __global__ void __launch_bounds__(C::kThreads, 1)
 #pragma unroll 1
               for (int t = 0; t < kTiles; ++t) {
                 lab::mbar_wait(&bar.p_ready[t], (nb + j) & 1);
-                if (C::kPersistent && j == 0) // previous O^t read out of TMEM
-                  lab::mbar_wait(&bar.o_empty[t], (it & 1) ^ 1);
                 lab::tcgen05_fence_after_thread_sync();
                 if (leader) {
                   mma_pv_ts<T, C>(o_col(t), s_col(t) + kPCol, v, j > 0);
@@ -636,7 +633,7 @@ __global__ void __launch_bounds__(C::kThreads, 1)
                                                s_addr, bar, st, p);
           st.fin_m[it & 1][t][r] = rs.m;
           st.fin_l[it & 1][t][r] = rs.l;
-          lab::mbar_arrive(&bar.final_full[t]);
+          lab::mbar_arrive(&bar.final_full[it & 1][t]);
         });
   } else {
     // ============================================== correction warpgroup
@@ -658,13 +655,12 @@ __global__ void __launch_bounds__(C::kThreads, 1)
         }
       }
       for (int t = 0; t < kTiles; ++t) {
-        lab::mbar_wait(&bar.final_full[t], it & 1);
+        lab::mbar_wait(&bar.final_full[it & 1][t], (it >> 1) & 1);
         lab::mbar_wait(&bar.o_full[t], it & 1);
         lab::tcgen05_fence_after_thread_sync();
         store_o_and_lse<T, C>(lane_addr + C::kOCol + t * C::kD, w.q0 + t * kBM,
                               r, w.head, w.batch, st.fin_m[it & 1][t][r],
-                              st.fin_l[it & 1][t][r],
-                              C::kPersistent ? &bar.o_empty[t] : nullptr, p);
+                              st.fin_l[it & 1][t][r], p);
       }
     });
   }

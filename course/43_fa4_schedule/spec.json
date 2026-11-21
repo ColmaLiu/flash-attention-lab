@@ -464,6 +464,17 @@
       "purpose": "causal、D=128、640 个 tile、jump_max：条件 rescale 的状态（m、ℓ）必须在每个 tile 开头重置，不能从上一个 tile 带过来。"
     },
     {
+      "name": "many_one_block",
+      "shape": [
+        4,
+        128,
+        500,
+        128
+      ],
+      "dtype": "fp16",
+      "purpose": "N=128：2000 个只有 1 块的 tile，每个 CTA 13–14 个。softmax 写完下一个 tile 的最终 m、ℓ 只依赖 S_0、不经过 correction，可以领先 correction 一个 tile：final_full 若不按 tile 奇偶双缓冲会连续完成两个 phase（挂起）；序幕里漏 commit q_empty 也会挂起。"
+    },
+    {
       "name": "perf",
       "shape": [
         4,

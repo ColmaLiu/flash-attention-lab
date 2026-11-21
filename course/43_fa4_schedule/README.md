@@ -222,14 +222,15 @@ cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev);   // B200
 |---|---|---|---|
 | `kv_full` / `kv_empty` | 2 × 块数（环形） | 环中的 item 号 u（跨 tile 连续） | `(u / S) & 1`，empty 再 `^ 1` |
 | `s_full`、`p_ready`、`stats_full` | 块数 | `nb + j`（nb = 之前各 tile 的块数之和） | `(nb + j) & 1` |
-| `q_full`、`o_full`、`final_full` | 1 | `it`（之前做过的 tile 数） | `it & 1` |
-| `q_empty`、`o_empty`（本关新增） | 1 | 等的是“上一个 tile 的释放” | 自己推（下一段） |
+| `q_full`、`o_full` | 1 | `it`（之前做过的 tile 数） | `it & 1` |
+| `final_full[2]`（按 tile 奇偶双缓冲，§5.4） | 1（轮流用两个） | 第 `it` 个 tile 用 `final_full[it & 1]` 的第 `it >> 1` 个 phase | `(it >> 1) & 1` |
+| `q_empty`（本关新增） | 1 | 等的是“上一个 tile 的释放” | 自己推（下一段） |
 
 “empty” 一类的 barrier（`kv_empty` 也是）第一次等待必须立即返回：一个新初始化的 mbarrier，“phase −1” 视为已完成，等 parity 1 立即返回（30 关）。第 `it` 个 tile 要等的是第 `it − 1` 次释放。骨架里 `for_each_tile` 已经算好了 `it` 和 `nb`，每个角色都调用它，所以各角色看到的 tile 序列和 phase 一致。
 
 ### 4.5 O 直接写全局内存
 
-34–41 关的 epilogue 把 O 写进 Q 的 shared memory，再用 TMA store。persistent 后这块 shared memory 已经交给下一个 tile 的 Q 了（§4.3）。本关的 epilogue 让每个线程把自己那一行（D 个 16 位数 = 128 或 256 字节，连续）用 16 字节的 `st.global` 直接写出：每个线程写满整个 32 字节 sector，不浪费 HBM 带宽。
+34–41 关的 epilogue 把 O 写进 Q 的 shared memory，再用 TMA store。persistent 后这块 shared memory 已经交给下一个 tile 的 Q 了（§4.3）。本关的 epilogue 让每个线程把自己那一行（D 个 16 位数 = 128 或 256 字节，连续）用 16 字节的 `st.global` 直接写出。一条 warp 指令的 32 个 lane 落在 32 个不同的行上，每个 32 字节 sector 只写了一半（LSU 的 sector 利用率 50%）；同一 sector 的另一半由下一条指令写，L2 把两半合并后才写回 HBM，所以 HBM 流量不浪费。O 只占 epilogue 的一小部分时间，这点 LSU 效率可以接受。
 
 ### 4.6 常见误用
 
@@ -237,7 +238,6 @@ cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev);   // B200
 |---|---|
 | persistent 的 grid 大于 SM 数 | 多出来的 CTA 等第一波结束才开始，尾部翻倍 |
 | 跨 tile 时 phase 从 0 重新数（例如 `j & 1`） | 第二个 tile 起 parity 错：等过了头或者永远等不到（挂起），在 `multi_tile*` case 暴露 |
-| 下一个 tile 的第一个 PV（`accumulate = false`）不等 `o_empty` | 覆盖了上一个 tile 还没读出的 O：`multi_tile_d128`（V = 1）的 O 不等于 1 |
 | 下一个 tile 的 Q 不等 `q_empty` 就装 | 上一个 tile 最后的 QKᵀ 读到新 Q：错误随机出现 |
 | 每个 tile 开头不重置 m、ℓ | 条件 rescale 的基准从上一个 tile 带过来：`multi_tile_causal`（jump_max）错 |
 | 不同角色算出的 tile 序列不同 | 立刻挂起或读错 head |
@@ -265,27 +265,32 @@ persistent 之后，每样资源都要回答“下一个 tile 什么时候可以
 | K/V 环的 stage | 最后读它的 MMA | TMA 装新 item | `kv_empty`（与 40 关相同，只是 item 号跨 tile 连续） |
 | Q^t（shared） | 最后一个 Q^t Kᵀ | TMA 装下一个 Q^t | **`q_empty[t]`**：MMA 在最后一个 QKᵀ 之后 commit；TMA 等它 |
 | S^t / P^t（TMEM） | 最后一个 P^t V | 下一个 tile 的 Q^t K₀ᵀ | 同一个线程按发射顺序执行（40 关 §4.3），不需要 barrier |
-| O^t（TMEM） | epilogue 的 `tcgen05.ld` | 下一个 tile 的第一个 P^t V（覆盖） | **`o_empty[t]`**：128 个 correction 线程读完 arrive；MMA 在 j = 0 的 PV 前等 |
+| O^t（TMEM） | epilogue 的 `tcgen05.ld` | 下一个 tile 的第一个 P^t V（覆盖） | **已被 `p_ready` 蕴含**，不需要新 barrier：MMA 在这个 PV 之前等 `p_ready[t]`（256 次 arrive，其中 128 次来自 correction），而 correction 是顺序程序，只有做完上一个 tile 的 epilogue（`tcgen05.ld` 已完成、已 fence）才会为下一个 tile 的块 0 arrive |
 | `st.alpha` | correction 读 α | softmax 写下一块的 α | 与 40 关相同：softmax 最多领先一块（§5.4） |
-| `st.fin_m/fin_l` | epilogue 读 | softmax 写下一个 tile 的最终值 | **按 tile 奇偶双缓冲**（§5.4） |
+| `st.fin_m/fin_l` 与 `final_full` | epilogue 读 / 等 | softmax 写下一个 tile 的最终值 / arrive | **数据和 barrier 都按 tile 奇偶双缓冲**（§5.4） |
 
 ### 5.3 时间线：相邻两个 tile 的交接（示意，不按比例）
 
 ```
               ┌──────── tile w 的最后一块 ────────┐┌──────────── tile w+1 ────────────────
 TMA     : … K_last V_last │K_0(w+1)│ 等 q_empty[0] → Q⁰(w+1)  Q¹(w+1) │V_0 K_1 …
-MMA     : PV⁰ QK⁰ PV¹ QK¹ ──── commit q_empty ──┐ PV⁰_last o_full[0] PV¹_last o_full[1] │QK⁰_0 QK¹_0 │ 等 p_ready, o_empty │PV⁰_0 …
+MMA     : PV⁰ QK⁰ PV¹ QK¹ ──── commit q_empty ──┐ PV⁰_last o_full[0] PV¹_last o_full[1] │QK⁰_0 QK¹_0 │ 等 p_ready │PV⁰_0 …
 softmax0: … softmax⁰(last) │ fin → final_full │ 等 s_full │ softmax⁰(block 0) …
-correct : … 修正 │ epilogue O⁰(w) ─ arrive o_empty[0] ─ 写 O⁰ │ epilogue O¹(w) │ tile w+1 的 j = 0：arrive p_ready …
+correct : … 修正 │ epilogue O⁰(w) │ epilogue O¹(w) │ tile w+1 的 j = 0：arrive p_ready …
 ```
 
 - Q^t 在最后一个 QKᵀ 之后就释放了，TMA 在 PV_last 还在算时就装下一个 Q，所以下一个 tile 的 QKᵀ_0 紧接着 PV_last 开始；
 - 下一个 tile 的 softmax 块 0 与上一个 tile 的 epilogue 同时进行；
 - 唯一的等待：下一个 tile 的第一个 PV 要等 correction warpgroup 做完上一个 tile 的两个 epilogue（correction 是一个顺序程序：先 epilogue，再进入下一个 tile 的块循环、为块 0 arrive `p_ready`）。
 
-### 5.4 为什么 fin 要双缓冲
+### 5.4 为什么 fin 和 final_full 都要双缓冲
 
-softmax 在一个 tile 结束时把最终的 m、ℓ 写进 `st.fin_*` 并 arrive `final_full`，epilogue 之后读。下一个 tile 的 softmax 什么时候会再写？它要先拿到下一个 tile 的 S_0，而 S_0 只依赖 Q 和 K_0——**不依赖 correction**。如果下一个 tile 只有 1 块（N ≤ 128 时），softmax 可能在 correction 读上一组值之前就写了新值。按 tile 的奇偶（`it & 1`）用两组缓冲：写第 w + 2 个 tile 的值之前，softmax 必须拿到第 w + 2 个 tile 的 S_0，它由 MMA 在第 w + 1 个 tile 的 PV 之后发射，而那个 PV 要等 correction 为第 w + 1 个 tile arrive `p_ready`——这时 correction 已经读完了第 w 个 tile 的值。
+softmax 在一个 tile 结束时把最终的 m、ℓ 写进 `st.fin_*` 并 arrive `final_full`，epilogue 之后等它、读值。下一个 tile 的 softmax 什么时候会再写、再 arrive？它要先拿到下一个 tile 的 S_0，而 S_0 只依赖 Q 和 K_0——**不依赖 correction**。如果下一个 tile 只有 1 块（N ≤ 128），softmax 可能在 correction 还在写第 w 个 tile 的 O 时，就为第 w + 1 个 tile 写了新值并 arrive。两个问题：
+
+1. **数据**：第 w 个 tile 的 m、ℓ 被覆盖；
+2. **barrier**：只有一个 `final_full` 时，它连续完成了两个 phase（w 和 w + 1）。correction 随后等 parity `w & 1`——这个 parity 现在指的是“第 w + 2 个 phase”，永远等不到：**挂起**（`many_one_block`：2000 个 1 块的 tile）。mbarrier 的 parity 只能区分相邻的两个 phase，**生产者最多只能领先等待者一个 phase**。
+
+所以数据和 barrier 都按 tile 奇偶（`it & 1`）用两份：第 `it` 个 tile 用 `final_full[it & 1]`，那是它的第 `it >> 1` 个 phase。两份够不够？写第 w + 2 个 tile 之前，softmax 必须拿到第 w + 2 个 tile 的 S_0，它由 MMA 在第 w + 1 个 tile 的 PV 之后发射，而那个 PV 要等 correction 为第 w + 1 个 tile arrive `p_ready`——这时 correction 已经等过、读完了第 w 个 tile 的值。softmax 最多领先一个 tile。
 
 `st.alpha` 不需要：softmax 写下一块（包括下一个 tile 的块 0）的 α 之前要等 `s_full`，对应的 QKᵀ 在 MMA 程序里排在本块的 PV 之后，而那个 PV 等 correction 读完 α 后的 `p_ready`。
 
@@ -319,16 +324,17 @@ for k = 0, 1, …（k·G < T）：
 ./lab bench 43 --step 1 --case perf_causal_bh16
 ```
 
-### 步骤 2 · TODO(2a)–(2d)：persistent
+### 步骤 2 · TODO(2a)–(2c)：persistent
 
 - 2a（host）：grid = min(T, SM 数)；
 - 2b（TMA）：装 Q^t 之前等 `q_empty[t]`；循环结束后再等最后一次 `q_empty`（drain）；
-- 2c（MMA）：最后一个读 Q^t 的 QKᵀ 之后 commit `q_empty[t]`（两处：只有 1 块的 tile 在序幕里）；每个 tile 的第一个 PV 之前等 `o_empty[t]`；
-- 2d（correction）：epilogue 读完 O^t 后 fence 并 arrive `o_empty[t]`。
+- 2c（MMA）：最后一个读 Q^t 的 QKᵀ 之后 commit `q_empty[t]`（两处：只有 1 块的 tile 在序幕里）。
+
+O^t 的 TMEM 不需要单独交接（§5.2）；`final_full` 的双缓冲（§5.4）骨架里已经写好，读懂它为什么必要。
 
 ```bash
 ./lab check 43 --step 2 --case multi_tile        # 450 个 tile，有的 CTA 做 4 个
-./lab check 43 --step 2 --case multi_tile_d128   # V = 1：O 被提前覆盖会暴露
+./lab check 43 --step 2 --case many_one_block    # 2000 个 1 块的 tile：序幕里的 q_empty
 ./lab check 43 --step 2 --case bh1_causal        # 8 个 tile < 148 个 SM
 ./lab check 43 --step 2
 ./lab bench 43 --step 2 --case perf
@@ -355,10 +361,8 @@ for k = 0, 1, …（k·G < T）：
 | 步骤 1 causal 的 case 出现“未来位置”的值（`causal_position`） | `num_unmasked_blocks` 用了 `(qt + 127) / 128` 之类的上界，把对角块算成了无 mask |
 | 步骤 1 `short_tail`、`causal_n_bound` 错，其他对 | 忘了 N 的限制（`⌊N / 128⌋`），或没有把 unmasked clamp 到 blocks |
 | 步骤 1 `TIMEOUT` | 两段循环漏了或重复了一块：MMA 和 softmax 的块数对不上 |
-| 步骤 2 只有 `multi_tile*` 错或挂起 | `q_empty` / `o_empty` 的 parity 没有 `^ 1`，或用了 `j & 1` 之类不跨 tile 的 phase |
-| 步骤 2 `multi_tile_d128` 的 O 不等于 1 | 第一个 PV 没等 `o_empty`，或 correction 在读完 O 之前就 arrive |
-| 步骤 2 只有 `bh1_*` 挂起 | 只有 1 块的 tile（N ≤ 128）没有在序幕里 commit `q_empty` |
-| 步骤 2 偶发错误、多跑几次才出现 | `o_empty` 的 arrive 之前缺 `tcgen05.fence::before_thread_sync` |
+| 步骤 2 只有 `multi_tile*`、`many_one_block` 挂起 | `q_empty` 的 parity 不对（第一个 tile 必须不阻塞，之后等上一次释放） |
+| 步骤 2 只有 `n1`、`one_block`、`causal_n1`、`many_one_block` 挂起 | 只有 1 块的 tile（N ≤ 128）没有在序幕里 commit `q_empty` |
 | 步骤 3 `uneven_causal` 错 | LPT 的 pair 没有反过来（层 0 应是每个 head 的最后一对），或层与 bh 的拆分取反了 |
 | 步骤 3 正确但 `perf_causal_bh16` 没有变快 | 只做了 LPT 没做蛇形（§3.4 的“LPT + 轮转”） |
 
@@ -423,8 +427,8 @@ Nsight Compute（锁频，`perf` 与 causal case）：
 
 读这张表：
 
-- 调度上本关已经不输 FA4：causal 的 max / avg 比 FA4 还低。剩下的差距全在**一块的效率**——每 SM 每块的时间。FA4 的 Tensor Core 和 MUFU 都比我们忙 10–15 个百分点，说明它的“链”（softmax → PV → QKᵀ → softmax，40 关 §3.1）更短。
-- 非 causal、D = 128 时 FA4 用 2-CTA MMA（`interface.py` 中 `use_2cta_instrs` 对非 causal 的 hdim 128 打开）：两个 SM 合作一个 256 行的 tile，每个 SM 的 K/V shared memory 流量减半。这是 42 关的内容，本关的答案没有它；`perf`、`perf_8k` 与 FA4 的差距（约 12–15%）主要在这里。FA4 的 causal 与 D = 64 不用 2-CTA，差距（`perf_causal` 约 3%，`perf_causal_bh16` 约 15%，`perf_d64` 约 13%）来自其他流水细节：FA4 的寄存器分配（softmax 176–200、correction 64–80，见 `_TUNING_CONFIG`）、指数模拟的位置（`ex2_emu_start_frg`）、causal 时按块号**倒序**遍历使 mask 块先做等。这些是源码推断，没有逐一验证。
+- 调度上本关已经不输 FA4：causal 的 max / avg 比 FA4 还低。剩下的差距全在**一块的效率**——每 SM 每块的时间。FA4 的 Tensor Core 比我们忙：`perf` 多 15 个百分点（MUFU 多 17）、`perf_causal_bh16` 多 9（MUFU 多 11）、`perf_causal` 多 5（MUFU 多 8），说明它的“链”（softmax → PV → QKᵀ → softmax，40 关 §3.1）更短。
+- 一块的效率差多少：`perf` 上 Tensor Core 忙 68% 对 FA4 的 83%，`perf_causal_bh16` 66% 对 75%，`perf_causal` 63% 对 68%。FA4 在非 causal、D = 128 时把 persistent 调度、2-CTA MMA（`interface.py` 中 `use_2cta_instrs`）和其他调参组合在一起；42 关实测 2-CTA **单独**加在 41 关的 softmax 上（不 persistent）时主循环打平、整体慢约 2.5%，本课程没有测过 persistent + 2-CTA。所以从我们的测量**不能**把 `perf`、`perf_8k` 与 FA4 约 12–15% 的差距归到 2-CTA 上。候选原因（都是源码推断的假设，没有逐一验证）：2-CTA 与 persistent 合用时的收益；FA4 的寄存器分配（softmax 176–200、correction 64–80，见 `_TUNING_CONFIG`）；指数模拟的位置（`ex2_emu_start_frg`）；causal 时按块号**倒序**遍历使 mask 块先做。FA4 的 causal 与 D = 64 不用 2-CTA，差距为 `perf_causal` 约 3%、`perf_causal_bh16` 约 15%、`perf_d64` 约 13%。
 - `perf_causal` 本关已与 FA4 相差约 3%；`perf_causal_bh16` 差得多，因为它的 tile 更长（最多 64 块），一块的效率差异被放大，而均衡的优势只有几个百分点。
 
 ```bash
@@ -440,7 +444,7 @@ Nsight Compute（锁频，`perf` 与 causal case）：
 3. 6 个任务（工作量 10、9、8、3、2、1）分给 3 台机器：分别按轮转、蛇形（都在排好序的序列上）分配，完成时间各是多少？下界是多少？
 4. 为什么步骤 2 让 `perf_causal_bh16` 变慢了？硬件派发 CTA 和静态轮转的本质区别是什么？
 5. 表 §3.1 中的 `X` 块（tile 0 整块被遮的块）如果要跳过，MMA warp、softmax 0、correction 的循环各要怎么改？哪些 barrier 的 phase 计数不能再两个 tile 共用？
-6. 如果去掉 `fin` 的双缓冲，哪个 case 最可能出错？为什么 `alpha` 不需要双缓冲？
+6. 如果 `fin` 双缓冲、`final_full` 只有一个，哪个 case 会出错，表现是什么？为什么 `alpha` 和 `stats_full` 不需要双缓冲？
 
 <details>
 <summary>参考答案</summary>
@@ -450,7 +454,7 @@ Nsight Compute（锁频，`perf` 与 causal case）：
 3. W = 33，下界 11。轮转：10 + 3 = 13、9 + 2 = 11、8 + 1 = 9，C = 13。蛇形：第 2 轮反向，10 + 1 = 11、9 + 2 = 11、8 + 3 = 11，C = 11（最优）。
 4. 硬件按顺序把下一个 CTA 交给**最先空闲**的 SM（贪心），轻 tile 做完的 SM 会多拿几个；静态轮转事先固定了每个 CTA 的 tile，自然顺序下第 k 轮 CTA b 拿 pair (k·148 + b) % 32，有的 CTA 总拿到重的，又没有机制补偿（§3.4，模拟 1.39 → 1.54，实测 max / avg 1.33 → 1.52）。
 5. 让 tile 0 的块数为 blocks − 1（causal、且最后一块是 tile 0 的 `X` 块时）：MMA 在 j = blocks − 2 时不再发 QK⁰_(j+1)，PV⁰_(j) 之后就 commit `o_full[0]`（和 `q_empty[0]`）；j = blocks − 1 只做 tile 1，K_last 在 QK¹ 之后、V_last 在 PV¹ 之后释放（本来就是 tile 1 最后读）；softmax 0 少跑一块；correction 在 j = blocks − 1 时只处理 t = 1。`s_full`、`p_ready`、`stats_full` 每个 tile 的 phase 要分别计数（nb⁰、nb¹），不能再共用 `nb + j`。
-6. 只有 1 块的 tile 连续出现时：N ≤ 128 且 tile 数多于 SM 数（例如 B·H 很大、N = 100）。softmax 写下一组 fin 之前只需要下一个 tile 的 S_0，它不依赖 correction（§5.4）。alpha 的下一次写入要等 `s_full`，而那个 QKᵀ 排在等 correction 的 PV 之后。
+6. 只有 1 块的 tile 连续出现、且 tile 数多于 SM 数时（`many_one_block`：N = 128、B·H = 2000）：softmax 为下一个 tile arrive `final_full` 只需要它的 S_0，不经过 correction，于是 `final_full` 在 correction 等它之前连续完成两个 phase，correction 等的 parity 已经“翻过去又翻回来”——挂起（§5.4）。alpha 的下一次写入和 `stats_full` 的下一次 arrive 都要先等 `s_full`，而那个 QKᵀ 排在等 correction 的 PV 之后，所以最多领先一个 phase。
 </details>
 
 ## 9. 延伸阅读

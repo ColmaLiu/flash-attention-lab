@@ -22,10 +22,13 @@
 - O 不再经 Q 的 shared memory + TMA store，而是每个线程把自己那一行直接 16 字节 `st.global` 写出。原因：persistent 后 Q
   的 shared memory 尽早交给下一个 tile；D = 128 时 shared memory（≈ 198 KB）放不下单独的 32 KB O staging（差约 1 KB）。
   步骤 1 也用这个 epilogue，所以步骤 1 与 41 关的差别包含它（实测在波动内）。
-- O^t 的 TMEM：correction 线程读完最后一个 32 列后 fence + arrive `o_empty[t]`（count 128），MMA 在下一个 tile 的 j = 0
-  的 PV 前等。
-- `st.fin_m/fin_l` 按 tile 奇偶双缓冲：只有 1 块的 tile（N ≤ 128）中，softmax 写下一组最终值只依赖下一个 tile 的 S_0，
-  不经过 correction，单缓冲有理论上的竞争（讲义 §5.4 给出双缓冲的安全论证）。`st.alpha` 不需要。
+- O^t 的 TMEM：不需要单独的 barrier。MMA 在下一个 tile 的第一个 PV 前等 `p_ready`（count 256，含 128 个 correction
+  线程），correction 只在做完上一个 tile 的 epilogue（`tcgen05.ld` 已完成并 fence）之后才为下一个 tile 的块 0 arrive。
+  初版有一个 `o_empty` barrier，独立审查指出它被 `p_ready` 蕴含（去掉后 10/10 通过），已删除。
+- `final_full` 与 `st.fin_m/fin_l` **都**按 tile 奇偶双缓冲（`final_full[it & 1][t]`，parity `(it >> 1) & 1`）。只有 1 块
+  的 tile（N ≤ 128）中，softmax 为下一个 tile 写最终值、arrive `final_full` 只依赖下一个 tile 的 S_0，不经过 correction，
+  可以领先一个 tile。初版只双缓冲了数据：barrier 会在 correction 等待前连续完成两个 phase，correction 永远等不到——
+  审查在 `[4,128,500,128]` 上复现了挂起（3/3），现为 case `many_one_block`。领先不会超过一个 tile（讲义 §5.4）。
 - drain：TMA 退出前等环形 buffer 和 `q_empty` 的最后一次 commit 都到达。
 
 **LPT 与蛇形（步骤 3）。** causal 时 idx → 层 = idx / (B·H)，pair = P − 1 − 层，bh = idx % (B·H)；`tile_index` 偶数轮
@@ -46,11 +49,11 @@ CLC）在模拟中与蛇形相同，没有实现。
 | 步骤 3 | ≈ 1.03× | ≈ 1.27× | ≈ 1.01× | ≈ 0.99× | ≈ 0.97× |
 | FA4 | ≈ 1.17× | ≈ 1.31–1.33× | ≈ 1.15× | ≈ 1.10× | ≈ 1.14× |
 
-`./lab selftest 43 --perf`（目标 0.9，7 号卡；5 号卡中途被其他用户占用）通过：`perf` 1.01×、`perf_causal` 1.25×、`perf_d64` 1.02×、
-`perf_8k` 0.98×、`perf_causal_bh16` 1.02×（FA4 同次 1.16×、1.32×、1.16×、1.12×、1.15×）。最紧的是 `perf_8k`。
+`./lab selftest 43 --perf`（目标 0.9，7 号卡；5 号卡中途被其他用户占用）通过（审查修正后重测）：`perf` 1.02×、`perf_causal` 1.27×、`perf_d64` 1.02×、
+`perf_8k` 0.98×、`perf_causal_bh16` 1.03×（FA4 同次 1.16×、1.32×、1.15×、1.11×、1.14×）。最紧的是 `perf_8k`。
 
 Nsight Compute（锁频）`sm__cycles_active.max / avg`：`perf_causal_bh16` 步骤 1/2/3 = 1.33/1.52/1.04（FA4 1.07）；
-`perf_causal` 1.16/1.27/1.03（FA4 1.09）。Tensor Core 忙碌：步骤 3 `perf` 68%（FA4 83%，FA4 此处用 2-CTA），
+`perf_causal` 1.16/1.27/1.03（FA4 1.09）。Tensor Core 忙碌：步骤 3 `perf` 68%（FA4 83%；FA4 此处组合了 persistent、2-CTA 与其他调参，42 关实测单独的 2-CTA 不划算，差距不能归因于 2-CTA），
 `perf_causal` 63%（FA4 68%），`perf_causal_bh16` 66%（FA4 75%）。剩下的差距在一块的效率，不在调度。
 
 对照（步骤 3 的 kernel 只改调度，时间相对步骤 3）：LPT + 轮转 1.09/1.13（`perf_causal`/`bh16`）；不 persistent + LPT
@@ -59,13 +62,13 @@ Nsight Compute（锁频）`sm__cycles_active.max / avg`：`perf_causal_bh16` 步
 
 ## 验证
 
-- `./lab check 43 --solution`：3 个 step × 36 个 case 全部通过（含新增 `bh1_causal`、`bh1_long`、`uneven_causal`、
+- `./lab check 43 --solution`：3 个 step × 37 个 case 全部通过（审查后加 `many_one_block`；`many_one_block`、`multi_tile*` 各重复 5 次全部通过）（含新增 `bh1_causal`、`bh1_long`、`uneven_causal`、
   `multi_tile`（450 tile）、`multi_tile_d128`（480 tile，V = 1）、`multi_tile_causal`（640 tile，jump_max））。
 - 骨架：在临时副本里依次填 TODO(1)、(2)（先只填 host 端：GPU 上停在 TODO(2)，不挂起）、(3)：`--step 1` 通过且 step 2
   报 TODO(2)；`--step 2` 通过且 step 3 报 TODO(3)；全部通过。之后骨架恢复为字节一致。
 - `./lab sass 43 --solution`：24 个 kernel 均 REG 128（launch 时；`setmaxnreg` 重新分配）、STACK 0。
 - `./lab sanitize --solution`（全部 step）：memcheck、racecheck、synccheck 在 `multi_tile`、`two_tiles`、`bh1_causal` 上
-  0 错误。racecheck 看不见 TMA 与 TMEM 的访问，跨 tile 交接的正确性靠讲义 §5.2–5.4 的论证和 `multi_tile*` case。
+  0 错误（审查后又在 `many_one_block` 上跑了三种工具，0 错误）。racecheck 看不见 TMA 与 TMEM 的访问，跨 tile 交接的正确性靠讲义 §5.2–5.4 的论证和 `multi_tile*` case。
 - `./lab selftest 43` 与 `./lab selftest 43 --perf` 通过；`python -m pytest -q` 12 项通过。
 - 骨架填满后 `bench`：学生版与答案同速（`perf_causal_bh16` 均 ≈ 1.02×）。
 
