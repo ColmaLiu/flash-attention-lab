@@ -9,8 +9,7 @@
 
 namespace {
 
-constexpr int kThreadsX = 32; // one warp along a tile row
-constexpr int kThreadsY = 8;  // 8 warps per block
+constexpr int kTile = 32; // the tile is kTile x kTile elements
 
 // ---------------------------------------------------------------------------
 // TODO(1) — step 1: one thread per element.
@@ -27,31 +26,39 @@ __global__ void transpose_naive(const float *__restrict__ x,
 
 // ---------------------------------------------------------------------------
 // TODO(2) — step 2: transpose through a tile in shared memory.
-// One block (32 x 8 threads) owns the kTile x kTile tile of x whose top-left
-// element is (r0, c0) = (blockIdx.y * kTile, blockIdx.x * kTile).
+// One block of 32 x kThreadsY threads owns the 32 x 32 tile of x whose
+// top-left element is (r0, c0) = (blockIdx.y * kTile, blockIdx.x * kTile).
+// Each thread moves kTile / kThreadsY elements (4 when kThreadsY = 8).
 //   1. Load the tile: a warp (fixed threadIdx.y) reads consecutive columns of
-//      one x row. With kTile = 32, each thread loads 32 / 8 = 4 elements;
-//      write the loops so they also work for kTile = 64 (step 4).
+//      one x row. Write the loop with a compile-time trip count:
+//          #pragma unroll
+//          for (int k = 0; k < kTile / kThreadsY; ++k) {
+//            int i = threadIdx.y + k * kThreadsY;   // tile row
+//            ...
+//          }
+//      (lesson 4.5 explains why `for (i = threadIdx.y; i < kTile; ...)` is
+//      slower: the compiler cannot issue all loads back to back.)
 //   2. __syncthreads(): every element must be in shared memory before any
 //      thread reads another thread's element.
 //   3. Store: a warp writes consecutive columns of one y row. Which tile
-//      element does y[c0 + i][r0 + j] need?
+//      element does y[c0 + i][r0 + threadIdx.x] need?
 //   Check r < rows and c < cols for every load and store (tail tiles).
 // kPad extra floats per row: only the declaration of `tile` uses it.
 // ---------------------------------------------------------------------------
-template <int kTile, int kPad>
+template <int kPad, int kThreadsY>
 __global__ void transpose_tiled(const float *__restrict__ x,
                                 float *__restrict__ y, int rows, int cols) {
   __shared__ float tile[kTile][kTile + kPad];
   LAB_TODO(2);
 }
 
-template <int kTile, int kPad>
+template <int kPad, int kThreadsY>
 void launch_tiled(const float *x, float *y, int rows, int cols,
                   cudaStream_t stream) {
-  dim3 block(kThreadsX, kThreadsY);
+  dim3 block(32, kThreadsY);
   dim3 grid((cols + kTile - 1) / kTile, (rows + kTile - 1) / kTile);
-  transpose_tiled<kTile, kPad><<<grid, block, 0, stream>>>(x, y, rows, cols);
+  transpose_tiled<kPad, kThreadsY><<<grid, block, 0, stream>>>(x, y, rows,
+                                                               cols);
 }
 
 } // namespace
@@ -61,6 +68,8 @@ struct Plan {};
 
 Plan make_plan(const lab::TransposeProblem &p) {
   LAB_REQUIRE(p.dtype == lab::DType::F32, "this lab uses FP32");
+  // gridDim.y is at most 65535; step 1 uses one block row per 8 rows.
+  LAB_REQUIRE(p.rows <= 65535 * 8, "rows must be at most 524280");
   return {};
 }
 
@@ -69,23 +78,23 @@ void run(const Plan &, const lab::TransposeProblem &p, cudaStream_t stream) {
   auto y = static_cast<float *>(p.y);
   switch (p.step) {
   case 1: {
-    dim3 block(kThreadsX, kThreadsY);
-    dim3 grid((p.cols + kThreadsX - 1) / kThreadsX,
-              (p.rows + kThreadsY - 1) / kThreadsY);
+    dim3 block(32, 8);
+    dim3 grid((p.cols + 31) / 32, (p.rows + 7) / 8);
     transpose_naive<<<grid, block, 0, stream>>>(x, y, p.rows, p.cols);
     break;
   }
   case 2:
-    launch_tiled<32, 0>(x, y, p.rows, p.cols, stream);
+    launch_tiled</*kPad=*/0, /*kThreadsY=*/8>(x, y, p.rows, p.cols, stream);
     break;
   case 3:
     // TODO(3) — step 3: choose kPad so that reading a tile column touches
     // 32 different banks, then replace LAB_TODO(3) with the launch.
-    LAB_TODO(3); // launch_tiled<32, kPad>(x, y, p.rows, p.cols, stream);
+    LAB_TODO(3); // launch_tiled<kPad, 8>(x, y, p.rows, p.cols, stream);
     break;
   default:
-    // TODO(4) — step 4: a 64 x 64 tile with the same 256 threads, so each
-    // thread has 16 loads in flight. Replace LAB_TODO(4) with the launch.
+    // TODO(4) — step 4: keep the tile and the padding, but use fewer threads
+    // per block so that each thread has 16 loads in flight (lesson 4.5).
+    // Choose kThreadsY and replace LAB_TODO(4) with the launch.
     LAB_TODO(4);
     break;
   }
