@@ -243,6 +243,72 @@ tcgen05_commit_cg2_multicast(uint64_t *bar, uint16_t cta_mask) {
 }
 
 // ===========================================================================
+// Pair forms used by attention (added in 42_fa4_2cta).
+// ===========================================================================
+
+// cp.async.bulk.tensor.4d.cta_group::2.shared::cluster.global
+//     .mbarrier::complete_tx::bytes [dst], [map, {x, y, z, w}], [bar];
+// The 4-D form of tma_load_2d_cg2: box origin (x, y, z, w) = (i0, i1, i2,
+// i3) of a make_tensor_map_4d map, box -> this CTA's shared `dst`,
+// complete_tx on the barrier at .shared::cluster address `bar` (usually
+// map_shared_rank(bar, leader)).
+__device__ __forceinline__ void tma_load_4d_cg2(void *dst,
+                                                const CUtensorMap *map,
+                                                uint32_t bar, int x, int y,
+                                                int z, int w) {
+  asm volatile("cp.async.bulk.tensor.4d.cta_group::2.shared::cluster.global."
+               "mbarrier::complete_tx::bytes [%0], [%1, {%2, %3, %4, %5}], "
+               "[%6];" ::"r"(shared_addr(dst)),
+               "l"(map), "r"(x), "r"(y), "r"(z), "r"(w), "r"(bar)
+               : "memory");
+}
+
+// mbarrier.arrive.shared::cluster.b64 _, [addr];
+// One arrival on the barrier at .shared::cluster address `addr` (possibly in
+// the peer CTA) with the DEFAULT semantics .release.cta -- the form CUTLASS
+// (ClusterBarrier::arrive(cta_id, pred)) and FA4 (pipeline consumer_release
+// to the leader) use for cross-CTA handoffs. Compare mbar_arrive_cluster:
+// .release.cluster compiles to MEMBAR.ALL.GPU + ERRBAR + CGAERRBAR before
+// the arrive (SASS), which costs hundreds of nanoseconds per arrival on a
+// busy GPU; .release.cta compiles to the bare SYNCS.ARRIVE. Use this form
+// only when the data handed over does NOT go through generic-proxy memory
+// that the other CTA reads (e.g. TMEM written with tcgen05.st, ordered by
+// tcgen05.wait::st + tcgen05.fence::before_thread_sync, as in lab 42); it
+// still delivers the arrival itself. For shared/global data read by the
+// other CTA, use mbar_arrive_cluster (formally required by the PTX memory
+// model: the release must have a scope that contains both threads).
+__device__ __forceinline__ void mbar_arrive_remote(uint32_t addr) {
+  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" ::"r"(addr)
+               : "memory");
+}
+
+// tcgen05.mma.cta_group::2.kind::f16 [d], [a_tmem], b_desc, idesc, p;
+// The TS form (A from Tensor Memory, see mma_f16_ts in tcgen05.cuh) of the
+// pair MMA. With idesc M = 256, N = n, issued by one thread of the leader:
+//   A: rows 0..127 from the leader's TMEM lanes 0..127 at a_tmem, rows
+//      128..255 from the peer's TMEM lanes 0..127 at the same address (same
+//      packing as mma_f16_ts: two 16-bit K elements per 32-bit column);
+//   B: rows (N index) 0..n/2-1 from the leader's smem at b_desc, n/2..n-1
+//      from the peer's smem at the same offset;
+//   D: rows 0..127 -> leader TMEM, 128..255 -> peer TMEM, columns d ..
+//      d + n - 1 in both.
+// Both CTAs' writers of A must tcgen05.wait::st, fence::before_thread_sync
+// and synchronize with the issuing thread (across the cluster: arrive
+// .release.cluster on the leader's mbarrier, try_wait.acquire.cluster),
+// which then executes tcgen05.fence::after_thread_sync.
+__device__ __forceinline__ void mma_f16_ts_cg2(uint32_t d_tmem, uint32_t a_tmem,
+                                               uint64_t b_desc, uint32_t idesc,
+                                               bool accumulate) {
+  asm volatile(
+      "{\n\t.reg .pred p;\n\t"
+      "setp.ne.b32 p, %4, 0;\n\t"
+      "tcgen05.mma.cta_group::2.kind::f16 [%0], [%1], %2, %3, p;\n\t}" ::"r"(
+          d_tmem),
+      "r"(a_tmem), "l"(b_desc), "r"(idesc), "r"(accumulate ? 1 : 0)
+      : "memory");
+}
+
+// ===========================================================================
 // Host: launching a kernel with a cluster shape. CUDA Runtime API
 // "cudaLaunchKernelEx", launch attribute cudaLaunchAttributeClusterDimension.
 // gridDim.x must be a multiple of cluster_x. The <<<>>> syntax cannot set a
