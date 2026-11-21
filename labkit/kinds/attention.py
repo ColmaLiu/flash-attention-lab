@@ -59,9 +59,24 @@ def make_inputs(case, gen):
         else:
             g = 200.0 * (j >= 3 * n // 5 + 50).float()
         k = g * u + k
+    elif case.pattern == "long_tail":
+        # One hot key per head (logit about 8) and every other logit about 0,
+        # V with a nonzero mean (lab 44): about N e^-8 of the softmax mass
+        # sits in a long tail of tiny probabilities, which an unscaled E4M3
+        # P (subnormal below 2^-6) rounds badly.
+        u = torch.randn(1, 1, h, d, device="cuda", generator=gen)
+        u = u / u.norm(dim=-1, keepdim=True)
+        c = math.sqrt(8.0 * math.sqrt(d))
+        q = (c * u).expand(b, n, h, d).clone()
+        k = 0.1 * k
+        for hh in range(h):
+            k[:, (37 * hh) % n, hh] = c * u[0, 0, hh]
+        v = 1.0 + v
     if case.dtype == "e4m3":
-        # Real value = descale * stored value; store values in a good E4M3 range.
-        q, k, v = (t * 4.0 for t in (q, k, v))
+        # Real value = descale * stored value; store values in a good E4M3
+        # range. The three descales differ (see options) so that a kernel
+        # that mixes them up fails.
+        q, k, v = q * 2.0, k * 8.0, v * 4.0
     return {"q": q.to(dtype), "k": k.to(dtype), "v": v.to(dtype)}
 
 
@@ -80,7 +95,9 @@ def options(case, inputs):
         "causal": 1.0 if case.options.get("causal", False) else 0.0,
     }
     if case.dtype == "e4m3":
-        opts.update(q_descale=0.25, k_descale=0.25, v_descale=0.25)
+        # Inverses of the pre-multipliers in make_inputs; distinct powers of
+        # two, so real values are exact and swapped descales are caught.
+        opts.update(q_descale=0.5, k_descale=0.125, v_descale=0.25)
     return opts
 
 
@@ -116,14 +133,14 @@ def tolerance(case):
     o = {"fp16": (2e-3, 5e-3), "bf16": (1e-2, 2e-2)}[_o_dtype(case)]
     if case.dtype == "e4m3":
         # P is quantized to E4M3 before P V: 3 mantissa bits, unit roundoff
-        # u = 2^-4, so every weight of the convex combination O = sum_j w_j
-        # V_j carries a relative error up to u and |err O| ~ u |V_j - O| in
-        # rows dominated by a few keys (large_logits, causal first rows).
-        # Tolerance (u, 2u) with V ~ N(0, 1): lab 44 measured 0.75 of this
-        # budget for its kernel and for FA4 FP8 (P scale 2^8), 0.95 for a P
-        # scale of 448; (5e-2, 1e-1) left 6% headroom and rejected the 448
-        # variant. Q/K/V quantization is not counted: the oracle uses the
-        # dequantized inputs.
+        # u = 2^-4; every weight of O = sum_j w_j V_j carries a relative
+        # error up to about u, so rows dominated by a few keys (large_logits,
+        # causal first rows) have errors of order u |V_j - O|. (u, 2u) is
+        # u-scaled and calibrated by measurement, not a derived bound: lab
+        # 44's kernel and FA4 FP8 (P scale 2^8) use about 75% of it, a P
+        # scale of 448 about 95%; (5e-2, 1e-1) left 6% headroom and rejected
+        # the 448 variant. Structured cases tighten it with "o_tol". Q/K/V
+        # quantization is not counted: the oracle uses dequantized inputs.
         o = (2.0**-4, 2.0**-3)
     tol = {"o": o, "lse": (1e-3, 1e-4)}
     # A case may only tighten its tolerance (e.g. structured inputs whose
@@ -338,5 +355,6 @@ def probe_fa4c_scores(inputs, options, case):
     CTA pair (512 rows per cluster) are checked against the 128 keys whose
     halves come from the two CTAs' shared memory. No mask (non-causal cases).
     """
-    s = _scores11(inputs, options)
-    return s[..., : min(s.shape[-1], 128)].contiguous(), (1e-3, 1e-3)
+    keys = min(inputs["k"].shape[1], 128)
+    first = {"q": inputs["q"], "k": inputs["k"][:, :keys]}  # [B, keys, H, D]
+    return _scores11(first, options), (1e-3, 1e-3)

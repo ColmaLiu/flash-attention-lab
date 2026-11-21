@@ -123,14 +123,16 @@ __device__ __forceinline__ uint64_t make_smem_desc_mnmajor_sw128(
 }
 
 // MN-major operand with 64-byte swizzle (added in 42_fa4_2cta): what TMA
-// writes with a 32-element 16-bit box row and CU_TENSOR_MAP_SWIZZLE_64B.
+// writes with a 64-byte box row (32 16-bit or 64 8-bit elements) and
+// CU_TENSOR_MAP_SWIZZLE_64B. The layout is defined in bytes, so the same
+// descriptor serves 8-bit operands (44_fa4_fp8: E4M3 V with D = 64).
 // Canonical layout (CUTLASS mma_traits_sm100.hpp, LayoutType::B64), in
-// elements: ((8, 4, m), (8, k)) : ((1, 8, LBO), (32, SBO)), i.e. 32 MN
-// elements (64 bytes) form one swizzled row; 8 rows along K form a 512-byte
-// atom; atoms follow each other along K at SBO = 512 bytes; the next 32-wide
-// MN panel starts LBO bytes further (only used when the operand's M or N
-// held by this CTA exceeds 32). To select K rows k0 .. k0 + 15, add k0 * 64
-// bytes. Atoms must be 512-byte aligned (base offset 0).
+// 16-bit elements (8-bit: double the MN counts): ((8, 4, m), (8, k)) :
+// ((1, 8, LBO), (32, SBO)), i.e. 64 bytes of MN form one swizzled row; 8 rows
+// along K form a 512-byte atom; atoms follow each other along K at SBO = 512
+// bytes; the next 32-wide MN panel starts LBO bytes further (only used when the
+// operand's M or N held by this CTA exceeds 32). To select K rows k0 .. k0 +
+// 15, add k0 * 64 bytes. Atoms must be 512-byte aligned (base offset 0).
 __device__ __forceinline__ uint64_t make_smem_desc_mnmajor_sw64(
     const void *smem, uint32_t lbo_bytes, uint32_t sbo_bytes = 512) {
   const uint64_t addr = shared_addr(smem);
@@ -274,7 +276,8 @@ __device__ __forceinline__ void mma_f8f6f4_ss(uint32_t d_tmem, uint64_t a_desc,
 // As mma_f16_ts, but A holds 8-bit elements, FOUR per 32-bit column: row i
 // of A is TMEM lane i, K element 4c + b is byte b (b = 0 least significant)
 // of column a_tmem.col + c. One MMA (K = 32) reads 8 columns. A must be
-// K-major (A-major bit 0); same tcgen05.wait::st + fence + sync rules as
+// K-major (A-major bit 0; CUTLASS SM100_MMA_F8F6F4_TS: "A from TMEM can't
+// be transposed"); same tcgen05.wait::st + fence + sync rules as
 // mma_f16_ts before the MMA reads what tcgen05.st wrote.
 __device__ __forceinline__ void mma_f8f6f4_ts(uint32_t d_tmem, uint32_t a_tmem,
                                               uint64_t b_desc, uint32_t idesc,

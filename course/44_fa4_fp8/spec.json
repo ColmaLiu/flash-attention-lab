@@ -33,7 +33,35 @@
     {
       "step": 2,
       "title": "P 乘 2⁸ 量化为 E4M3 写回 TMEM，FP8 的 P·V（TS），epilogue 撤销缩放",
-      "cases": "all"
+      "cases": [
+        "n1",
+        "one_block",
+        "two_tiles",
+        "tile1_tail",
+        "tile1_position",
+        "short_tail",
+        "scale",
+        "uniform",
+        "ones_v",
+        "position",
+        "peaked",
+        "peaked_d64",
+        "ring",
+        "medium",
+        "medium_d64",
+        "causal_n1",
+        "causal_pair",
+        "causal_tail",
+        "causal_n_bound",
+        "causal_position",
+        "causal_peaked",
+        "causal_uniform",
+        "causal_ones_v",
+        "causal_medium",
+        "causal_medium_d64",
+        "long_tail",
+        "causal_long_tail"
+      ]
     },
     {
       "step": 3,
@@ -74,7 +102,11 @@
       ],
       "dtype": "e4m3",
       "pattern": "position",
-      "purpose": "N=256 一对 tile、两个块，D=128：tile 1 的 Q 坐标、S¹/O¹ 的 TMEM 列、P¹ 的 32 列位置。"
+      "purpose": "N=256 一对 tile、两个块，D=128：tile 1 的 Q 坐标、S¹/O¹ 的 TMEM 列、P¹ 的 32 列位置。",
+      "o_tol": [
+        0.015,
+        0
+      ]
     },
     {
       "name": "tile1_tail",
@@ -97,7 +129,11 @@
       ],
       "dtype": "e4m3",
       "pattern": "position",
-      "purpose": "D=128、N=190：V[j]=j/N 暴露 P 的字节顺序（一列 4 个 key，key 4c 在最低字节）。"
+      "purpose": "D=128、N=190：V[j]=j/N 暴露 P 的字节顺序（一列 4 个 key，key 4c 在最低字节）。",
+      "o_tol": [
+        0.015,
+        0
+      ]
     },
     {
       "name": "short_tail",
@@ -109,7 +145,11 @@
       ],
       "dtype": "e4m3",
       "pattern": "position",
-      "purpose": "N=37、D=128：一行 128 字节恰好一个 128B swizzle 行；91 个填充 key 必须被 mask。"
+      "purpose": "N=37、D=128：一行 128 字节恰好一个 128B swizzle 行；91 个填充 key 必须被 mask。",
+      "o_tol": [
+        0.015,
+        0
+      ]
     },
     {
       "name": "scale",
@@ -134,7 +174,11 @@
       ],
       "dtype": "e4m3",
       "pattern": "uniform",
-      "purpose": "Q=0、D=64：每个 P 都是 2⁸ = 256（E4M3 可精确表示），O 是 V 的均值，LSE = ln N：P 的缩放必须在 ℓ 和 LSE 中一致地撤销。"
+      "purpose": "Q=0、D=64：每个 P 都是 2⁸ = 256（E4M3 可精确表示），O 是 V 的均值，LSE = ln N：P 的缩放必须在 ℓ 和 LSE 中一致地撤销。",
+      "o_tol": [
+        0.001,
+        0.004
+      ]
     },
     {
       "name": "ones_v",
@@ -146,7 +190,27 @@
       ],
       "dtype": "e4m3",
       "pattern": "ones_v",
-      "purpose": "V=1：O = Σp̂/ℓ。步骤 2（ℓ 用 FP32 的 p）误差约 1e-2；步骤 3（ℓ 用量化后的 p̂）O 恰好为 1。"
+      "purpose": "V=1：O = Σp̂/ℓ。步骤 2（ℓ 用 FP32 的 p）误差约 1e-2；步骤 3（ℓ 用量化后的 p̂）O 恰好为 1。",
+      "o_tol": [
+        0.02,
+        0
+      ]
+    },
+    {
+      "name": "ones_v_exact",
+      "shape": [
+        1,
+        513,
+        4,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "ones_v",
+      "purpose": "只在步骤 3 检查：O 用 Σp̂ 归一化后是精确的凸组合，V=1 时 O 必须精确为 1（容差 1e-5）。步骤 2 的 ℓ=Σp 在这里误差约 1e-2。",
+      "o_tol": [
+        1e-05,
+        0
+      ]
     },
     {
       "name": "position",
@@ -158,7 +222,11 @@
       ],
       "dtype": "e4m3",
       "pattern": "position",
-      "purpose": "V[j]=j/N、D=64、5 个块：64B swizzle 的 V 描述符（SBO=512）、K/V 环的下标。"
+      "purpose": "V[j]=j/N、D=64、5 个块：64B swizzle 的 V 描述符（SBO=512）、K/V 环的下标。",
+      "o_tol": [
+        0.015,
+        0
+      ]
     },
     {
       "name": "peaked",
@@ -194,7 +262,11 @@
       ],
       "dtype": "e4m3",
       "pattern": "position",
-      "purpose": "12 个块、24 个 ring item：环形 buffer 绕多圈（FP8 的环有 8 级）。"
+      "purpose": "12 个块、24 个 ring item：环形 buffer 绕多圈（FP8 的环有 8 级）。",
+      "o_tol": [
+        0.015,
+        0
+      ]
     },
     {
       "name": "medium",
@@ -278,7 +350,11 @@
       "dtype": "e4m3",
       "pattern": "position",
       "causal": true,
-      "purpose": "causal、V[j]=j/N、D=128：mask 或 P 的字节顺序偏一位就会读到别的位置值。"
+      "purpose": "causal、V[j]=j/N、D=128：mask 或 P 的字节顺序偏一位就会读到别的位置值。",
+      "o_tol": [
+        0.015,
+        0
+      ]
     },
     {
       "name": "causal_peaked",
@@ -304,7 +380,11 @@
       "dtype": "e4m3",
       "pattern": "uniform",
       "causal": true,
-      "purpose": "causal 且 Q=0：O[i] 是 V[0..i] 的均值，LSE[i] = ln(i+1)。"
+      "purpose": "causal 且 Q=0：O[i] 是 V[0..i] 的均值，LSE[i] = ln(i+1)。",
+      "o_tol": [
+        0.001,
+        0.004
+      ]
     },
     {
       "name": "causal_ones_v",
@@ -317,7 +397,28 @@
       "dtype": "e4m3",
       "pattern": "ones_v",
       "causal": true,
-      "purpose": "causal 且 V=1：第 0 行只有一个 key（P̂ = 256）。"
+      "purpose": "causal 且 V=1：第 0 行只有一个 key（P̂ = 256）。",
+      "o_tol": [
+        0.04,
+        0
+      ]
+    },
+    {
+      "name": "causal_ones_v_exact",
+      "shape": [
+        2,
+        190,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "ones_v",
+      "causal": true,
+      "purpose": "只在步骤 3 检查：O 用 Σp̂ 归一化后是精确的凸组合，V=1 时 O 必须精确为 1（容差 1e-5）。步骤 2 的 ℓ=Σp 在这里误差约 1e-2。",
+      "o_tol": [
+        1e-05,
+        0
+      ]
     },
     {
       "name": "causal_medium",
@@ -342,6 +443,35 @@
       "dtype": "e4m3",
       "causal": true,
       "purpose": "中等规模 causal，D=64。"
+    },
+    {
+      "name": "long_tail",
+      "shape": [
+        1,
+        4096,
+        2,
+        128
+      ],
+      "dtype": "e4m3",
+      "pattern": "long_tail",
+      "purpose": "每个 head 一个 logit≈8 的热 key，其余≈0：约 N·e⁻⁸ 的概率质量在 p≈e⁻⁸ 的长尾里，V 的均值不为 0。P 不乘 2⁸ 时长尾落进 E4M3 的次正规区，O 错；乘 2⁸ 后正确（讲义 §3.4）。",
+      "o_tol": [
+        0.012,
+        0.004
+      ]
+    },
+    {
+      "name": "causal_long_tail",
+      "shape": [
+        1,
+        2048,
+        2,
+        64
+      ],
+      "dtype": "e4m3",
+      "pattern": "long_tail",
+      "causal": true,
+      "purpose": "同上，causal、D=64：越靠后的行长尾越长。"
     },
     {
       "name": "perf",

@@ -54,13 +54,25 @@ softmax 代码与 40 关相同；`v_descale` 在 epilogue 每个元素乘一次�
 | BF16 P（PyTorch 模拟） | 0.06 | 0.05 |
 
 原容差 (5e-2, 1e-1) 只给答案留了 6% 的余量，并且拒绝 P scale = 448 这一合理变体，所以改为 (u, 2u)，u = 2⁻⁴ 是 E4M3
-的单位舍入误差（依据见讲义 §3.5：集中权重的行误差约 u·|v_a − v_b|）。用故障注入确认放宽后仍能发现错误（`./lab check`
+的单位舍入误差。这是按 u 取量级、用实测校准的值（约 75% 被使用），不是推导出的上界。用故障注入确认放宽后仍能发现错误（`./lab check`
 在第一个失败 case 停下）：P 的字节交换（0↔1 → `n1`；2↔3 → `one_block`）、整字节反序、PV 的 TMEM 列步长 ×2、P¹ 用了 tile 0
 的列（`two_tiles`）、D = 64 的 V SBO 错为 1024（`one_block`）、causal mask 多看一个 key（`causal_pair`）、LSE 漏减 8·ln2 或 P
 没有缩放（`n1` 的 LSE）在两种容差下都失败。
 
-P scale = 1 与 2⁸ 在全部 case 上误差相同：本关的随机数据中 p < 2⁻⁶ 的 key 对 ℓ 贡献很小。讲义 §3.4 用长尾行的手算例子
-说明 2⁸ 的作用，没有为此加 case。
+P scale = 1 与 2⁸ 在随机数据的 case 上误差相同（p < 2⁻⁶ 的 key 对 ℓ 贡献很小）。为此新增 `long_tail` pattern（独立审查
+给出的生成方式：每个 head 一个 logit≈8 的热 key，其余≈0，V 均值为 1）和两个 case：P scale = 1 时 `long_tail` 误差 0.61
+（步骤 2）/ 2.0（步骤 3），`causal_long_tail` 0.44 / 0.99；2⁸ 时 5.7e-3 和 5.3e-2 / 3.7e-2。
+
+**descale 互不相同。** 审查发现三个 descale 都是 0.25 时 `scale·q_descale·q_descale`、`q_descale/lo` 这类混用能通过。现在
+存储值为 Q×2、K×8、V×4（descale 0.5、0.125、0.25，真实值不变，K 的存储值最大约 40 ≪ 448）。两种混用在全部 27 个
+（步骤 2/3）case 上失败；FA4 FP8 基线与 oracle 仍一致。
+
+**收紧的结构化 case（`o_tol`，约为实测误差的 2–3 倍）。** `uniform`/`causal_uniform` (1e-3, 4e-3)；`two_tiles`、
+`tile1_position`、`short_tail`、`position`、`ring`、`causal_position` 1.5e-2（实测 ≤ 6.9e-3）；`ones_v` 2e-2（7.8e-3）、
+`causal_ones_v` 4e-2（2.0e-2）；`long_tail` (1.2e-2, 4e-3)。另有只在步骤 3 检查的 `ones_v_exact`、`causal_ones_v_exact`
+（1e-5；步骤 3 实测 ≈1e-6），所以步骤 2 的 case 列表显式排除它们。故障“P 截断而非就近舍入”：步骤 2 有 16 个 case 失败
+（`position` 类、`ones_v*`、`peaked*`、`long_tail` 等），步骤 3 有 6 个（`peaked*`、`causal_medium*`、`long_tail`）——
+步骤 3 的一致归一化抵消了截断的大部分偏差，只在集中权重的行和长尾行上可见。
 
 ## 各 step 的性能（CUDA Graph，4 号卡，2–3 次运行的范围）
 
@@ -87,7 +99,7 @@ O 为 BF16。已核对它的 O/LSE 与 FP64 oracle 一致（误差见上表；LS
 
 ## 验证
 
-- `./lab check 44 --solution`：3 个 step（8 + 25 + 25 个 case）全部通过；`./lab selftest 44`、`selftest 44 --perf`（0.63）通过；
+- `./lab check 44 --solution`：3 个 step（8 + 27 + 29 个 case）全部通过；`./lab selftest 44`、`selftest 44 --perf`（0.63）通过；
 - `./lab sanitize --solution`：memcheck、racecheck、synccheck 在 `two_tiles`（步骤 1–3）、`tile1_tail`（步骤 1）、`causal_tail`
   （步骤 2–3）上 0 错误；racecheck 看不见 TMA/TMEM，同步论证沿用 40 关 §5.6；
 - `./lab sass 44 --solution`：12 个 kernel STACK 均为 0，`UTCQMMA`（tcgen05.mma 的 FP8 形式）104 条；
