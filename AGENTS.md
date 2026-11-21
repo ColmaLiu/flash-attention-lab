@@ -1,31 +1,37 @@
 # flash-attention-lab 学习协作约定
 
-本项目帮助学习者从零实现并优化 GPU attention，主要使用 CUDA C++ / PTX，面向
-Blackwell SM100。课程分为 0–4 五个阶段。这里的约定面向辅导学习者的 agent。
+本项目是一门 CUDA C++ / PTX 课程：在 B200（SM100）上以 FlashAttention 1→4 为主线，学写高性能 kernel。关卡分部分 0–4，列表见 [README](README.md#课程地图)。这里的约定面向辅导学习者的 agent。
 
-- 先阅读当前关卡的任务说明、学习者代码与笔记，围绕学习者提出的问题提供解释、
-  提示、调试或代码审查。未经明确要求，不替学习者完成练习，也不覆盖已有实现与笔记。
-- `students/` 是练习区，初始核心未实现时应明确报错。学生入口不能回退到参考答案、
-  数学 oracle 或库实现，不能用调用库的 wrapper 代替需要练习的 kernel。
-- `solutions/` 是独立、可读的 CUDA C++ / PTX 参考答案，可按学习者需要阅读或运行。
-  学习任务默认不修改参考答案、课程定义或测试基础设施；发现疑似错误时说明证据，
-  按明确的修复请求处理。
-- 数学 oracle、参考答案、优化库与学生实现各有独立入口。比较时确认实际 backend，
-  不以静默 fallback 冒充优化库。接口和支持域以关卡说明及 `curriculum.json` 为准。
-- attention 公共接口为 contiguous `[B,N,H,D]`，输出 O 同布局，LSE 为 `[B,H,N]`
-  FP32。仅 self-attention forward，无 dropout、bias 或 GQA。
-- 先用小案例定位问题，再运行本关完整 correctness 检查和代表性性能案例。失败要明确
-  报告，不删除测试、不无条件 skip、不放宽容差来获得通过。数值正确之外，还要检查
-  数据布局、线程分工、同步和缓冲生命周期，帮助学习者理解目标机制。
-- 性能比较使用相同输入、输出契约与计时边界，排除编译、输入生成和分配；不要混用
-  CUDA Graph 与 eager 计算 speedup。区分实测、源码推断和未验证假设，保留失败结果。
-  参考答案的维护验收与学生学习验收不同，详见 [性能说明](docs/benchmarking.md)。
-- 通过 `./lab` 使用独立 Conda 环境 `flash-attention-lab`（可配置 `LAB_CONDA_ENV`）。
-  默认只用 `LAB_GPU` 选择的一张 GPU，尊重 `CUDA_VISIBLE_DEVICES`；不修改 base、
-  系统工具链或其他用户进程。不自动运行长 sweep。
-- 日志、机器快照、测量结果、个人进度与旧版本归档放入 Git 忽略目录。保留第三方
-  许可和固定的依赖版本。公共代码格式见 [格式化说明](docs/formatting.md)，批量工具
-  默认排除学生练习。
-- 常用入口为 `./lab task ID -v`、`./lab check ID`、`./lab bench ID --case N`；
-  `solution` 和 `reference` 分别运行参考答案与库基线。先确认命令作用于哪个实现。
-- 只有学习者明确要求时才提交或推送代码；提交授权不包含推送授权。
+## 辅导方式
+
+- 先读当前关卡的讲义 `course/<ID>/README.md`、`spec.json` 和学习者的 `students/<ID>/kernel.cu`，再回答学习者的问题：解释、提示、调试或代码审查。
+- 未经明确要求，不替学习者完成 `TODO`，不覆盖已有实现与笔记。
+- 帮学习者理解机制，而不只是让测试通过：数值之外，还要检查数据布局、线程分工、同步、buffer 生命周期。
+
+## 目录与边界
+
+- `students/` 是练习区。骨架未完成时用 `LAB_TODO(n)` 明确报错。学生代码不能调用参考答案、数学 oracle 或库来代替要练习的 kernel。
+- `solutions/` 是可读的参考答案（`kernel.cu` 与 `NOTES.md`），可以按学习者需要阅读或运行（`--solution`）。
+- 辅导时不修改 `solutions/`、`course/`、`include/lab/`、`labkit/` 和测试。发现疑似错误时，给出证据，等明确的修复请求。
+- 支持域与 case 以本关讲义和 `spec.json` 为准。attention 接口为 contiguous `[B,N,H,D]`，O 同布局，LSE 为 `[B,H,N]` FP32（自然对数）；只有 self-attention 前向，无 dropout、bias、GQA。
+
+## 正确性
+
+- 先确认命令作用于哪个实现：不带 `--solution` 是学生代码，带 `--solution` 是参考答案；`bench` 中的 `cublas`、`cudnn`、`fa4` 等是库基线。
+- 先用小 case 定位：`./lab check ID --step n --case <小 case>`，再跑本关完整检查 `./lab check ID`。
+- 失败要如实报告。不删除测试、不无条件 skip、不放宽容差。
+- 库基线不可用时，`bench` 显示 “unavailable”。不要用别的实现静默顶替。
+
+## 性能
+
+- 比较必须使用相同的输入、输出契约和计时边界（排除编译、`make_plan`、输入生成与分配）。
+- 不混用计时模式：默认的 CUDA Graph 结果不能与 `--cold` 结果互相计算比值。
+- 区分实测、源码推断和未验证的假设；保留失败或变慢的结果。
+- 不自动运行长时间 sweep。工具用法见 [工具指南](docs/tools.md)。
+
+## 环境
+
+- 通过 `./lab` 使用独立 Conda 环境 `flash-attention-lab`（可用 `LAB_CONDA_ENV` 修改）。不改 base 环境、系统工具链或其他用户的进程。
+- 只用一张 GPU：由 `LAB_GPU` 选择，并在已有 `CUDA_VISIBLE_DEVICES` 范围内。先用 `nvidia-smi` 找空闲的卡。
+- 日志、测量结果、profile 报告、个人进度写入 Git 忽略的目录（`artifacts/`、`.cache/`、`progress/results/`）。
+- 只有学习者明确要求时才提交；提交的授权不包含推送。

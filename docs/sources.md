@@ -1,27 +1,63 @@
-# 来源、版本与阅读方法
+# 上游来源与固定版本
 
-课程提供独立数学 oracle、完整实现和快速库对照。上游源码通过 `third_party/cutlass` 与 `third_party/flash-attention` 两个 Git submodule 引入，父仓库的 gitlinks 锁定源码版本。按 [参考实现](reference-implementations.md) 的 source map 阅读入口、设备模块和实验配置。
+课程的参考答案全部是本仓库中可读的 CUDA C++ / PTX，不调用 CUTLASS、CuTe 或 FlashAttention 的代码。上游源码只用来**对照阅读**：看生产实现怎样处理同一个问题。
 
-| 来源 | 固定标识 | 用途 |
+## 1. 论文
+
+| 论文 | 固定版本 | 对应关卡 |
 |---|---|---|
-| [FA1 原论文](https://arxiv.org/abs/2205.14135v2) | arXiv:2205.14135v2 | IO 模型、分块与归一化状态 |
-| [FA2 原论文](https://arxiv.org/html/2307.08691v1) | arXiv:2307.08691v1 | query 并行、CTA 内工作分配、非矩阵操作 |
-| [FA2 forward 来源](https://github.com/Dao-AILab/flash-attention/tree/5231d95fe13733fb534c01895f7ea88c6a6c7793) | v2.7.4.post1 / `5231d95fe13733fb534c01895f7ea88c6a6c7793` | FA2 并行划分、流水线与数值策略的生产实现对照 |
-| [FA4 原论文](https://arxiv.org/html/2603.05451v1) | arXiv:2603.05451v1 | Blackwell forward pipeline、指数、rescale 与调度 |
-| [FlashAttention submodule](../third_party/flash-attention/) | beta35 / `1fc0221183e799363001394a12dd9e78e15f5dda` | SM100 attention 的生产实现与设计对照 |
-| [CUTLASS submodule](../third_party/cutlass/) | v4.4.1 / `4370102f9dacab813282e1d67722fceb0b90a019` | SM100 指令封装、布局与完整 GEMM 的生产实现对照 |
-| [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/) | NVIDIA 在线文档 | 指令合法域、集体参与和可见性 |
-| [Blackwell tuning guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html) | NVIDIA 在线文档 | SM100 的资源限制与优化建议 |
-| [CUDA Best Practices](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/) | NVIDIA 在线文档 | 合并访存、bank conflicts、测量方法 |
-| [PyTorch CUDA SoftMax](https://github.com/pytorch/pytorch/blob/v2.10.0/aten/src/ATen/native/cuda/SoftMax.cu) | v2.10.0 | 原生 softmax 实现阅读 |
+| [FlashAttention](https://arxiv.org/abs/2205.14135v2) | arXiv:2205.14135v2 | 11、12：IO 分析、分块、online softmax |
+| [FlashAttention-2](https://arxiv.org/abs/2307.08691v1) | arXiv:2307.08691v1 | 22：循环交换、warp 划分、减少非矩阵运算 |
+| [FlashAttention-3](https://arxiv.org/abs/2407.08608v2) | arXiv:2407.08608v2 | 34：异步生产者、GEMM/softmax 重叠、pingpong |
+| [FlashAttention-4](https://arxiv.org/abs/2603.05451v1) | arXiv:2603.05451v1 | 部分 4：Blackwell 流水、指数、rescale、2-CTA、调度 |
 
-查看父仓库记录的版本：
+## 2. 上游源码（Git submodule）
+
+两个 submodule 的版本由父仓库的 gitlink 锁定。`bootstrap.sh` 会初始化它们；也可以手动运行：
 
 ```bash
-git ls-files --stage third_party/cutlass third_party/flash-attention
 git submodule update --init -- third_party/cutlass third_party/flash-attention
+git ls-files --stage third_party/cutlass third_party/flash-attention   # 查看锁定的 commit
 ```
 
-[sources.lock.json](sources.lock.json) 记录资料来源，实际源码版本以 gitlinks 为准。许可证随 submodule 保存。本地 CUDA C++/PTX 答案中的直接改编部分保留来源与署名，许可统一链接到对应 submodule。
+| 路径 | 版本 | 许可证 | 用途 |
+|---|---|---|---|
+| `third_party/cutlass` | v4.4.1 / `4370102f9dacab813282e1d67722fceb0b90a019` | BSD-3-Clause（`LICENSE.txt`） | SM100 指令封装、描述符位域、流水线类、Blackwell GEMM 与 FMHA 示例 |
+| `third_party/flash-attention` | fa4-v4.0.0.beta35 / `1fc0221183e799363001394a12dd9e78e15f5dda` | BSD-3-Clause（`LICENSE`） | FA4（CuTe DSL）的 SM100 前向实现；`--with-fa4` 从这里安装性能基线 |
 
-`bootstrap` 统一安装完整课程环境。本地参考答案由 nvcc 编译，编译与输入准备都排除在 kernel 计时之外。在线手册会更新，指令和 API 使用应对照实际编译器及锁定源码。
+各关讲义的“延伸阅读”给出具体文件。常用的入口：
+
+| 文件 | 内容 | 对照关卡 |
+|---|---|---|
+| `third_party/cutlass/include/cute/arch/mma_sm100_desc.hpp` | smem descriptor、instruction descriptor 的位域 | 31 |
+| `third_party/cutlass/include/cute/arch/mma_sm100_umma.hpp` | `tcgen05.mma` 的 inline PTX | 31、33 |
+| `third_party/cutlass/include/cute/arch/copy_sm90_tma.hpp`、`copy_sm100_tma.hpp` | TMA 指令 | 30、33 |
+| `third_party/cutlass/include/cutlass/arch/barrier.h` | mbarrier、cluster barrier | 30、33 |
+| `third_party/cutlass/examples/77_blackwell_fmha/` | CUTLASS SM100 FMHA 示例 | 34、部分 4 |
+| `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py` | FA4 SM100 前向 kernel | 34、部分 4 |
+| `third_party/flash-attention/flash_attn/cute/interface.py` | FA4 的 Python 接口（`flash_attn_func`） | `bench` 的 `fa4` 基线 |
+
+本仓库答案中直接改编自上游的部分，在代码注释中注明出处；许可证随 submodule 保存。
+
+## 3. 其他固定来源
+
+[sources.lock.json](sources.lock.json) 以机器可读的格式记录论文版本、上游文件的 commit 与 sha256。其中还包括两份不在 submodule 中的历史版本：
+
+| 来源 | 固定版本 | 用途 |
+|---|---|---|
+| [FA1 实现](https://github.com/Dao-AILab/flash-attention/tree/6d48e14a6c2f551db96f0badc658a6279a929df3) | v1.0.9 | FA1 的原始 CUDA 实现 |
+| [FA2 forward kernel](https://github.com/Dao-AILab/flash-attention/blob/5231d95fe13733fb534c01895f7ea88c6a6c7793/csrc/flash_attn/src/flash_fwd_kernel.h) | v2.7.4.post1 | FA2 的并行划分、流水与数值处理 |
+
+## 4. NVIDIA 文档
+
+在线文档会更新。指令用法以本机 CUDA 12.8 对应的 PTX ISA 8.7 为准；`include/lab/*.cuh` 中的封装注明了 PTX ISA 8.7 的章节名。
+
+| 文档 | 用途 |
+|---|---|
+| [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/) | 指令语义、合法参数、内存模型 |
+| [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/index.html) | 编程模型、cluster、异步拷贝、各计算能力的资源上限 |
+| [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html) | 合并访存、bank conflict、指令吞吐表 |
+| [Blackwell Tuning Guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html) | SM100 的资源与调优建议 |
+| [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html) | 性能指标的定义 |
+| [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) | memcheck、racecheck、synccheck、initcheck |
+| [CUDA Binary Utilities](https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html) | `cuobjdump`、`nvdisasm` |

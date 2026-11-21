@@ -12,6 +12,12 @@
     "version": "arXiv:2307.08691v1"
   },
   {
+    "name": "FA3 paper",
+    "url": "https://arxiv.org/abs/2407.08608v2",
+    "commit": null,
+    "version": "arXiv:2407.08608v2"
+  },
+  {
     "name": "FA4 paper",
     "url": "https://arxiv.org/abs/2603.05451v1",
     "commit": null,

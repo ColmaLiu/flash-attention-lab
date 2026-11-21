@@ -110,9 +110,15 @@ def test_relative_links_in_lessons_resolve():
     import re
 
     broken = []
-    # TODO(#26): add docs/*.md and README.md once the v1 global docs are rewritten.
-    for md in sorted([*ROOT.glob("course/*/README.md"), *ROOT.glob("solutions/*/NOTES.md"),
-                      ROOT / "docs/design-v2.md", ROOT / "docs/authoring.md"]):
+    for md in sorted(
+        [
+            *ROOT.glob("course/*/README.md"),
+            *ROOT.glob("solutions/*/NOTES.md"),
+            *ROOT.glob("docs/*.md"),
+            ROOT / "README.md",
+            ROOT / "AGENTS.md",
+        ]
+    ):
         for target in re.findall(r"\]\(([^)\s]+)\)", md.read_text()):
             if re.match(r"[a-z]+:", target) or target.startswith("#"):
                 continue

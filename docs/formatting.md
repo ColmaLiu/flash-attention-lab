@@ -1,36 +1,55 @@
 # 代码格式
 
-本项目使用 clang-format 整理 CUDA/C++，Ruff 整理并检查 Python，pre-commit
-统一运行文件检查。
+本项目用三样工具统一格式：
 
-在课程的独立 Conda 环境中安装并启用：
+| 工具 | 管什么 |
+|---|---|
+| clang-format | CUDA / C++（`.cu`、`.cuh`、`.h`、`.cpp` 等） |
+| Ruff | Python 的格式与静态检查 |
+| pre-commit | 在 `git commit` 前自动运行上面两个，以及空白、换行、大文件等检查 |
 
-```bash
-./lab python -m pip install -r requirements-lint.txt
-./lab python -m pre_commit install
-./lab python -m pre_commit run --all-files
-```
+版本固定在 `requirements-lint.txt` 和 `.pre-commit-config.yaml`，升级时两处一起改。
 
-安装 hook 后，`git commit` 会检查暂存文件。若格式化工具修改文件，先检查 diff，
-重新暂存，再提交。第一次运行会安装隔离的 hook 环境。
-`--all-files` 只检查已跟踪文件；新文件先暂存，或用下面的 `--files` 显式指定。
+## 安装与运行
 
-只检查指定文件：
+在课程的 Conda 环境中安装并启用：
 
 ```bash
-./lab python -m pre_commit run --files solutions/s32_specialize/kernel_impl.cuh
+source scripts/activate.sh
+python -m pip install -r requirements-lint.txt
+python -m pre_commit install              # 以后每次 git commit 都会检查暂存的文件
+python -m pre_commit run --all-files      # 检查全部已跟踪文件
 ```
 
-CUDA/C++ 采用 LLVM 风格、两空格缩进、80 列，不压缩短函数、条件或循环，保留
-include 顺序。显式匹配 `.cu` 和 `.cuh`，避免只识别 C/C++ 时漏掉设备代码。
-Python 使用四空格缩进、88 列，展开单行多语句。PTX 指令和约束仍保持原有语义。
+第一次运行会安装隔离的 hook 环境，比较慢。`--all-files` 只检查已跟踪的文件；新文件先 `git add`，或用 `--files` 指定：
 
-工具默认排除 `students/`，以免批量改动学习者的实现和笔记；也排除第三方源码、
-缓存和实验结果。学习者可以自行对正在编辑的文件运行 clang-format；如需对学生
-Python 文件使用 Ruff，可显式运行
-`./lab python -m ruff format --no-force-exclude students/具体文件.py`。
+```bash
+python -m pre_commit run --files solutions/32_ws_gemm/kernel.cu include/lab/tcgen05.cuh
+```
 
-版本固定在 `requirements-lint.txt` 和 `.pre-commit-config.yaml`，升级时同步修改。
+如果 hook 修改了文件，先看 diff，确认无误后重新 `git add`，再提交。
 
-公共代码改动还需运行 `./lab python -m pytest -q`，CUDA 改动需重新编译并检查
-受影响的参考实现。格式化通过不代表数值、同步或性能验收通过。
+## 风格
+
+| 语言 | 风格 |
+|---|---|
+| CUDA / C++ | LLVM 风格，两空格缩进，80 列；不把短函数、短条件、短循环压成一行；保留 include 顺序 |
+| Python | 四空格缩进，88 列；单行多条语句会被展开 |
+
+inline PTX 字符串的内容不会被改动。
+
+## 不会被格式化的目录
+
+`.pre-commit-config.yaml` 排除了 `students/`、`third_party/`、`artifacts/`、`.cache/`、`progress/results/` 等目录：
+
+- `students/` 是学习者的练习区，批量工具不应改动你的实现和笔记。你可以自己对正在编辑的文件运行 `clang-format -i students/<ID>/kernel.cu`；
+- `third_party/` 是固定版本的上游源码。
+
+## 格式化之后
+
+格式化通过不代表正确。改了公共代码（`include/lab/`、`labkit/`、`solutions/`）后，还要：
+
+```bash
+python -m pytest -q tests/test_labkit.py          # 基础设施测试
+LAB_GPU=<n> ./lab check <ID> --solution           # 受影响的参考答案重新编译并检查
+```
