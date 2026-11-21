@@ -438,7 +438,7 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 
 - PTX ISA 8.7：[cp.async.bulk.tensor](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor)、[cp.async.bulk.wait_group](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-wait-group)、[mbarrier](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier)（含 phase、tx-count 的定义）、[Tensor Memory Swizzling Modes / Tensor copy](https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-swizzling-modes)、[elect.sync](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-elect-sync)、[Memory Consistency Model: Proxies](https://docs.nvidia.com/cuda/parallel-thread-execution/#proxies)
 - CUDA Driver API：[cuTensorMapEncodeTiled](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html)
-- CUDA C++ Programming Guide：[Asynchronous Data Copies using the Tensor Memory Accelerator (TMA)](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#tensor-memory-access)
+- CUDA C++ Programming Guide：[Asynchronous Data Copies using the Tensor Memory Accelerator (TMA)](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/async-copies.html#async-copies-tma)
 - FlashAttention-3 论文（Shah et al., 2024）第 3.1 节：Producer-Consumer asynchrony
 - 上游源码（`third_party/` 中固定版本）：
   - `third_party/cutlass/include/cute/arch/copy_sm90_tma.hpp`：`SM90_TMA_LOAD_2D`、`SM90_TMA_STORE_2D`、`tma_store_arrive` / `tma_store_wait`；

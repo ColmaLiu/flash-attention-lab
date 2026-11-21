@@ -314,7 +314,7 @@ pid: 0  1  2  3                 pid: 0  4  8 12
 ## 9. 延伸阅读
 
 - PTX ISA：[Data Movement and Conversion Instructions: cp.async](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async)，以及同节的 `cp.async.commit_group`、`cp.async.wait_group`
-- CUDA C++ Programming Guide：[Asynchronous Data Copies](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#asynchronous-data-copies)（`cuda::memcpy_async` 是同一硬件的 C++ 接口）；[Shared Memory 与 carveout](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory)
+- CUDA C++ Programming Guide：[Asynchronous Data Copies](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/async-copies.html)（`cuda::memcpy_async` 是同一硬件的 C++ 接口）；[Shared Memory 与 carveout](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory)
 - Vasily Volkov，*Understanding Latency Hiding on GPUs*（2016）：Little 定律与占用率
 - 上游源码（`third_party/` 中固定版本）：
   - `third_party/cutlass/include/cute/arch/copy_sm80.hpp`：`SM80_CP_ASYNC_CACHEGLOBAL_ZFILL`，即本关的 `cp_async_16_zfill`；

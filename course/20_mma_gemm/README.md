@@ -342,7 +342,7 @@ profile 指标（步骤 2 → 步骤 3，`square`）：
 ## 9. 延伸阅读
 
 - PTX ISA：[Warp Level Matrix Multiply-Accumulate Instructions: mma](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma)，其中 *Matrix Fragments for mma.m16n8k16 with floating point type* 一节有本关 §4.3 的原图；[ldmatrix](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix)
-- CUDA C++ Programming Guide：[Shared Memory](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory)（bank 与 wavefront）
+- CUDA C++ Programming Guide：[Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory)（bank 与 wavefront）
 - Tri Dao，*FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning*，第 3.1 节（为什么要减少非矩阵乘运算）
 - 上游源码（`third_party/` 中固定版本）：
   - `third_party/cutlass/include/cute/arch/mma_sm80.hpp`：`SM80_16x8x16_F32BF16BF16F32_TN`，即本关的 mma；

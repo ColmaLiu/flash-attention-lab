@@ -104,3 +104,19 @@ def test_attention_reference_matches_torch_sdpa():
         o_rows, lse_rows = attention.reference({"q": q, "k": k, "v": v}, opts, rows)
         torch.testing.assert_close(o_rows, o[:, rows])
         torch.testing.assert_close(lse_rows, lse[:, :, rows])
+
+
+def test_relative_links_in_lessons_resolve():
+    import re
+
+    broken = []
+    # TODO(#26): add docs/*.md and README.md once the v1 global docs are rewritten.
+    for md in sorted([*ROOT.glob("course/*/README.md"), *ROOT.glob("solutions/*/NOTES.md"),
+                      ROOT / "docs/design-v2.md", ROOT / "docs/authoring.md"]):
+        for target in re.findall(r"\]\(([^)\s]+)\)", md.read_text()):
+            if re.match(r"[a-z]+:", target) or target.startswith("#"):
+                continue
+            path = (md.parent / target.split("#")[0]).resolve()
+            if not path.exists():
+                broken.append(f"{md.relative_to(ROOT)} -> {target}")
+    assert not broken, "\n".join(broken)

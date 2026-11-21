@@ -371,7 +371,7 @@ as[BK][BM + 4]，bs[BK][BN + 4]：as[kk][r] = A[m0 + r][k0 + kk]
 ## 9. 延伸阅读
 
 - FlashAttention 论文（Dao et al., 2022）第 2.1–2.2 节（GPU 内存层级、算术强度）和第 3.2 节（IO 复杂度）
-- CUDA C++ Programming Guide：[Shared Memory](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory)（含分块矩阵乘的例子）
+- CUDA C++ Programming Guide：[Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory)（含分块矩阵乘的例子）
 - CUDA C++ Best Practices Guide：[Shared Memory in Matrix Multiplication](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-in-matrix-multiplication-c-ab)
 - Samuel Williams et al., *Roofline: An Insightful Visual Performance Model for Multicore Architectures*（CACM 2009）
 - Simon Boehm，[How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance](https://siboehm.com/articles/22/CUDA-MMM)：本关步骤 1–4 的思路与该文的 kernel 1–6 对应
