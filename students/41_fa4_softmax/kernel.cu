@@ -78,10 +78,11 @@ __device__ __forceinline__ float2 exp2_poly2(float2 x) {
   //  1. clamp: x = max(x, -127) (masked keys arrive as -inf);
   //  2. r = x + 1.5 * 2^23 rounded DOWN (__fadd2_rd): the low mantissa
   //     bits of r now hold n = floor(x) as an integer;
-  //  3. n = r - 1.5 * 2^23 (exact), f = x - n in [0, 1) (exact);
+  //  3. n = r - 1.5 * 2^23 (exact), f = x - n in [0, 1] (one FFMA2: n * -1 + x);
   //  4. p = ((c3 f + c2) f + c1) f + c0 (Horner, __ffma2_rn, kExp2C*);
-  //  5. return the float whose bits are bits(p) + (bits(r) << 23)
-  //     (__float_as_int / __int_as_float): adds n to p's exponent.
+  //  5. add n to p's exponent field (bits 23-30) with integer arithmetic
+  //     on the bit patterns (__float_as_int / __int_as_float); n is
+  //     already in the low bits of r (lesson section 3.2).
   // Why must c0 be exactly 1? (Try x = -inf.)
   LAB_TODO(1);
   return x;
@@ -561,10 +562,10 @@ __global__ void __launch_bounds__(C::kThreads, 1)
         // Move the base only if the max grew by more than kTau (log2
         // units). Block 0: m = -inf, the difference is +inf, so it always
         // moves (alpha = 2^-inf = 0). (Both -inf: NaN > kTau is false.)
-        // TODO(3a) -- lesson section 3.5. If the max grew by more than
-        // C::kTau in log2 units ((m_new - m) * p.scale_log2), move the base
-        // (m = m_new) and set alpha = 2^((m_old - m_new) * scale_log2);
-        // otherwise keep m and set alpha = 1. Block 0 (m = -inf) must move.
+        // TODO(3a) -- lesson section 3.5: move the base m (and set alpha)
+        // only when the max grew by more than C::kTau in log2 units;
+        // otherwise alpha = 1. Compare with the current base m, not with
+        // the previous block's max. Block 0 (m = -inf) must move.
         alpha = 1.f;
         LAB_TODO(3);
       } else {

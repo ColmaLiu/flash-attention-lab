@@ -189,7 +189,8 @@
       ],
       "dtype": "fp16",
       "pattern": "large_logits",
-      "purpose": "FP16、D=128、logit 很大：大量元素的 x = s·scale·log₂e − m 远小于 −127（多项式的钳位），最大值在前几块频繁跳动。"
+      "purpose": "FP16、D=128、logit 很大且 scale=1：很多元素的 x = (s − m)·scale·log₂e 远小于 −127，软件 exp2 必须先钳位到 −127；最大值在前几块频繁跳动。",
+      "scale": 1.0
     },
     {
       "name": "growing",

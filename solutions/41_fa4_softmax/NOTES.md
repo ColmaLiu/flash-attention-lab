@@ -8,7 +8,7 @@ mbarrier 与 parity、`setmaxnreg` 192/80/48 都不变；40 关的步骤 1–2 �
 
 **软件 `exp2`（`exp2_poly2`）。** 与 FA4 `utils.py` 的 `ex2_emulation_2` 同一做法：`max(x, −127)` 钳位，`x + 1.5·2^23` 向下舍入
 （`__fadd2_rd`）把 ⌊x⌋ 放进低位，`f = x − ⌊x⌋` 精确，3 次 Horner，`bits(p) + (bits(r) << 23)` 拼指数（ptxas 合成 `LEA`）。
-用 CUDA 12.8 的 `float2` 内建函数（`__ffma2_rn`、`__fadd2_rn/rd`）而不是内联 PTX，可读性更好，SASS 与内联 PTX 版本相同
+用 CUDA 12.8 的 `float2` 内建函数（`__ffma2_rn`、`__fadd2_rn/rd`）而不是内联 PTX。f = x − n 写成 `__ffma2_rn(n, (−1, −1), x)`：写成 `x + (−n)` 时 `make_float2(-n.x, -n.y)` 要两条标量取负，每对多 2 条指令（审查后改正），可读性更好，SASS 与内联 PTX 版本相同
 （`FFMA2`、`FADD2`、`FADD2.RM`）。系数是自己用 numpy（Lawson 迭代求相对误差的 minimax，c0 固定为 1）算的，
 没有抄上游的 `POLY_EX2`；两者在第 3 位有效数字上不同，最大误差同量级。
 
@@ -18,10 +18,10 @@ mbarrier 与 parity、`setmaxnreg` 192/80/48 都不变；40 关的步骤 1–2 �
   选次数”的版本。
 
 **混合比例。** 每 32 列（一次 `tcgen05.ld`）的 16 对中 `kPolyPairs = 3` 对用多项式（φ = 18.75%），由 `use_poly` 在编译期均匀
-分布（q = 5、10、15）。扫描 k = 0、2、3、4、5、6、8、16（步骤 2，`perf` / `perf_d64` 各测一次）：k = 3 最好；k ≥ 4 时
-softmax 段在 192 个寄存器内放不下，`STACK` 8–24 字节，性能不规则下降（k = 5 只有 6 个 kernel 溢出，比 k = 4 好）。
-吞吐模型（讲义 §3.6）预测平衡点 φ ≈ 0.39，实测最优低得多：模型没有算发射槽、依赖延迟（每个 SMSP 只有 2 个 softmax
-warp）和寄存器。FA4 的 `ex2_emu_freq` 配置对应 12.5–19%，与此一致。没有尝试 FA4 的“首尾 fragment 不模拟”
+分布（q = 5、10、15）。初次扫描（旧版 f = x + (−n)）k = 0、2、3、4、5、6、8、16：k = 3 最好，k ≥ 4 溢出。审查后改用一条 FFMA2 求 f，重测
+k = 3/4/5：`perf` 0.90/0.89/0.89×、`perf_d64` 0.93/0.95/0.95×，差别在波动内；k = 4、5 仍有 4、6 个 kernel 溢出 8 字节，
+所以保留不溢出的 k = 3。溢出从 k = 4 开始，扫描无法检验讲义 §3.6 模型的平衡点 φ ≈ 0.39。FA4 的 `ex2_emu_freq` 配置对应
+12.5–19%。没有尝试 FA4 的“首尾 fragment 不模拟”
 （`ex2_emu_start_frg`）变体。
 
 **打包的 `FFMA2`/`FADD2`。** 算 x（`s·scale_log2 − base`）和求和也用打包指令（四个 `float2` 部分和）。k = 0（全 MUFU + 打包）
@@ -74,8 +74,8 @@ attention 输出：O 的最大误差四种变体几乎相同（由 O 的 16 位�
   lane 0 的 α → `growing`、`growing_causal`、`jump_causal` 错。
 - 骨架：把 TODO(1)、(2)、(3a)、(3b) 依次换成答案代码后，`--step n` 通过、`--step n+1` 报 TODO；只填 3a 时 step 3 停在
   TODO(3)（correction warp 的 trap），不挂起。
-- `./lab sass 41 --solution`：24 个 kernel STACK 均为 0；步骤 1 每个 kernel 1 条 `MUFU.EX2`（α）、256 条 `FFMA2`；
-  步骤 2–3 每个 kernel 105 条 `MUFU.EX2`、100 条 `FFMA2`。
+- `./lab sass 41 --solution`：24 个 kernel STACK 均为 0；步骤 1 每个 kernel 1 条 `MUFU.EX2`（α）、320 条 `FFMA2`；
+  步骤 2–3 每个 kernel 105 条 `MUFU.EX2`、112 条 `FFMA2`。
 - `./lab sanitize --solution`：memcheck、racecheck、synccheck 在 `two_tiles`、`growing_causal`（步骤 3）和 `causal_tail`（步骤 1、2）
   上 0 错误；racecheck 看不见 TMA/TMEM 访问，同步与 40 关完全相同（40 关讲义 §5.6）。
 - `./lab selftest 41` 通过；`./lab selftest 41 --perf`（目标 0.85）通过，该次实测 `perf_causal` 1.03×、`perf_d64` 0.96×、

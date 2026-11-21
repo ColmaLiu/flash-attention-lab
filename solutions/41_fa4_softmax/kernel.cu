@@ -74,7 +74,9 @@ constexpr float kExp2C3 = 0.07706717401742935f; // 0x3D9DD565
 //   x = max(x, -127)                         (2^-inf and tiny x -> +0)
 //   r = x + 1.5 * 2^23, rounded DOWN         the low mantissa bits of r hold
 //                                            the integer n = floor(x)
-//   f = x - (r - 1.5 * 2^23) in [0, 1)       exact
+//   f = x - (r - 1.5 * 2^23) in [0, 1]       abs. error <= 2^-25 (only
+//                                            for x in (-0.5, 0)): far below
+//                                            the polynomial error
 //   p = ((c3 f + c2) f + c1) f + c0 in [1, 2)
 //   2^x = 2^n * p: add n to p's exponent field (bits 23-30)
 // Valid for x <= 127 (here x <= kTau = 8). x = -127 gives exactly +0
@@ -86,7 +88,7 @@ __device__ __forceinline__ float2 exp2_poly2(float2 x) {
   x.y = fmaxf(x.y, -127.f);
   const float2 r = __fadd2_rd(x, magic); // round down: floor(x) in the bits
   const float2 n = __fadd2_rn(r, make_float2(-12582912.f, -12582912.f));
-  const float2 f = __fadd2_rn(x, make_float2(-n.x, -n.y));
+  const float2 f = __ffma2_rn(n, make_float2(-1.f, -1.f), x); // x - n
   float2 p = __ffma2_rn(make_float2(kExp2C3, kExp2C3), f,
                         make_float2(kExp2C2, kExp2C2));
   p = __ffma2_rn(p, f, make_float2(kExp2C1, kExp2C1));
