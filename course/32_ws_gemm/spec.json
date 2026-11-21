@@ -1,0 +1,114 @@
+{
+  "id": "32_ws_gemm",
+  "title": "warp specialization：分工流水的 persistent GEMM",
+  "part": 3,
+  "kind": "gemm",
+  "prerequisites": ["31_tcgen05_gemm"],
+  "steps": [
+    {
+      "step": 1,
+      "title": "角色分工：TMA warp + MMA warp + epilogue warps，一个 CTA 一个 tile",
+      "cases": "all"
+    },
+    {
+      "step": 2,
+      "title": "persistent + TMEM 累加器双缓冲：epilogue 与下一个 tile 的主循环重叠",
+      "cases": "all"
+    },
+    {
+      "step": 3,
+      "title": "分组光栅化（L2 复用）与调参",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "one_tile",
+      "shape": [128, 128, 64],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "恰好一个 tile、一个 K 块：三个角色之间每个 barrier 只用一次，最容易定位哪一方没有到达。"
+    },
+    {
+      "name": "small",
+      "shape": [100, 72, 40],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "三个方向都不满一个 tile：TMA 越界填零，expect_tx 仍是整个 box 的字节数；写回要裁掉越界的行列。"
+    },
+    {
+      "name": "long_k",
+      "shape": [128, 128, 1024],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "单个 tile、16 个 K 块：环形 buffer 绕 4 圈，producer 的 empty parity（首轮 phase ^ 1）与 MMA 的 full parity 都要对。"
+    },
+    {
+      "name": "short_k",
+      "shape": [64, 96, 136],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "3 个 K 块，少于流水级数：producer 只发存在的 K 块，MMA 也只等这么多次。"
+    },
+    {
+      "name": "aligned",
+      "shape": [256, 512, 512],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "2 × 2 个 tile，少于 SM 数：persistent grid 取 min(tile 数, SM 数)，每个 CTA 只有一个 tile。"
+    },
+    {
+      "name": "tail",
+      "shape": [133, 76, 40],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "M、N 都不是 tile 的倍数：第二行 CTA 只有 5 行有效，TMA store 必须裁掉其余行。"
+    },
+    {
+      "name": "raster",
+      "shape": [1300, 600, 264],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "11 × 3 个 tile（最后一列只有 88 列），K 尾部 8 列。"
+    },
+    {
+      "name": "persistent",
+      "shape": [3900, 3000, 328],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "31 × 12 = 372 个 tile，多于 148 个 SM：部分 CTA 处理 3 个 tile，累加器 0、1、0 轮换；每个 tile 6 个 K 块，环形 buffer 的位置与 parity 跨 tile 接续；最后一组只有 7 个 tile 行（分组光栅化的尾部）。"
+    },
+    {
+      "name": "random",
+      "shape": [640, 520, 1000],
+      "dtype": "bf16",
+      "purpose": "中等规模随机数据：误差与 cuBLAS 同量级。"
+    },
+    {
+      "name": "square",
+      "shape": [4096, 4096, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "Tensor Core 吞吐：137 GFLOP，512 个 tile = 3.46 波，与 31 关直接对比。"
+    },
+    {
+      "name": "wide",
+      "shape": [8192, 8192, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "550 GFLOP，A、B 共 128 MB（超过 L2）：tile 顺序决定 A、B 从 HBM 读几遍。"
+    },
+    {
+      "name": "flat",
+      "shape": [8192, 8192, 1024],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "137 GFLOP 但每个 tile 只有 16 个 K 块：写 256 MB 的 C 与主循环同量级，epilogue 是否与主循环重叠决定速度。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "cublas",
+    "ratio": 0.85
+  },
+  "profile_metrics": ["sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active", "sm__throughput.avg.pct_of_peak_sustained_elapsed", "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum", "lts__t_sector_hit_rate.pct", "dram__bytes_read.sum", "dram__bytes_write.sum"]
+}
