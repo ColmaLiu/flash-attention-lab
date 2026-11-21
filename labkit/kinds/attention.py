@@ -261,3 +261,12 @@ def probe_fa2_scores(inputs, options, case):
     causal mask is not applied (it comes in step 3), so S covers every (i, j).
     """
     return _scores11(inputs, options), (1e-3, 1e-3)
+
+
+def probe_fa3_scores(inputs, options, case):
+    """Lab 34 step 1: the probe holds S = scale * Q K^T, [B, H, N, N].
+
+    Computed with tcgen05.mma (FP32 accumulation in TMEM) for a single K
+    block (N <= 128); no mask or softmax yet.
+    """
+    return _scores11(inputs, options), (1e-3, 1e-3)

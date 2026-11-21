@@ -116,6 +116,25 @@ inline CUtensorMap make_tensor_map_3d(const void *base,
   return make_tensor_map<3>(base, dtype, dims, strides, box, swizzle);
 }
 
+// A row-major [d3, d2, d1, d0] tensor with a [box3, box2, box1, box0] box.
+// Coordinates in device calls are (x = i0, y = i1, z = i2, w = i3).
+// Example: attention's [B, N, H, D] is d3 = B, d2 = N, d1 = H, d0 = D; a box
+// [1, rows, 1, 64] is `rows` consecutive tokens of one (batch, head). Keeping
+// N as its own dimension makes rows >= N out of bounds (zero-filled loads,
+// skipped stores) instead of spilling into the next batch.
+inline CUtensorMap make_tensor_map_4d(const void *base,
+                                      CUtensorMapDataType dtype, uint64_t d3,
+                                      uint64_t d2, uint64_t d1, uint64_t d0,
+                                      uint32_t box3, uint32_t box2,
+                                      uint32_t box1, uint32_t box0,
+                                      CUtensorMapSwizzle swizzle) {
+  const uint64_t e = tma_elem_bytes(dtype);
+  const uint64_t dims[4] = {d0, d1, d2, d3};
+  const uint64_t strides[3] = {d0 * e, d1 * d0 * e, d2 * d1 * d0 * e};
+  const uint32_t box[4] = {box0, box1, box2, box3};
+  return make_tensor_map<4>(base, dtype, dims, strides, box, swizzle);
+}
+
 // ===========================================================================
 // Device: bulk tensor copies.
 // Pass the map as `const __grid_constant__ CUtensorMap` kernel parameter and
@@ -156,6 +175,18 @@ __device__ __forceinline__ void tma_load_3d(void *dst, const CUtensorMap *map,
                : "memory");
 }
 
+// 4-D form (cp.async.bulk.tensor.4d...): box origin (x, y, z, w) =
+// (i0, i1, i2, i3) of a make_tensor_map_4d map.
+__device__ __forceinline__ void tma_load_4d(void *dst, const CUtensorMap *map,
+                                            uint64_t *bar, int x, int y, int z,
+                                            int w) {
+  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::"
+               "complete_tx::bytes [%0], [%1, {%2, %3, %4, %5}], [%6];" ::"r"(
+                   shared_addr(dst)),
+               "l"(map), "r"(x), "r"(y), "r"(z), "r"(w), "r"(shared_addr(bar))
+               : "memory");
+}
+
 // cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [map, {x, y}], [src];
 // PTX: "Data Movement and Conversion Instructions: cp.async.bulk.tensor".
 // Copies the box in shared `src` to global at box origin (x, y); elements
@@ -176,6 +207,16 @@ tma_store_3d(const CUtensorMap *map, const void *src, int x, int y, int z) {
   asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group "
                "[%0, {%1, %2, %3}], [%4];" ::"l"(map),
                "r"(x), "r"(y), "r"(z), "r"(shared_addr(src))
+               : "memory");
+}
+
+// 4-D form of tma_store_2d; out-of-bounds elements are skipped.
+__device__ __forceinline__ void tma_store_4d(const CUtensorMap *map,
+                                             const void *src, int x, int y,
+                                             int z, int w) {
+  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group "
+               "[%0, {%1, %2, %3, %4}], [%5];" ::"l"(map),
+               "r"(x), "r"(y), "r"(z), "r"(w), "r"(shared_addr(src))
                : "memory");
 }
 

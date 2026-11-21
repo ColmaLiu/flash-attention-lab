@@ -98,6 +98,27 @@ make_smem_desc_kmajor_sw128(const void *smem, uint32_t sbo_bytes = 1024) {
          | (uint64_t(2) << 61);                        // SWIZZLE_128B
 }
 
+// MN-major operand with 128-byte swizzle: the M (or N) index is contiguous,
+// e.g. V [keys][D] used as the B operand ("N x K" = D x keys) of P . V.
+// Canonical layout (CUTLASS mma_traits_sm100.hpp, make_umma_desc<Major::MN>,
+// LayoutType::B128), in elements:
+//   ((8, 8, m), (8, k)) : ((1, 8, LBO), (64, SBO))
+// i.e. 64 MN elements (128 bytes) form one swizzled row; 8 rows along K form
+// a 1024-byte atom; atoms follow each other along K at SBO = 1024 bytes; the
+// next 64-wide MN panel starts LBO bytes further (only used when the MMA's
+// M or N exceeds 64). To select K rows k0 .. k0 + 15, add k0 * 128 bytes to
+// the start address. Set the matching "A/B major" bit of the instruction
+// descriptor (make_idesc_f16(..., a_mn_major / b_mn_major = true)).
+__device__ __forceinline__ uint64_t make_smem_desc_mnmajor_sw128(
+    const void *smem, uint32_t lbo_bytes, uint32_t sbo_bytes = 1024) {
+  const uint64_t addr = shared_addr(smem);
+  return ((addr >> 4) & 0x3FFF)                        // start address
+         | (uint64_t((lbo_bytes >> 4) & 0x3FFF) << 16) // LBO: MN panels
+         | (uint64_t((sbo_bytes >> 4) & 0x3FFF) << 32) // SBO: 8-row K groups
+         | (uint64_t(1) << 46)                         // version = 1 (SM100)
+         | (uint64_t(2) << 61);                        // SWIZZLE_128B
+}
+
 // ===========================================================================
 // Instruction descriptor for tcgen05.mma .kind::f16 (32 bits).
 // PTX: "Instruction descriptor" (tcgen05).
