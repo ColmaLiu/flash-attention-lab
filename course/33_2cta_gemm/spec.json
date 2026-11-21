@@ -1,0 +1,114 @@
+{
+  "id": "33_2cta_gemm",
+  "title": "2-CTA MMA：cluster 与成对 CTA 的 tcgen05 GEMM",
+  "part": 3,
+  "kind": "gemm",
+  "prerequisites": ["32_ws_gemm"],
+  "steps": [
+    {
+      "step": 1,
+      "title": "cluster 与 pair MMA：两个 CTA 合算一个 256×256 tile",
+      "cases": "all"
+    },
+    {
+      "step": 2,
+      "title": "persistent pair：累加器双缓冲与跨 CTA 释放",
+      "cases": "all"
+    },
+    {
+      "step": 3,
+      "title": "调优：达到 cuBLAS 的 0.9 倍",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "one_tile",
+      "shape": [256, 256, 64],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "恰好一个 pair tile、一个 K 块：leader 的 A/B 一半与 peer 的一半各占 C 的哪一块，idesc 的 M = 256、B 按 N 对半分，错一处结果就不精确相等。"
+    },
+    {
+      "name": "leader_only",
+      "shape": [100, 72, 40],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "peer 的 A、B 一半全部越界：peer 的 TMA 仍然要 complete_tx 整个 box 到 leader 的 full barrier（全零），peer 的 epilogue 写回被全部裁掉。"
+    },
+    {
+      "name": "long_k",
+      "shape": [256, 256, 1024],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "单个 tile、16 个 K 块：6 级环形 buffer 绕近 3 圈，两个 CTA 的 producer 各自等自己的 empty（multicast commit），全部完成到 leader 的 full。"
+    },
+    {
+      "name": "short_k",
+      "shape": [192, 96, 136],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "3 个 K 块，少于流水级数：退出前的排空（drain）只等真正发生过的 commit，首轮 parity 的等待必须立即通过。"
+    },
+    {
+      "name": "aligned",
+      "shape": [512, 1024, 512],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "2 × 4 个 pair tile，少于可驻留的 cluster 数：每个 cluster 一个 tile。"
+    },
+    {
+      "name": "tail",
+      "shape": [389, 300, 40],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "M、N 都不是 256 的倍数：第二行 tile 的 leader 只有 133 行有效、peer 全部越界；最后一列 tile 只有 44 列，B 的 peer 一半全部越界。"
+    },
+    {
+      "name": "raster",
+      "shape": [1300, 600, 264],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "6 × 3 个 pair tile（最后一行 20 行、最后一列 88 列），K 尾部 8 列。"
+    },
+    {
+      "name": "persistent",
+      "shape": [3900, 3000, 328],
+      "dtype": "bf16",
+      "pattern": "int",
+      "purpose": "16 × 12 = 192 个 pair tile，多于可驻留的 cluster 数（约 74）：部分 cluster 处理 3 个 tile，累加器 0、1、0 轮换，acc_empty 收到两个 CTA 共 256 次到达；每 tile 6 个 K 块，环形 buffer 位置跨 tile 接续；分组光栅化最后一组不满。"
+    },
+    {
+      "name": "random",
+      "shape": [640, 520, 1000],
+      "dtype": "bf16",
+      "purpose": "中等规模随机数据：误差与 cuBLAS 同量级。"
+    },
+    {
+      "name": "square",
+      "shape": [4096, 4096, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "Tensor Core 吞吐：137 GFLOP，256 个 256×256 tile，与 32 关直接对比。"
+    },
+    {
+      "name": "wide",
+      "shape": [8192, 8192, 4096],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "550 GFLOP，A、B 共 128 MB（超过 L2）：pair tile 把每个 CTA 的 L2 读取从 48 KB/K 块降到 32 KB/K 块。"
+    },
+    {
+      "name": "flat",
+      "shape": [8192, 8192, 1024],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "137 GFLOP 但每个 tile 只有 16 个 K 块：写 256 MB 的 C 与主循环同量级，epilogue 必须与主循环重叠。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "cublas",
+    "ratio": 0.9
+  },
+  "profile_metrics": ["sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active", "sm__throughput.avg.pct_of_peak_sustained_elapsed", "lts__t_sectors_srcunit_tex_op_read.sum", "lts__t_sector_hit_rate.pct", "dram__bytes_read.sum", "dram__bytes_write.sum"]
+}
