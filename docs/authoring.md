@@ -41,7 +41,7 @@ include/lab/<name>.cuh    （仅引入新原语的关卡）公共原语的参考
 
 - **kind** 决定 Problem 结构体和 oracle：`transpose`、`softmax`、`gemm`、`attention`，定义在 `include/lab/problem.h` 与 `labkit/kinds/`。
 - **shape**：transpose/softmax 为 `[rows, cols]`，gemm 为 `[M, N, K]`，attention 为 `[B, N, H, D]`。
-- **其余 case 字段**原样进入 `case.options`，例如 attention 的 `causal`、`scale`，gemm 的 `c_dtype`。
+- **其余 case 字段**原样进入 `case.options`，例如 attention 的 `causal`、`scale`，gemm 的 `c_dtype`。attention 还可用 `o_tol` / `lse_tol`（`[atol, rtol]`）为结构化输入**收紧**容差（不能放宽）。
 - **pattern** 由 kind 的 `make_inputs` 解释。现有 pattern：
   - transpose：`random`、`coordinate`；
   - softmax：`random`、`large`、`shifted`、`constant`、`masked`；

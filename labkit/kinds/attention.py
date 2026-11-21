@@ -125,7 +125,17 @@ def tolerance(case):
         # variant. Q/K/V quantization is not counted: the oracle uses the
         # dequantized inputs.
         o = (2.0**-4, 2.0**-3)
-    return {"o": o, "lse": (1e-3, 1e-4)}
+    tol = {"o": o, "lse": (1e-3, 1e-4)}
+    # A case may only tighten its tolerance (e.g. structured inputs whose
+    # exact answer is known), never loosen it: "o_tol": [atol, rtol].
+    for name in ("o", "lse"):
+        override = case.options.get(f"{name}_tol")
+        if override is not None:
+            atol, rtol = override
+            if atol > tol[name][0] or rtol > tol[name][1]:
+                raise ValueError(f"case {case.name}: {name}_tol may only tighten")
+            tol[name] = (atol, rtol)
+    return tol
 
 
 def verify(inputs, outputs, options, case, full=True):
