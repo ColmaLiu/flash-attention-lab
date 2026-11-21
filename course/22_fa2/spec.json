@@ -1,0 +1,247 @@
+{
+  "id": "22_fa2",
+  "title": "FlashAttention-2：Tensor Core、循环交换与 warp 划分",
+  "part": 2,
+  "kind": "attention",
+  "prerequisites": [
+    "12_fa1",
+    "20_mma_gemm",
+    "21_pipeline_gemm"
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "title": "S = Q·Kᵀ：Q 留在寄存器，mma 算出一个 K 块的 S fragment",
+      "cases": [
+        "n1",
+        "one_block",
+        "short_tail",
+        "tail",
+        "peaked_d64",
+        "scale"
+      ],
+      "probe": {
+        "oracle": "fa2_scores",
+        "axes": [
+          "b",
+          "h",
+          "i",
+          "j"
+        ]
+      }
+    },
+    {
+      "step": 2,
+      "title": "非 causal FA2：寄存器中的 online softmax，P 直接作 A 操作数，ldmatrix.trans 读 V",
+      "cases": [
+        "n1",
+        "one_block",
+        "short_tail",
+        "tail",
+        "peaked_d64",
+        "scale",
+        "peaked",
+        "uniform",
+        "ones_v",
+        "position",
+        "medium",
+        "medium_d64"
+      ]
+    },
+    {
+      "step": 3,
+      "title": "causal：跳过对角线以上的 K 块，只给对角块加 mask",
+      "cases": "all"
+    },
+    {
+      "step": 4,
+      "title": "cp.async 双缓冲 K/V 流水",
+      "cases": "all"
+    }
+  ],
+  "cases": [
+    {
+      "name": "n1",
+      "shape": [1, 1, 1, 64],
+      "dtype": "bf16",
+      "purpose": "N=1：一个 Q 块、一个 K 块里都只有 1 行有效。O = V，LSE = scale·q·k。填充行必须 zero-fill，填充 key 必须被 mask。"
+    },
+    {
+      "name": "one_block",
+      "shape": [2, 64, 3, 64],
+      "dtype": "fp16",
+      "purpose": "N=64 恰好一个 K 块，B>1、H>1：检查 (q 块, head, batch) 到 CTA 的映射和 [B,N,H,D] 的行步长 H·D。"
+    },
+    {
+      "name": "short_tail",
+      "shape": [1, 37, 2, 128],
+      "dtype": "fp16",
+      "pattern": "position",
+      "purpose": "N=37 < 64、D=128：块内 27 个填充 key 要 mask；D=128 时一行跨两个 128 字节的 swizzle 段。"
+    },
+    {
+      "name": "tail",
+      "shape": [2, 300, 3, 128],
+      "dtype": "bf16",
+      "purpose": "N=300 不是块大小的倍数：最后一个 Q 块和 K/V 块都不满。"
+    },
+    {
+      "name": "peaked_d64",
+      "shape": [2, 513, 2, 64],
+      "dtype": "fp16",
+      "pattern": "large_logits",
+      "purpose": "D=64、FP16、logit 很大、N=513 只比块的倍数多 1：最大值在后面的块里变化，旧 O 和 l 必须按 2^(m_old−m_new) 缩放。"
+    },
+    {
+      "name": "scale",
+      "shape": [1, 200, 2, 64],
+      "dtype": "bf16",
+      "pattern": "large_logits",
+      "scale": 1.0,
+      "purpose": "scale=1 而不是 1/√D，logit 上百：scale 必须来自 p.scale；不减最大值会溢出。"
+    },
+    {
+      "name": "peaked",
+      "shape": [1, 777, 2, 128],
+      "dtype": "bf16",
+      "pattern": "large_logits",
+      "purpose": "D=128、多个块、logit 很大：反复更新最大值。"
+    },
+    {
+      "name": "uniform",
+      "shape": [2, 200, 2, 64],
+      "dtype": "bf16",
+      "pattern": "uniform",
+      "purpose": "Q=0：O 是 V 的均值，LSE = ln(N)。l 漏掉 quad 归约（只加了本线程的 1/4）会得到 ln(N/4)。"
+    },
+    {
+      "name": "ones_v",
+      "shape": [1, 513, 4, 128],
+      "dtype": "fp16",
+      "pattern": "ones_v",
+      "purpose": "V=1：O 必须等于 1。最后除以 l 的次数不对、或 l 与 P 用了不同的指数，都会偏离 1。"
+    },
+    {
+      "name": "position",
+      "shape": [2, 260, 3, 64],
+      "dtype": "bf16",
+      "pattern": "position",
+      "purpose": "V[j]=j/N：P 的 fragment 摆错列、V 的 ldmatrix.trans 地址错，会得到明显错误的位置值。"
+    },
+    {
+      "name": "medium",
+      "shape": [2, 1024, 4, 128],
+      "dtype": "bf16",
+      "purpose": "中等规模随机数据，D=128：16 个 K 块的完整内层循环。"
+    },
+    {
+      "name": "medium_d64",
+      "shape": [2, 1024, 4, 64],
+      "dtype": "fp16",
+      "purpose": "中等规模随机数据，D=64、FP16：每个 warp 负责两个 16 行 tile 的配置。"
+    },
+    {
+      "name": "causal_n1",
+      "shape": [1, 1, 1, 128],
+      "dtype": "fp16",
+      "causal": true,
+      "purpose": "causal 且 N=1：唯一的 query 只看见自己。"
+    },
+    {
+      "name": "causal_two_blocks",
+      "shape": [1, 128, 1, 64],
+      "dtype": "bf16",
+      "pattern": "large_logits",
+      "causal": true,
+      "purpose": "causal、两个 K 块、logit 很大：对角块内的 mask，以及第一个 Q 块不能读第二个 K 块。"
+    },
+    {
+      "name": "causal_tail",
+      "shape": [2, 300, 3, 64],
+      "dtype": "bf16",
+      "causal": true,
+      "purpose": "causal 且 N 不是块的倍数：对角 mask 与尾部 mask 同时生效。"
+    },
+    {
+      "name": "causal_position",
+      "shape": [1, 333, 2, 128],
+      "dtype": "fp16",
+      "pattern": "position",
+      "causal": true,
+      "purpose": "causal、V[j]=j/N、D=128：mask 偏一位就会读到未来的位置值。"
+    },
+    {
+      "name": "causal_peaked",
+      "shape": [2, 517, 2, 64],
+      "dtype": "fp16",
+      "pattern": "large_logits",
+      "causal": true,
+      "purpose": "causal 且 logit 很大：对角块中被 mask 的元素不能参与最大值，也不能留下 NaN。"
+    },
+    {
+      "name": "causal_uniform",
+      "shape": [1, 200, 2, 128],
+      "dtype": "bf16",
+      "pattern": "uniform",
+      "causal": true,
+      "purpose": "causal 且 Q=0：O[i] 是 V[0..i] 的均值，LSE[i] = ln(i+1)。"
+    },
+    {
+      "name": "causal_ones_v",
+      "shape": [2, 190, 2, 64],
+      "dtype": "fp16",
+      "pattern": "ones_v",
+      "causal": true,
+      "purpose": "causal 且 V=1：O 必须等于 1，包括只有一个 key 的第 0 行。"
+    },
+    {
+      "name": "causal_medium",
+      "shape": [1, 1024, 8, 128],
+      "dtype": "bf16",
+      "causal": true,
+      "purpose": "中等规模 causal，D=128：每个 Q 块只处理对角线及以下的 K 块。"
+    },
+    {
+      "name": "causal_medium_d64",
+      "shape": [2, 1024, 4, 64],
+      "dtype": "fp16",
+      "causal": true,
+      "purpose": "中等规模 causal，D=64：Q 块比 K 块高时，对角线跨过不止一个 K 块。"
+    },
+    {
+      "name": "perf",
+      "shape": [4, 4096, 16, 128],
+      "dtype": "bf16",
+      "perf": true,
+      "purpose": "B·H=64、N=4096、D=128：550 GFLOP，Tensor Core 吞吐与 K/V 流水。"
+    },
+    {
+      "name": "perf_causal",
+      "shape": [4, 4096, 16, 128],
+      "dtype": "bf16",
+      "perf": true,
+      "causal": true,
+      "purpose": "同上但 causal：跳块后工作量约一半，Q 块之间的负载不均衡。"
+    },
+    {
+      "name": "perf_d64",
+      "shape": [4, 4096, 32, 64],
+      "dtype": "fp16",
+      "perf": true,
+      "purpose": "D=64、FP16：每个 key 的计算更少，softmax 与搬运所占比例更大。"
+    }
+  ],
+  "perf_target": {
+    "baseline": "cudnn",
+    "ratio": 0.2
+  },
+  "profile_metrics": [
+    "sm__inst_executed_pipe_tensor_subpipe_hmma.sum",
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ldgsts.sum",
+    "smsp__inst_executed_pipe_xu.sum",
+    "dram__bytes_read.sum",
+    "sm__warps_active.avg.pct_of_peak_sustained_active"
+  ]
+}

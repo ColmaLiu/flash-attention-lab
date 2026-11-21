@@ -252,3 +252,12 @@ def probe_probs11(inputs, options, case):
         mask = torch.ones(n, n, device=s.device, dtype=torch.bool).triu(1)
         s = s.masked_fill(mask, float("-inf"))
     return torch.softmax(s, dim=-1), (2e-6, 1e-4)
+
+
+def probe_fa2_scores(inputs, options, case):
+    """Lab 22 step 1: the probe holds S = scale * Q K^T, [B, H, N, N].
+
+    Computed with mma.sync from FP16/BF16 inputs and FP32 accumulation; the
+    causal mask is not applied (it comes in step 3), so S covers every (i, j).
+    """
+    return _scores11(inputs, options), (1e-3, 1e-3)
