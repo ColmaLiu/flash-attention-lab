@@ -153,6 +153,10 @@ mma_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring, uint32_t acc_tmem,
     ring.advance();
   }
   lab::tcgen05_commit(acc_done);
+  // Note: the arrivals on empty[s] from the last K tiles of the CTA's last
+  // tile are never waited for. Harmless here (one CTA, its own smem); with
+  // clusters (lab 33) the peer CTA must not exit before them (CUTLASS:
+  // producer_tail).
 }
 
 // ---------------------------------------------------------------------------
@@ -246,20 +250,30 @@ template <class Cfg> __device__ __forceinline__ void teardown(uint32_t tmem) {
   }
 }
 
-#define LAB32_SMEM_DECL(Cfg)                                                   \
-  extern __shared__ uint8_t smem_raw[];                                        \
-  __shared__ __align__(8) uint64_t bar_full[Cfg::kStages],                     \
-      bar_empty[Cfg::kStages], bar_acc_full[Cfg::kAccStages],                  \
-      bar_acc_empty[Cfg::kAccStages];                                          \
-  __shared__ uint32_t tmem_slot;                                               \
-  Smem<Cfg> sm;                                                                \
-  sm.stages = align_1024(smem_raw);                                            \
-  sm.staging =                                                                 \
-      reinterpret_cast<float *>(sm.stages + Cfg::kStages * Cfg::kStageBytes);  \
-  sm.full = bar_full;                                                          \
-  sm.empty = bar_empty;                                                        \
-  sm.acc_full = bar_acc_full;                                                  \
-  sm.acc_empty = bar_acc_empty
+// The mbarriers and the TMEM address slot: small, so they live in static
+// shared memory (8-byte aligned through the uint64_t members). Each kernel
+// declares one:  __shared__ Barriers<Cfg> bars;
+template <class Cfg> struct Barriers {
+  uint64_t full[Cfg::kStages], empty[Cfg::kStages];
+  uint64_t acc_full[Cfg::kAccStages], acc_empty[Cfg::kAccStages];
+  uint32_t tmem_slot; // tcgen05.alloc writes the TMEM base address here
+};
+
+// Carve the dynamic shared memory: stage ring first (1024-aligned for the
+// 128B swizzle), then the epilogue staging boxes.
+template <class Cfg>
+__device__ __forceinline__ Smem<Cfg> carve(uint8_t *smem_raw,
+                                           Barriers<Cfg> &bars) {
+  Smem<Cfg> sm;
+  sm.stages = align_1024(smem_raw);
+  sm.staging =
+      reinterpret_cast<float *>(sm.stages + Cfg::kStages * Cfg::kStageBytes);
+  sm.full = bars.full;
+  sm.empty = bars.empty;
+  sm.acc_full = bars.acc_full;
+  sm.acc_empty = bars.acc_empty;
+  return sm;
+}
 
 // ===========================================================================
 // Step 1: warp-specialized, one output tile per CTA.
@@ -269,8 +283,10 @@ __global__ void __launch_bounds__(kThreads, 1)
     gemm_ws_tile(const __grid_constant__ CUtensorMap a_map,
                  const __grid_constant__ CUtensorMap b_map,
                  const __grid_constant__ CUtensorMap c_map, int k) {
-  LAB32_SMEM_DECL(Cfg);
-  const uint32_t tmem = setup(sm, &tmem_slot, &a_map, &b_map, &c_map);
+  extern __shared__ uint8_t smem_raw[]; // stages + staging (dynamic)
+  __shared__ Barriers<Cfg> bars;
+  Smem<Cfg> sm = carve(smem_raw, bars);
+  const uint32_t tmem = setup(sm, &bars.tmem_slot, &a_map, &b_map, &c_map);
   const int warp = threadIdx.x / 32;
   const int m0 = blockIdx.y * kBM, n0 = blockIdx.x * Cfg::kBN;
   const int k_tiles = (k + kBK - 1) / kBK;
@@ -338,8 +354,10 @@ __global__ void __launch_bounds__(kThreads, 1)
                        const __grid_constant__ CUtensorMap b_map,
                        const __grid_constant__ CUtensorMap c_map, int m, int n,
                        int k) {
-  LAB32_SMEM_DECL(Cfg);
-  const uint32_t tmem = setup(sm, &tmem_slot, &a_map, &b_map, &c_map);
+  extern __shared__ uint8_t smem_raw[]; // stages + staging (dynamic)
+  __shared__ Barriers<Cfg> bars;
+  Smem<Cfg> sm = carve(smem_raw, bars);
+  const uint32_t tmem = setup(sm, &bars.tmem_slot, &a_map, &b_map, &c_map);
   const int warp = threadIdx.x / 32;
   const int m_tiles = (m + kBM - 1) / kBM;
   const int n_tiles = (n + Cfg::kBN - 1) / Cfg::kBN;
@@ -428,6 +446,8 @@ Plan make_plan(const lab::GemmProblem &p) {
   LAB_REQUIRE(p.c_dtype == lab::DType::F32, "this lab writes an FP32 C");
   LAB_REQUIRE(p.k % 8 == 0, "K must be a multiple of 8 (TMA: 16-byte rows)");
   LAB_REQUIRE(p.n % 4 == 0, "N must be a multiple of 4 (TMA: 16-byte rows)");
+  LAB_REQUIRE(p.k > 0, "K must be positive (K = 0 would store an "
+                       "accumulator no MMA ever wrote)");
   Plan plan{};
   allow_smem(gemm_ws_tile<Step1>, Step1::kSmemBytes);
   allow_smem(gemm_ws_persistent<Step2>, Step2::kSmemBytes);

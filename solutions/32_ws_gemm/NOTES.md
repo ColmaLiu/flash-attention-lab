@@ -7,6 +7,9 @@
 - **角色**：6 个 warp（192 线程）。warp 0–3 做 epilogue：warp w 只能访问 TMEM lane `32(w%4)..`，取 w = 0..3，与 31 关的“warp w ↔ C 的第 32w 行起”一致。warp 4 是 TMA producer，warp 5 是 MMA issuer，同时负责 TMEM alloc/dealloc（与 CUTLASS 一样，由 MMA warp 持有 TMEM）。producer 和 MMA 各用 `elect_one()` 选一个 lane 跑整个循环，其余 lane 在 `__syncwarp` 等待。CUTLASS（`sm100_gemm_tma_warpspecialized.hpp`）多一个 scheduler warp 和一个 epilogue-load warp；静态调度不需要前者，C 只写不读不需要后者。
 - **barrier**：`full[s]`（1 次到达 + tx）、`empty[s]`（1 次，tcgen05.commit）、`acc_full[a]`（1 次，tcgen05.commit）、`acc_empty[a]`（128 次：每个 epilogue 线程在自己最后一次 `tcgen05.ld` 完成后 `fence::before_thread_sync` + arrive；与 CUTLASS `consumer_arv_count = NumEpilogueThreads` 相同）。生产者一侧（producer 等 `empty`、MMA 等 `acc_empty`）首轮用 `phase ^ 1`，利用“新初始化 barrier 的前一相位视为已完成”。
 - **相位跨 tile**：每个角色各持一份 `RingPos`（index、phase），每用一次 advance 一次，跨 tile 不清零。三个角色按同一个静态 tile 序列走，用同样多次，因此无需通信就保持一致。
+- **未等待的 `empty` 到达**：CTA 最后一个 tile 的最后几个 K 块提交到 `empty[s]` 的 commit 没有人等待。单 CTA 时无害（只到达本 CTA 的 barrier，MMA 已由 `acc_full` 确认完成）；33 关用 cluster 时，CUTLASS 用 `producer_tail` 把它们排空，再让 CTA 退出。
+- **`K = 0`**：make_plan 拒绝（否则 MMA warp 直接 commit `acc_full`，epilogue 写出未初始化的 TMEM）。
+- **barrier 存放**：`Barriers<Cfg>`（各 barrier + TMEM 地址槽）是每个 kernel 里显式声明的静态 `__shared__` 变量，`carve()` 把动态 shared memory 切成 stage 与 staging；不用宏。
 - **早释放累加器**：epilogue 在读完 TMEM 后立即到达 `acc_empty`，此时 TMA store 仍在进行。安全，因为 store 读的是 staging（shared memory），不是 TMEM。
 - **epilogue staging**：persistent 时主循环同时在用 stage buffer，不能像 31 关那样复用。每个 epilogue warp 两个 32×32 FP32 box（4 KB，128B swizzle），共 32 KB；每个 box 一个 bulk group，重写 box 前由 lane 0 `bulk_wait_group_read<1>`（两次之前的 store 已读完），再 `__syncwarp`。
 - **资源**：BN = 256、4 级 stage（192 KB）+ 32 KB staging + 1 KB 对齐 = 225 KB 动态 shared memory，加约 1.1 KB 静态，在 227 KB 上限之内；TMEM 2 × 256 = 512 列，整块 TMEM。每 SM 一个 CTA，所以 512 列的 alloc 不会与本 kernel 的其他 CTA 竞争。5 级或 3 个累加器都放不下。

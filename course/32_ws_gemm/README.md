@@ -53,7 +53,7 @@ FlashAttention-3 论文 §3.1 把解决办法叫 **producer–consumer asynchron
 | producer warp：TMA 读 Q、K、V | producer warp：TMA 读 A、B | 同左 |
 | consumer warpgroup 发 `wgmma`，累加器在寄存器 | **MMA warp 的一个 lane** 发 `tcgen05.mma`，累加器在 TMEM | 同左 |
 | consumer warpgroup 自己做 softmax、写回 | **epilogue warps** 读 TMEM、写回 | softmax / correction warpgroup 读 S、写 P |
-| pingpong：两个 warpgroup 交替 GEMM 与 softmax | **TMEM 双缓冲**：MMA 写累加器 1 时，epilogue 读累加器 0 | S 双缓冲：QKᵀ 与 softmax 重叠 |
+| pingpong：两个 warpgroup 交替 GEMM 与 softmax | 类似的重叠（机制不同）：**TMEM 双缓冲**，MMA 写累加器 1 时 epilogue 读累加器 0 | S 双缓冲：QKᵀ 与 softmax 重叠 |
 | `setmaxnreg`：producer 让出寄存器 | 本关不需要（§4.5） | 40 关使用 |
 
 Blackwell 上分工更彻底：MMA 由一个线程发出、累加器不占寄存器，所以“发 MMA”与“消费累加器”自然分成两个角色。本关在 GEMM 上把这套结构搭好，34 关把 epilogue 换成 softmax。
@@ -88,7 +88,14 @@ phase = (u / S) & 1           等待方（consumer）等 parity = phase
 
 `phase ^ 1` 在第一轮（phase = 0）时是 1：新初始化的 barrier 处于相位 0，“前一个相位”（parity 1）视为已完成，所以第一轮不阻塞，正是“所有槽一开始都是空的”。
 
-**相位跨 tile 不清零。** 例：S = 4，每个 tile 6 个 K 块。CTA 的第 3 个 tile（tile 序号 2）的第一个 K 块是第 u = 12 次使用：slot 0，phase 1。如果每个 tile 都从 (slot 0, phase 0) 重新开始，第 2 个 tile 的第一块会落在 slot 0、等 parity 0，而这时 slot 0 已经完成了 2 次（phase 0 和 1），parity 0 的等待看到的是“第 0 相位已完成”，立刻返回，读到的是旧数据。
+**parity 等待只能区分两个相位**：“当前相位”（未完成，等待阻塞）和“紧挨着它的前一个相位”（视为已完成，等待立即返回）。barrier 并不记得更早的历史，所以等待方必须恰好知道自己要的是哪一相位的 parity。
+
+**相位跨 tile 不清零。** 例：S = 4，每个 tile 6 个 K 块。第 1 个 tile 用掉 u = 0..5：slot 0、1、2、3、0、1。此时 `full[0]`、`full[1]` 各完成了 2 次（当前相位 2，parity 0），`full[2]`、`full[3]` 各完成了 1 次（当前相位 1，parity 1）。
+
+- 正确做法：第 2 个 tile 的第 3 个 K 块是第 u = 8 次使用：slot 0，phase (8/4) & 1 = 0。
+- 如果每个 tile 都把 `RingPos` 重置为 (slot 0, phase 0)：第 2 个 tile 的第 1、2 块落在 slot 0、1，等 parity 0，恰好就是它们的当前相位，会正常阻塞到数据到达——碰巧是对的；第 3 块落在 slot 2、等 parity 0，而 `full[2]` 的当前相位是 1，parity 0 指的是“前一个相位”（第 1 个 tile 的那次装载），**等待立即返回**，MMA 读到的是第 1 个 tile 的旧数据。
+
+所以这个 bug 不会挂起，而是悄悄算错一部分 K 块；`persistent` case 会发现它。
 
 代码里每个角色持有一个 `RingPos{index, phase}`，每用一次 `advance()`，跨 tile 一直往前走：
 
@@ -185,7 +192,7 @@ FA3 用 `setmaxnreg` 让 producer warpgroup 把寄存器让给 consumer。本关
 | MMA warp 只用 `if (lane == 0)` 而其余 lane 直接去 `__syncthreads` | 依赖独立线程调度的行为，可读性差；用 `elect_one()` + `__syncwarp()` |
 | 在 `tcgen05.commit` 前换了发 MMA 的线程 | commit 只跟踪执行它的线程发出的 MMA |
 | 一个 staging box 还在被 TMA store 读，就被下一块覆盖 | C 中随机出现下一块的值；先 `bulk_wait_group_read<1>` |
-| epilogue 退出前没有 `bulk_wait_group_read<0>` | CTA 退出后 shared memory 被回收，store 读到垃圾 |
+| epilogue 退出前没有 `bulk_wait_group_read<0>` | CTA 退出后 shared memory 被回收，store 读到垃圾。（`.read` 只保证 store 已读完 shared memory 源；写入 global 在 kernel 结束前完成，不需要再等） |
 | tile 序号映射不是一一对应（分组的最后一组行数不足时） | 有的 tile 没算、有的算两遍；`persistent` case（31 行 tile，G = 8 时最后一组 7 行）会发现 |
 
 ## 5. 调度设计
@@ -370,11 +377,11 @@ barrier 初始化、TMEM 分配、角色分派、teardown 已写好。
 
 `wide` 的 A + B 是 128 MB，超过 L2：行优先时 HBM 读取约为 A + B 的 7.7 倍，G = 32 时约 2.2 倍。`square`、`flat` 的 A + B 放得进 L2，分组反而稍慢，原因我们没有查明（不要把它当结论）。G = 8 让三个 case 中最差的比值最高。
 
-- **对照：更小的配置**（步骤 3 的 kernel，G = 32）：
+- **对照：更小的配置**（步骤 3 的 kernel，这组实验用的是 G = 32，所以第一行与上面 G = 8 的答案不同）：
 
 | `Config<BN, Stages, AccStages>` | `square` | `wide` |
 |---|---|---|
-| `<256, 4, 2>`（答案） | ≈ 0.91× | ≈ 0.93× |
+| `<256, 4, 2>`（答案的形状，G = 32） | ≈ 0.91× | ≈ 0.93× |
 | `<256, 3, 2>` | ≈ 0.81× | ≈ 0.79× |
 | `<128, 6, 2>` | ≈ 0.89× | ≈ 0.81× |
 | `<128, 4, 4>` | ≈ 0.68× | ≈ 0.63× |
