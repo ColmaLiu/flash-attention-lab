@@ -46,7 +46,7 @@ include/lab/<name>.cuh    （仅引入新原语的关卡）公共原语的参考
   - transpose：`random`、`coordinate`；
   - softmax：`random`、`large`、`shifted`、`constant`、`masked`；
   - gemm：`random`、`int`；
-  - attention：`random`、`large_logits`、`uniform`、`ones_v`、`position`。
+  - attention：`random`、`large_logits`、`uniform`、`ones_v`、`position`、`growing_max`、`jump_max`（后两个控制每行最大值随 key 缓慢增长或突然跳变，见 41 关）。
 - **steps**：`"cases": "all"` 表示全部非 perf case。每个 step 运行时 `p.step` 等于该 step 的编号。不指定 `--step` 的 bench 和 check 都用最后一步，最后一步不能带 probe。
 - **probe**：该 step 不检查 O 等最终输出，而是检查 `p.probe`（FP32 缓冲）。oracle 由 `labkit/kinds/<kind>.py` 中的 `probe_<oracle>(inputs, options, case)` 定义，返回 `(期望张量, (atol, rtol))`。可选 `"axes": ["b", "h", "i", "j"]` 给出错误信息中的维度名。
 - **case 设计**：

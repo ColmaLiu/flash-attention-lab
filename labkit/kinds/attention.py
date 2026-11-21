@@ -40,6 +40,25 @@ def make_inputs(case, gen):
         # V[j] = j / N: a wrong mask or K/V offset shows up as a wrong value.
         pos = torch.arange(n, device="cuda", dtype=torch.float32) / n
         v = pos.view(1, n, 1, 1).expand(b, n, h, d).clone()
+    elif case.pattern in ("growing_max", "jump_max"):
+        # Row maxima that move in a controlled way (lab 41, conditional
+        # rescale). With a unit vector u per head, q_i = a_i u + noise and
+        # k_j = g(j) u + noise, so scale * q_i.k_j ~ (a_i / sqrt(d)) g(j)
+        # + O(1) with a_i / sqrt(d) in [0.5, 1.5) varying per row.
+        #   growing_max: g(j) = 2 j / 128, the max rises by about 1.4-4.3
+        #                log2 units per 128-key block;
+        #   jump_max:    g(j) = 200 for j >= 3n/5 + 50 (inside a block), else 0:
+        #                a jump of about 145-430 log2 units.
+        u = torch.randn(1, 1, h, d, device="cuda", generator=gen)
+        u = u / u.norm(dim=-1, keepdim=True)
+        a = 0.5 + torch.rand(b, n, h, 1, device="cuda", generator=gen)
+        q = a * math.sqrt(d) * u + 0.5 * q
+        j = torch.arange(n, device="cuda", dtype=torch.float32).view(1, n, 1, 1)
+        if case.pattern == "growing_max":
+            g = 2.0 * j / 128
+        else:
+            g = 200.0 * (j >= 3 * n // 5 + 50).float()
+        k = g * u + k
     if case.dtype == "e4m3":
         # Real value = descale * stored value; store values in a good E4M3 range.
         q, k, v = (t * 4.0 for t in (q, k, v))
