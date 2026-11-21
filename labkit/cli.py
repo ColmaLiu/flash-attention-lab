@@ -19,6 +19,7 @@ USAGE = """\
 ./lab profile ID --case NAME       Nsight Compute report
 ./lab sanitize ID --case NAME [--tool memcheck|racecheck|synccheck|initcheck]
 ./lab doctor                       check the environment
+./lab clean [--yes]                delete build caches, bench/profile/sass output
 Add --solution to check/bench/sass/profile/sanitize to run the reference solution.
 ID may be a unique prefix, e.g. 00 or 31_tc.
 """
@@ -40,6 +41,8 @@ def _parser():
     sub.add_parser("list")
     sub.add_parser("status")
     sub.add_parser("doctor")
+    c = sub.add_parser("clean", help="delete build caches and measurement output")
+    c.add_argument("--yes", action="store_true", help="actually delete")
     lab_cmd("check")
     b = lab_cmd("bench")
     b.add_argument("--cold", action="store_true", help="flush L2 before every launch")
@@ -89,6 +92,8 @@ def _dispatch(args):
     cmd = args.cmd
     if cmd in ("list", "status"):
         return _list()
+    if cmd == "clean":
+        return _clean(args.yes)
     if cmd == "doctor":
         return 0 if env.doctor() else 4
     if cmd == "selftest":
@@ -367,3 +372,29 @@ def _perf_gate(lab, timeout):
         if ratio < target["ratio"]:
             failures.append(f"{lab.id}/{case.name}: {ratio:.3f} < {target['ratio']}")
     return failures
+
+
+def _clean(yes):
+    """Remove regenerable output only; never students/ or progress/results/."""
+    import shutil
+
+    targets = [
+        ROOT / ".cache" / "build",
+        ROOT / ".cache" / "tvm_ffi",
+        *(ROOT / "artifacts" / d for d in ("bench", "profiles", "sass")),
+    ]
+    total = 0
+    for t in targets:
+        if t.exists():
+            size = sum(f.stat().st_size for f in t.rglob("*") if f.is_file())
+            total += size
+            print(f"  {t.relative_to(ROOT)}  {size / 2**20:.0f} MiB")
+    if not yes:
+        print(
+            f"{total / 2**20:.0f} MiB would be deleted. Run ./lab clean --yes to delete."
+        )
+        return 0
+    for t in targets:
+        shutil.rmtree(t, ignore_errors=True)
+    print(f"Deleted {total / 2**20:.0f} MiB.")
+    return 0

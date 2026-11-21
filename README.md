@@ -127,6 +127,7 @@ bash scripts/bootstrap.sh            # 可加 --with-cuda、--with-fa4，见下�
 ./lab profile ID [--step N] [--case NAME]      Nsight Compute
 ./lab sanitize ID --case NAME [--tool memcheck|racecheck|synccheck|initcheck]
 ./lab doctor                                   环境检查
+./lab clean [--yes]                            删除编译缓存和 bench/profile/sass 输出（不动 students/ 和进度）
 ```
 
 在 check、bench、sass、profile、sanitize 后加 `--solution`，就改为运行参考答案。ID 可以写唯一前缀，例如 `00` 或 `31_tc`。
