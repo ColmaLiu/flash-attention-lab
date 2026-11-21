@@ -109,6 +109,9 @@ make_smem_desc_kmajor_sw128(const void *smem, uint32_t sbo_bytes = 1024) {
 // M or N exceeds 64). To select K rows k0 .. k0 + 15, add k0 * 128 bytes to
 // the start address. Set the matching "A/B major" bit of the instruction
 // descriptor (make_idesc_f16(..., a_mn_major / b_mn_major = true)).
+// As for the K-major descriptor, base offset (bits 49-51) is 0: the swizzle
+// atoms must be 1024-byte aligned, and a start address advanced by whole
+// 128-byte rows (k0 * 128) keeps the swizzle phase consistent.
 __device__ __forceinline__ uint64_t make_smem_desc_mnmajor_sw128(
     const void *smem, uint32_t lbo_bytes, uint32_t sbo_bytes = 1024) {
   const uint64_t addr = shared_addr(smem);
@@ -158,6 +161,30 @@ __device__ __forceinline__ void mma_f16_ss(uint32_t d_tmem, uint64_t a_desc,
       "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p;\n\t}" ::"r"(
           d_tmem),
       "l"(a_desc), "l"(b_desc), "r"(idesc), "r"(accumulate ? 1 : 0)
+      : "memory");
+}
+
+// tcgen05.mma.cta_group::1.kind::f16 [d], [a_tmem], b_desc, idesc,
+// enable_input_d;   ("TS" form; added in 40_fa4_pipeline)
+// Same as mma_f16_ss, but the A operand (M x 16, 16-bit) is read from Tensor
+// Memory instead of shared memory. PTX: "tcgen05.mma", operand [a-desc] /
+// [a-tmem]. Layout of A in TMEM (cta_group::1, M = 128): row i of A is TMEM
+// lane i; its 16 K elements are packed two per 32-bit column, element 2c in
+// the low half and 2c + 1 in the high half of column a_tmem.col + c, i.e. 8
+// columns per instruction. a_tmem's lane field is 0. A must be K-major (the
+// A-major bit of idesc is 0); B still comes from a shared-memory descriptor.
+// Before the MMA reads A, the threads that wrote it with tcgen05.st must
+// tcgen05.wait::st, tcgen05.fence::before_thread_sync and synchronize with
+// the issuing thread (which then executes tcgen05.fence::after_thread_sync).
+__device__ __forceinline__ void mma_f16_ts(uint32_t d_tmem, uint32_t a_tmem,
+                                           uint64_t b_desc, uint32_t idesc,
+                                           bool accumulate) {
+  asm volatile(
+      "{\n\t.reg .pred p;\n\t"
+      "setp.ne.b32 p, %4, 0;\n\t"
+      "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p;\n\t}" ::"r"(
+          d_tmem),
+      "r"(a_tmem), "l"(b_desc), "r"(idesc), "r"(accumulate ? 1 : 0)
       : "memory");
 }
 
@@ -332,6 +359,38 @@ __device__ __forceinline__ void tmem_st_32x32b_x32(uint32_t taddr,
                : "memory");
 }
 
+// The same stores with 32-bit integer sources, for packed data such as two
+// 16-bit values per column (added in 40_fa4_pipeline: P written over S).
+__device__ __forceinline__ void tmem_st_32x32b_x16(uint32_t taddr,
+                                                   const uint32_t (&v)[16]) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x16.b32 "
+               "[%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, "
+               "%14, %15, %16};"
+               :
+               : "r"(taddr), "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(v[3]),
+                 "r"(v[4]), "r"(v[5]), "r"(v[6]), "r"(v[7]), "r"(v[8]),
+                 "r"(v[9]), "r"(v[10]), "r"(v[11]), "r"(v[12]), "r"(v[13]),
+                 "r"(v[14]), "r"(v[15])
+               : "memory");
+}
+
+__device__ __forceinline__ void tmem_st_32x32b_x32(uint32_t taddr,
+                                                   const uint32_t (&v)[32]) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x32.b32 "
+               "[%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, "
+               "%14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, "
+               "%26, %27, %28, %29, %30, %31, %32};"
+               :
+               : "r"(taddr), "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(v[3]),
+                 "r"(v[4]), "r"(v[5]), "r"(v[6]), "r"(v[7]), "r"(v[8]),
+                 "r"(v[9]), "r"(v[10]), "r"(v[11]), "r"(v[12]), "r"(v[13]),
+                 "r"(v[14]), "r"(v[15]), "r"(v[16]), "r"(v[17]), "r"(v[18]),
+                 "r"(v[19]), "r"(v[20]), "r"(v[21]), "r"(v[22]), "r"(v[23]),
+                 "r"(v[24]), "r"(v[25]), "r"(v[26]), "r"(v[27]), "r"(v[28]),
+                 "r"(v[29]), "r"(v[30]), "r"(v[31])
+               : "memory");
+}
+
 // tcgen05.wait::st.sync.aligned;  all prior tcgen05.st of this thread done.
 __device__ __forceinline__ void tmem_wait_st() {
   asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
@@ -351,6 +410,27 @@ __device__ __forceinline__ void tcgen05_fence_before_thread_sync() {
 }
 __device__ __forceinline__ void tcgen05_fence_after_thread_sync() {
   asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+}
+
+// ===========================================================================
+// Register reallocation between warpgroups (added in 40_fa4_pipeline).
+// PTX: "Miscellaneous Instructions: setmaxnreg".
+// setmaxnreg.inc/dec.sync.aligned.u32 N;  N in 24 .. 256, a multiple of 8.
+// Every warp of a warpgroup must execute the same setmaxnreg (it is
+// .sync.aligned per warp). dec releases registers above N to a per-CTA
+// pool; inc blocks until N - current registers per thread are available in
+// the pool. The kernel must be compiled for the launch register count
+// (e.g. __launch_bounds__(512, 1) -> 128); ptxas then allocates up to N
+// registers in code that follows an inc. Not tcgen05-specific, kept here
+// with the other SM90+/SM100 warp-specialization helpers.
+// ===========================================================================
+template <uint32_t N> __device__ __forceinline__ void setmaxnreg_inc() {
+  static_assert(N >= 24 && N <= 256 && N % 8 == 0, "setmaxnreg range");
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;" ::"n"(N) : "memory");
+}
+template <uint32_t N> __device__ __forceinline__ void setmaxnreg_dec() {
+  static_assert(N >= 24 && N <= 256 && N % 8 == 0, "setmaxnreg range");
+  asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;" ::"n"(N) : "memory");
 }
 
 } // namespace lab

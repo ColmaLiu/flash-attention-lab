@@ -15,7 +15,7 @@
 | S 在哪 | 寄存器 | **TMEM**，softmax warp 用 `tcgen05.ld` 读 |
 | P 怎样进入 P·V | 留在寄存器作 A 操作数 | **写进 shared memory**（SS MMA） |
 | V 怎样读 | `ldmatrix.trans` | **MN-major 描述符** + instruction descriptor 的转置位 |
-| O 在哪 | 寄存器 | **TMEM**；行最大值变化时 softmax warp 读出、乘 α、写回 |
+| O 在哪 | 寄存器 | **TMEM**；每块（块 0 除外）softmax warp 都读出、乘 α、写回，不论最大值是否变化（条件 rescale 在 41 关） |
 | 重叠 | 无（同一 warp 串行） | **S 双缓冲**：MMA 算 S_{j+1} 时 softmax 处理 S_j |
 
 本关五步：
@@ -42,10 +42,10 @@
 
 FlashAttention-3（Shah 等，2024）针对 Hopper 提出三个思想：
 
-1. **生产者–消费者异步**（论文 §3.1）：一部分 warp 专门用 TMA 搬运（生产者），其余 warp 专门计算（消费者），二者通过 shared memory 中的环形 buffer 和 barrier 交接，靠 warp specialization 而不是“所有线程一起搬、一起算”来隐藏访存延迟。
-2. **softmax 与 GEMM 重叠**（论文 §3.2）：
-   - *warpgroup 之间的 ping-pong*：两个 warpgroup 各算一个 Q tile，用 barrier 排好顺序，让一个 warpgroup 的 softmax 和另一个的 GEMM 同时进行；
-   - *warpgroup 内的两级流水*：在同一个 warpgroup 里，先发出下一块的 QKᵀ（异步的 `wgmma`），再做当前块的 softmax，最后等 QKᵀ 完成。
+1. **生产者–消费者异步**（论文 §3.1）：
+   - *warp specialization*：一部分 warp 专门用 TMA 搬运（生产者），其余 warp 专门计算（消费者），二者通过 shared memory 中的环形 buffer 和 barrier 交接，而不是“所有线程一起搬、一起算”；
+   - *ping-pong 调度*：两个消费者 warpgroup 各算一个 Q tile，用 barrier 排好顺序，让一个 warpgroup 的 softmax 和另一个的 GEMM 同时进行（warpgroup **之间**的重叠）。
+2. **softmax 与 GEMM 重叠**（论文 §3.2）：*warpgroup 内的两级流水*：在同一个 warpgroup 里，先发出下一块的 QKᵀ（异步的 `wgmma`），再做当前块的 softmax，最后等 QKᵀ 完成（warpgroup **之内**的重叠）。
 3. **低精度**（论文 §3.3）：FP8 的 QKᵀ 与 PV，配合块量化和非相干处理（incoherent processing）。本课程在 44 关做 FP8，这里不涉及。
 
 它们在 SM100 上怎样对应：
@@ -234,7 +234,7 @@ Q、K、V、O 是 `[B,N,H,D]`：同一个 head 的相邻两行相隔 `H·D` 个�
 | 误用 | 后果 |
 |---|---|
 | V 的 B 描述符用 K-major、或忘了 idesc 第 16 位 | O 完全错误，`one_position` 立刻发现 |
-| MN-major 描述符的 LBO/SBO 写反 | D = 64 可能对（LBO 不用）、D = 128 后 64 列错 |
+| MN-major 描述符的 LBO/SBO 写反 | 所有 D 都错：一个 16 key 的 K 片跨两个 8 行 atom，D = 64 时也要用 SBO；D = 128 时第二个 d panel 还要用 LBO |
 | P 的 swizzle 用错行号 | `one_position`、`one_ones_v` 错 |
 | 写 P 后没有 `fence.proxy.async` | 偶发错误，多在大 case 上出现 |
 | softmax 在 `o_ready` 之前就写 P | P_{j−1}·V_{j−1} 读到一半被覆盖的 P：多块 case 偶发错误 |
@@ -306,10 +306,10 @@ MMA warp:                                softmax 线程（块 j）:
     wait p_ready（第 j 次）                写 P_j; fence.proxy.async
     wait v_full; PV_j → O                  if j > 0: O *= α（ld/st，wait::st）
     commit v_empty, o_ready                fence::before; arrive p_ready
-    if j+1 < 块数: issue_qk(j+1)
+    下一次 issue_qk（哪一块？块存在时才发）
 ```
 
-`issue_qk(j+1)` 放在 PV_j **之后**：它要写的 S buffer 只有一个，softmax 必须先读完 S_j（`p_ready` 保证）。这样一来，softmax 处理块 j+1 时，S_{j+1} 必须等 PV_j 和 QKᵀ_{j+1} 都做完：Tensor Core 和 softmax 轮流工作，**没有重叠**。
+下一次 QKᵀ 放在 PV_j **之后**：它要写的 S buffer 只有一个，softmax 必须先读完 S_j（`p_ready` 保证）。这样一来，softmax 处理下一块时，它的 S 必须等 PV_j 和这次 QKᵀ 都做完：Tensor Core 和 softmax 轮流工作，**没有重叠**。
 
 注意 softmax 在算完指数**之后**才等 `o_ready`：指数这段时间里 PV_{j−1} 还可以在跑。步骤 3 里这点重叠几乎没有用（S_j 本来就在 PV_{j−1} 之后才算），步骤 5 里它很重要。
 
@@ -323,28 +323,28 @@ BM = BN = 128，Q tile i 的行是 `128i .. 128i+127`：
 
 ### 5.5 S 双缓冲（步骤 5）：重叠
 
-把 S 放进两个 TMEM buffer（块 j 用 buffer `j % 2`），MMA warp 就可以**提前一块**算 S：
+把 S 放进两个 TMEM buffer（块 j 用哪个 buffer 由 `s_buffer(j)` 决定，步骤 5 中由你实现），MMA warp 就可以**提前一块**算 S：
 
 ```
 MMA warp:
-  issue_qk(0)               → buffer 0
-  issue_qk(1)               → buffer 1        ← 步骤 5 新增：softmax 还在处理 S_0
+  issue_qk(0)
+  issue_qk(?)                                 ← 步骤 5 新增：softmax 还在处理 S_0 时就开始
   for j:
     wait p_ready(j)                            S_j 已读完，P_j 已写好，O 已修正
     PV_j; commit v_empty, o_ready
-    if j+2 < 块数: issue_qk(j+2) → buffer j%2   ← 复用 S_j 刚空出来的 buffer
+    issue_qk(?)（块存在时）                    ← 复用 S_j 刚空出来的 buffer
 ```
 
-时间线（D = 128，每格约 256 周期；`QK3` = QKᵀ_3，`SM2` = 块 2 的 softmax）：
+时间线示意（D = 128；`QK0` = QKᵀ_0，`SM2` = 块 2 的 softmax；按 §3.3，每个 QK、PV 约 512 周期，一次 softmax 约 1000 周期以上，格宽只表示先后，不按比例）：
 
 ```
-Tensor Core  │QK0│QK1 │ ·· │PV0│QK2 │ ·· │PV1│QK3 │ ·· │PV2│QK4 │ ··
+Tensor Core  │QK0│QK· │ ·· │PV0│QK· │ ·· │PV1│QK· │ ·· │PV2│QK· │ ··
 softmax WG   │   │SM0 ··········│ SM1 ···········│ SM2 ···········│ SM3
                     └p_ready(0)┘      └p_ready(1)┘      └p_ready(2)┘
-                    SM1 开始时 S_1 早已算好；SM1 写 P 前等 o_ready(0)（PV0 已完成）
+                    QK·：步骤 5 中由你决定是哪一块。SM1 开始时 S_1 早已算好；SM1 写 P 前等 o_ready(0)（PV0 已完成）
 ```
 
-为什么 PV_j 排在 QKᵀ_{j+2} **之前**：softmax 处理块 j+1 时，写 P_{j+1} 之前要等 PV_j（`o_ready`）；如果先发 QKᵀ_{j+2}，PV_j 要排在它后面，softmax 白等 512 个周期。
+为什么 PV_j 排在循环里那次 QKᵀ **之前**：softmax 处理块 j+1 时，写 P_{j+1} 之前要等 PV_j（`o_ready`）；如果先发那次 QKᵀ，PV_j 要排在它后面，softmax 白等约 512 个周期。
 
 **每个 mbarrier**（S = K/V 级数，`kSBuf` = 1 或 2）：
 
@@ -355,7 +355,7 @@ softmax WG   │   │SM0 ··········│ SM1 ···········│ 
 | `v_full[s]` | 1 + tx | TMA warp + TMA | MMA（PV 前） | `(j/S)&1` | V_j 已到达 |
 | `k_empty[s]` | 1 | `tcgen05.commit`（QKᵀ_j 后） | TMA warp（装 K_{j+S} 前） | `((j/S)&1)^1`（装块 j 时） | stage s 的 K 已被读完 |
 | `v_empty[s]` | 1 | `tcgen05.commit`（PV_j 后） | TMA warp | 同上 | stage s 的 V 已被读完 |
-| `s_full[b]` | 1 | `tcgen05.commit`（QKᵀ_j 后） | softmax 128 线程 | `(j/kSBuf)&1` | S_j 已在 buffer `j % kSBuf` |
+| `s_full[b]` | 1 | `tcgen05.commit`（QKᵀ_j 后） | softmax 128 线程 | `s_phase(j)`：单 buffer 为 `j&1`，双 buffer 在步骤 5 中推导 | S_j 已在 buffer `s_buffer(j)` |
 | `p_ready` | 128 | 每个 softmax 线程 | MMA | `j&1` | P_j 已写好、S_j 已读完、O 已修正 |
 | `o_ready` | 1 | `tcgen05.commit`（PV_j 后） | softmax 128 线程 | `j&1` | O 含块 j；P 可以覆盖 |
 
@@ -397,7 +397,7 @@ softmax 线程把 `scale·S` 写进 probe（`[B,H,N,N]`，已写好），由 `fa
 
 ### 步骤 3 · TODO(3a)–(3d)：完整循环与 O 修正
 
-- 3a：`rescale_o_row`（§4.5）；3b：MMA warp 发下一个 QKᵀ（§5.3：哪个块、为什么放在 PV 之后）；
+- 3a：`rescale_o_row`（§4.5）；3b：MMA warp 发下一个 QKᵀ（§5.3：哪一块、什么条件下发、为什么放在 PV 之后）；
 - 3c：α；3d：softmax 在写 P、修正 O 之前等 `o_ready`。
 
 ```bash
@@ -423,6 +423,8 @@ softmax 线程把 `scale·S` 写进 probe（`[B,H,N,N]`，已写好），由 `fa
 - 5d：`s_phase` 的两 buffer 分支。推导方法：`s_full[b]` 每收到一次 commit（每个用 buffer b 的块）完成一个阶段；块 i 是第 k 个（从 0 数）使用它那个 buffer 的块，它的 S 就完成第 k 个阶段，等它就是等 parity `k & 1`。
 
 两边用的是同一对函数，所以 MMA 写进哪个 buffer、commit 哪个 barrier，和 softmax 读哪个 buffer、等哪个 parity 自动一致。写错时最常见的现象是挂起（等一个永远不会完成的阶段），其次是读到上一块的 S。
+
+通过之后做一个实验：把循环里“PV_j”和“下一次 QKᵀ”的发射顺序对调，`./lab bench 34 --case perf` 对比，并用 §5.5 的时间线解释差别（softmax 写 P_{j+1} 前等的是哪个 barrier？它前面排着什么？）。改回来再继续。
 
 ```bash
 ./lab check 34
@@ -462,7 +464,7 @@ softmax 线程把 `scale·S` 写进 probe（`[B,H,N,N]`，已写好），由 `fa
 | 步骤 5（S 双缓冲） | ≈ 0.54–0.59× | ≈ 0.70× | ≈ 0.57–0.59× |
 | FA4（`flash_attn.cute`） | ≈ 1.1× | ≈ 1.3× | ≈ 1.15× |
 
-步骤 5 在三个 perf case 上都达到 cuDNN 的 0.4 倍以上即说明机制成立。多次运行之间 cuDNN 本身有几个百分点的波动，请看比例的范围。
+步骤 5 在三个 perf case 上都达到 cuDNN 的 0.48 倍以上，才说明重叠起了作用（没有重叠的步骤 3/4 约 0.41 倍）。多次运行之间 cuDNN 本身有几个百分点的波动，请看比例的范围。
 
 - **换成 `tcgen05` + warp 分工**（22 关 → 步骤 3）：约 1.6 倍。此时 Tensor Core 和 softmax 还在轮流工作。
 - **S 双缓冲**（步骤 3 → 5）：约 1.3–1.4 倍，D = 64 更多。§3.3 的估算是“串行 ≈ MMA + softmax，重叠 ≈ max(MMA, softmax)”。D = 128 时 MMA ≈ softmax，理论上最多快 2 倍；实测 1.3 倍，因为 softmax 本身比估算的更长（下一节）。
@@ -498,7 +500,6 @@ softmax 线程把 `scale·S` 写进 probe（`[B,H,N,N]`，已写好），由 `fa
 
 **可以自己做的实验**：
 
-- 把步骤 5 的 MMA 循环改成“先 `issue_qk(j+2)`、再 PV_j”，看 §5.5 说的白等；
 - 在 `softmax_block` 里只用 1 个 max/sum 累加器，看 SASS 中的依赖链和 bench 的变化。
 
 ## 8. 自测问题
@@ -508,7 +509,7 @@ softmax 线程把 `scale·S` 写进 probe（`[B,H,N,N]`，已写好），由 `fa
 3. V_j 在 shared 地址 `0x10000`，D = 128。写出第 kk = 5 个 K 片（key 80–95）的 B 描述符的起始地址字段和 LBO 字段（右移 4 位之后的值）。
 4. 如果 softmax 先等 `o_ready(j−1)` 再算指数（而不是算完再等），步骤 3 和步骤 5 的性能分别会怎样？
 5. 为什么 `p_ready` 的 count 是 128，而 `s_full`、`o_ready` 是 1？能不能让每个 softmax warp 只 arrive 一次？
-6. 步骤 5 中，MMA warp 发出 QKᵀ_{j+2} 时，为什么可以确定 softmax 已经读完了 S_j？如果把 S 改成 3 个 buffer，`issue_qk` 的位置该怎么改？
+6. 步骤 5 中，MMA warp 往 S_j 用过的 buffer 里发下一次 QKᵀ 时，为什么可以确定 softmax 已经读完了 S_j？哪几条指令共同保证了这一点？
 
 <details>
 <summary>参考答案</summary>
@@ -518,7 +519,7 @@ softmax 线程把 `scale·S` 写进 probe（`[B,H,N,N]`，已写好），由 `fa
 3. key 80 在第 80 行：起始地址 `0x10000 + 80·128 = 0x12800`，字段值 `0x1280`；LBO = 16384 字节，字段值 `0x400`。
 4. 步骤 3：几乎不变，S_j 本来就在 PV_{j−1} 之后才算完，等 `o_ready` 不需要额外时间。步骤 5：变慢，softmax 开始时 PV_{j−1} 可能还在跑，指数计算不能和它重叠。
 5. `tcgen05.commit` 本身只 arrive 一次，所以由 MMA 产生的 barrier count 为 1。`p_ready` 要保证 128 个线程**每一个**都写完了自己那行 P、读完了自己那行 S、改完了 O；每个线程的 fence 只覆盖它自己的访问。可以改成每个 warp `__syncwarp()` 后由一个 lane arrive（count = 4），前提是每个线程先各自执行 `fence.proxy.async` 和 `tcgen05.fence::before_thread_sync`，再 `__syncwarp`。
-6. QKᵀ_{j+2} 是在 MMA warp 等到 `p_ready(j)` 之后才发出的，而每个 softmax 线程都是在 `tcgen05.ld` S_j 完成（`wait::ld`）并执行 `fence::before_thread_sync` 之后才 arrive。3 个 buffer 时：开头发 QKᵀ_0、1、2，循环中在 PV_j 之后发 QKᵀ_{j+3}（buffer `j % 3`），即一般的 `j + kSBuf`。
+6. 这次 QKᵀ 是在 MMA warp 等到 `p_ready(j)` 之后才发出的。每个 softmax 线程在 arrive 之前：`tcgen05.ld` 读 S_j、`tcgen05.wait::ld`（读已完成）、`tcgen05.fence::before_thread_sync`；MMA 线程 `mbarrier` wait 之后执行 `tcgen05.fence::after_thread_sync` 再发 MMA。`p_ready` 的 count 是 128，所以 128 行都读完了。
 </details>
 
 ## 9. 延伸阅读

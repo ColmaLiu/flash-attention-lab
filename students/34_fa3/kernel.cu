@@ -452,9 +452,12 @@ __global__ void __launch_bounds__(kThreads, 1)
           // first, so the softmax warps waiting for o_ready are not delayed
           // by this QK.
           if constexpr (C::kSBuf == 1) {
-            if (j + 1 < blocks)
-              LAB_TODO(3); // TODO(3b) -- lesson section 5.3: one S buffer;
-                           // which block can go into it now?
+            // TODO(3b) -- lesson section 5.3: one S buffer, just freed by
+            // S_j. Issue the next QK^T into it -- which block, and under
+            // which condition? (The check below only keeps the skeleton
+            // from stopping in single-block steps 1-2; replace it.)
+            if (blocks > 1)
+              LAB_TODO(3);
           } else {
             // TODO(5b) -- lesson section 5.5: two S buffers, S_{j+1} is
             // already in the other one. Which block goes into the buffer

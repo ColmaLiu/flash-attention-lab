@@ -64,7 +64,7 @@ commit 哪个 barrier）和 softmax warp（读哪个 buffer、等哪个 parity�
 | FA4 / cuDNN | ≈ 1.07–1.13× | ≈ 1.28–1.34× | ≈ 1.13–1.16× |
 
 `--cold`：步骤 5 `perf` ≈ 0.65×（Q/K/V 约 200 MB，本来就大于 L2；cuDNN 在冷 L2 下相对慢一些）。
-`perf_target` 设为 cuDNN 的 0.4×，最差的 `perf` 有约 35% 余量。
+`perf_target` 设为 cuDNN 的 0.48×：高于没有重叠的步骤 3/4（≈ 0.41×），低于步骤 5 最差的 `perf`（≈ 0.54–0.56×），余量约 15%。
 
 Nsight Compute（`perf`）：`sm__pipe_tensor_cycles_active` 步骤 3 ≈ 27%，步骤 5 ≈ 38%；
 `smsp__inst_executed_pipe_xu` ≈ 3383 万（≈ B·H·N²/32，每个分数一条 MUFU.EX2）；`dram__bytes_read` ≈ 201 MB。

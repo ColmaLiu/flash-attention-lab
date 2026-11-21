@@ -63,7 +63,8 @@
         "position",
         "ring",
         "medium",
-        "medium_d64"
+        "medium_d64",
+        "multiwave"
       ]
     },
     {
@@ -278,6 +279,17 @@
       "purpose": "中等规模随机数据，D=64、FP16（3 级 stage）。"
     },
     {
+      "name": "multiwave",
+      "shape": [
+        4,
+        1024,
+        16,
+        64
+      ],
+      "dtype": "bf16",
+      "purpose": "512 个 CTA（约 3.5 波，每 SM 一个 CTA）：同一 SM 上前后多个 CTA 复用 shared memory 与 TMEM，barrier 初始化、TMEM 释放或退出前的排空有问题时才会暴露。"
+    },
+    {
       "name": "causal_n1",
       "shape": [
         1,
@@ -391,6 +403,18 @@
       "purpose": "中等规模 causal，D=64。"
     },
     {
+      "name": "causal_multiwave",
+      "shape": [
+        4,
+        1024,
+        16,
+        64
+      ],
+      "dtype": "fp16",
+      "causal": true,
+      "purpose": "同上但 causal：各 CTA 的块数不同（1–8），提前结束的 CTA 与仍在运行的 CTA 交错。"
+    },
+    {
       "name": "perf",
       "shape": [
         4,
@@ -430,7 +454,7 @@
   ],
   "perf_target": {
     "baseline": "cudnn",
-    "ratio": 0.4
+    "ratio": 0.48
   },
   "profile_metrics": [
     "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
