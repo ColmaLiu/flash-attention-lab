@@ -290,12 +290,14 @@ __device__ __forceinline__ void load_a(bf16 *dst, const CUtensorMap *a_map,
     lab::tma_load_2d_cg2(dst, a_map, full_l, x, a_row);
   } else {
     // -----------------------------------------------------------------------
-    // TODO(3b) — multicast A (lesson §4.5, §5.5). This CTA loads rows
-    // a_row + pair.pair * 64 .. +63 of its A half (a_map's box is 64 rows
-    // here) into dst + pair.pair * 64 rows, for itself and for the CTA at
-    // the same position in the other pair: cta_mask has bits pair.rank and
-    // pair.rank + kPairSize. Barrier: full_l (see lesson: which leader's
-    // barrier does the other pair's copy complete on?).
+    // TODO(3b) — multicast A (lesson §4.5, §5.5). Here a_map's box has
+    // kBM / Cfg::kPairs rows. Questions to answer first:
+    //   - the A half this CTA needs is also needed by which CTA of the other
+    //     pair? Which part of it does THIS CTA load, and where in `dst`?
+    //   - which bits must cta_mask have so the box lands in both CTAs?
+    //   - which barrier address do you pass, and on which leader's barrier
+    //     does the copy for the other pair complete?
+    // Then one call to lab::tma_load_2d_cg2_multicast.
     // -----------------------------------------------------------------------
     (void)pair;
     LAB_TODO(3);
@@ -369,13 +371,13 @@ __device__ __forceinline__ void mma_tile(const Smem<Cfg> &sm,
 
 // ---------------------------------------------------------------------------
 // Epilogue (warps 0-3 of BOTH CTAs): drain this CTA's 128 x 256 part of the
-// accumulator to C rows m0.. (lab 32). `acc_free` (a .shared::cluster
-// address of the leader's acc_empty, or 0 for none) receives one arrival
-// per thread after its last TMEM read.
+// accumulator to C rows m0.. (lab 32). If `release`, `acc_free` (the
+// .shared::cluster address of our pair leader's acc_empty) receives one
+// arrival per thread after its last TMEM read.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ void epilogue_tile(uint32_t acc_tmem,
                                               float *warp_staging, int &box,
-                                              uint32_t acc_free,
+                                              bool release, uint32_t acc_free,
                                               const CUtensorMap *c_map, int m0,
                                               int n0) {
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
@@ -384,7 +386,7 @@ __device__ __forceinline__ void epilogue_tile(uint32_t acc_tmem,
     float v[32];
     lab::tmem_ld_32x32b_x32_sync(lab::tmem_addr(acc_tmem, warp * 32, j * 32),
                                  v);
-    if (j == kBN / 32 - 1 && acc_free != 0) {
+    if (j == kBN / 32 - 1 && release) {
       // ---------------------------------------------------------------------
       // TODO(2c) — release the accumulator to the LEADER's MMA thread
       // (lesson §5.3): lab 32's fence + arrive, but acc_free is a
@@ -519,8 +521,8 @@ __global__ void __launch_bounds__(kThreads, 1)
     lab::mbar_wait(&sm.acc_full[0], 0);
     lab::tcgen05_fence_after_thread_sync();
     int box = 0;
-    epilogue_tile(tmem, sm.staging + warp * 2 * kBoxFloats, box, 0, &c_map,
-                  m0 + pair.rank * kBM, n0);
+    epilogue_tile(tmem, sm.staging + warp * 2 * kBoxFloats, box, false, 0,
+                  &c_map, m0 + pair.rank * kBM, n0);
     if (threadIdx.x % 32 == 0)
       lab::bulk_wait_group_read<0>();
     __syncwarp();
@@ -582,14 +584,15 @@ __global__ void __launch_bounds__(kThreads, 1)
   } else if (warp == kMmaWarp) {
     if (pair.leader && lab::elect_one()) {
       // ---------------------------------------------------------------------
-      // TODO(2b) — persistent pair MMA issuer (lesson §5.3): lab 32's loop
-      // (RingPos for the stages and for the accumulators; per tile: wait
-      // acc_empty[acc.index], fence::after, mma_tile into accumulator
-      // acc.index with pair_mask = 0b11 << (kPairSize * pair.pair),
-      // acc.advance()), with two changes:
-      //   - acc_empty receives arrivals from the OTHER CTA: which wait?
-      //   - after the last tile, drain acc_empty: wait for the release of the
-      //     last kAccStages uses (as producer_drain does for empty).
+      // TODO(2b) — persistent pair MMA issuer (lesson §5.3). Start from
+      // lab 32's persistent MMA loop (one RingPos for the stages, one for
+      // the accumulators; per tile wait until the accumulator is free, fence,
+      // mma_tile, advance). What changes on a pair?
+      //   - who arrives on acc_empty now, and which wait pairs with them?
+      //   - which CTAs must acc_full reach (pair_mask, also with 2 pairs)?
+      //   - after the last tile: which arrivals into OUR shared memory may
+      //     still be in flight, and how do you wait for them (cf.
+      //     producer_drain)?
       // ---------------------------------------------------------------------
       LAB_TODO(2);
     }
@@ -605,9 +608,9 @@ __global__ void __launch_bounds__(kThreads, 1)
       lab::tcgen05_fence_after_thread_sync();
       // ---------------------------------------------------------------------
       // TODO(2d) — drain accumulator acc.index (lesson §5.3) with
-      // epilogue_tile. acc_free: the .shared::cluster address of
-      // acc_empty[acc.index] in our pair's LEADER. Rows: this CTA's half;
-      // columns: our pair's tile (n0 + pair.pair * kBN).
+      // epilogue_tile(..., release = true, acc_free, ...). acc_free: the
+      // .shared::cluster address of acc_empty[acc.index] in our pair's
+      // LEADER. Rows: this CTA's half; columns: our pair's tile.
       // ---------------------------------------------------------------------
       (void)m0;
       (void)n0;
@@ -707,11 +710,10 @@ void run(const Plan &plan, const lab::GemmProblem &p, cudaStream_t stream) {
     // TODO(3c) — choose the cluster shape (lesson §5.5). A 4-CTA cluster
     // (Step3: two pairs, A multicast) must fit in one GPC, so fewer of them
     // are resident: plan.clusters3 clusters of 4 vs plan.clusters2 pairs.
-    // Count the rounds each shape needs (tiles / resident clusters, rounded
-    // up; Step3 tiles are 256 x 512) and launch
-    //   launch_persistent<Step3>(plan, plan.a_map_mc, plan.clusters3, p, stream)
-    // only if it needs no more rounds than
-    //   launch_persistent<Step2>(plan, plan.a_map, plan.clusters2, p, stream).
+    // Decide from the number of tile rounds each shape needs (lesson §3.4,
+    // §5.5) when the multicast kernel is worth it, then launch either
+    // launch_persistent<Step3> (A map: plan.a_map_mc) or
+    // launch_persistent<Step2> (plan.a_map) with the matching cluster count.
     // -----------------------------------------------------------------------
     LAB_TODO(3);
     break;

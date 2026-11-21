@@ -223,12 +223,12 @@ mma_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring, uint32_t acc_tmem,
 
 // ---------------------------------------------------------------------------
 // Epilogue (warps 0-3 of BOTH CTAs): drain this CTA's 128 x 256 part of the
-// accumulator to C rows m0.. (lab 32). `acc_free` (a .shared::cluster
-// address of the leader's acc_empty, or 0 for none) receives one arrival
-// per thread after its last TMEM read.
+// accumulator to C rows m0.. (lab 32). If `release`, `acc_free` (the
+// .shared::cluster address of our pair leader's acc_empty) receives one
+// arrival per thread after its last TMEM read.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ void
-epilogue_tile(uint32_t acc_tmem, float *warp_staging, int &box,
+epilogue_tile(uint32_t acc_tmem, float *warp_staging, int &box, bool release,
               uint32_t acc_free, const CUtensorMap *c_map, int m0, int n0) {
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
 #pragma unroll 1
@@ -236,7 +236,7 @@ epilogue_tile(uint32_t acc_tmem, float *warp_staging, int &box,
     float v[32];
     lab::tmem_ld_32x32b_x32_sync(lab::tmem_addr(acc_tmem, warp * 32, j * 32),
                                  v);
-    if (j == kBN / 32 - 1 && acc_free != 0) {
+    if (j == kBN / 32 - 1 && release) {
       // Our TMEM reads are complete (wait::ld). Order them before the
       // arrival; the leader's MMA thread pairs this with
       // mbar_wait_cluster + fence::after_thread_sync.
@@ -371,8 +371,8 @@ __global__ void __launch_bounds__(kThreads, 1)
     lab::mbar_wait(&sm.acc_full[0], 0);
     lab::tcgen05_fence_after_thread_sync();
     int box = 0;
-    epilogue_tile(tmem, sm.staging + warp * 2 * kBoxFloats, box, 0, &c_map,
-                  m0 + pair.rank * kBM, n0);
+    epilogue_tile(tmem, sm.staging + warp * 2 * kBoxFloats, box, false, 0,
+                  &c_map, m0 + pair.rank * kBM, n0);
     if (threadIdx.x % 32 == 0)
       lab::bulk_wait_group_read<0>();
     __syncwarp();
@@ -462,7 +462,7 @@ __global__ void __launch_bounds__(kThreads, 1)
       lab::mbar_wait(&sm.acc_full[acc.index], acc.phase);
       lab::tcgen05_fence_after_thread_sync();
       epilogue_tile(
-          tmem + acc.index * kBN, warp_staging, box,
+          tmem + acc.index * kBN, warp_staging, box, true,
           lab::map_shared_rank(&sm.acc_empty[acc.index], pair.leader_rank),
           &c_map, m0 + pair.rank * kBM, n0 + pair.pair * kBN);
       acc.advance();

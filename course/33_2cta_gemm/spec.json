@@ -73,10 +73,10 @@
     },
     {
       "name": "persistent",
-      "shape": [3900, 3000, 328],
+      "shape": [3300, 3000, 328],
       "dtype": "bf16",
       "pattern": "int",
-      "purpose": "16 × 12 = 192 个 pair tile，多于可驻留的 cluster 数（约 74）：部分 cluster 处理 3 个 tile，累加器 0、1、0 轮换，acc_empty 收到两个 CTA 共 256 次到达；每 tile 6 个 K 块，环形 buffer 位置跨 tile 接续；分组光栅化最后一组不满。"
+      "purpose": "13 × 12 = 156 个 pair tile，多于可驻留的 cluster 数（74）：部分 cluster 处理 3 个 tile，累加器 0、1、0 轮换，acc_empty 收到两个 CTA 共 256 次到达；每 tile 6 个 K 块，环形 buffer 位置跨 tile 接续；最后一个 tile 行只有 228 行（peer 只有 100 行有效）；分组光栅化 G = 8 的最后一组只有 5 行。步骤 3 走 cluster 4（78 个 256×512 tile，3 轮）。"
     },
     {
       "name": "random",

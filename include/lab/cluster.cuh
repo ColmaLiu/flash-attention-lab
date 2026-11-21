@@ -20,12 +20,13 @@
 //   - barrier.cluster synchronizes all threads of all CTAs of the cluster.
 //
 // Pair ("cta_group::2") model: CTAs 2p and 2p + 1 of a cluster form pair p;
-// the even one is the leader. One thread of the leader issues
-// tcgen05.mma.cta_group::2, which reads A and B from the SAME shared-memory
-// offsets in both CTAs and writes D into BOTH CTAs' TMEM (rows 0..127 in the
-// leader, 128..255 in the peer). All tcgen05 instructions of a kernel must
-// use the same .cta_group, so a pair kernel also allocates, frees and
-// commits with cta_group::2.
+// the even one is called the leader. PTX only requires that ONE thread of
+// the pair issues each pair MMA; by convention (as CUTLASS) a thread of the
+// leader issues tcgen05.mma.cta_group::2, which reads A and B from the SAME
+// shared-memory offsets in both CTAs and writes D into BOTH CTAs' TMEM (rows
+// 0..127 in the leader, 128..255 in the peer). All tcgen05 instructions of a
+// kernel must use the same .cta_group, so a pair kernel also allocates, frees
+// and commits with cta_group::2.
 #pragma once
 
 #include <cstdint>
@@ -174,9 +175,10 @@ tma_load_2d_cg2_multicast(void *dst, const CUtensorMap *map, uint32_t bar,
 // ===========================================================================
 // TMEM allocation for a pair. PTX: "Tensor Memory Allocation and Management
 // Instructions" with .cta_group::2.
-// One warp in EACH CTA of the pair (same warp index in both) executes the
-// instruction; the two warps cooperate and both receive the same base
-// column in their `dst`. Same rules as the cta_group::1 forms otherwise.
+// One warp in EACH CTA of the pair executes the instruction (by convention
+// the same warp index in both); the two warps cooperate and both receive the
+// same base column in their `dst`. Same rules as the cta_group::1 forms
+// otherwise.
 // ===========================================================================
 __device__ __forceinline__ void tmem_alloc_cg2(uint32_t *dst, uint32_t ncols) {
   asm volatile(
@@ -203,7 +205,9 @@ __device__ __forceinline__ void tmem_dealloc_cg2(uint32_t taddr,
 // ===========================================================================
 // Pair MMA. PTX: "tcgen05.mma" with .cta_group::2.
 // tcgen05.mma.cta_group::2.kind::f16 [d], a_desc, b_desc, idesc, p;
-// Issued by ONE thread of the LEADER CTA. With idesc M = 256, N = n:
+// Issued by ONE thread of the pair (here, by convention, of the leader =
+// even rank); two issuers would compute every K block twice and race on
+// the same TMEM and shared memory. With idesc M = 256, N = n:
 //   A: rows 0..127 from the leader's smem at a_desc, rows 128..255 from the
 //      peer's smem at the same offset;
 //   B: rows 0..n/2-1 from the leader at b_desc, rows n/2..n-1 from the peer

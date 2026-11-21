@@ -73,7 +73,7 @@ pair + A 多播（256×512 的 cluster tile）:
         128 个 × (256 + 512) 行 × 4096 × 2 B ≈ 0.81 GB                   （×0.5）
 ```
 
-NCU 的 `lts__t_sectors_srcunit_tex_op_read` 实测：step 2 ≈ 0.99 GB，step 3 ≈ 0.82 GB，与推导一致。
+NCU 的 `lts__t_sectors_srcunit_tex_op_read` 实测：step 2 ≈ 0.99 GB（略低于推导的 1.07 GB），step 3 ≈ 0.82 GB，与推导接近。
 
 ### 3.3 shared memory 预算
 
@@ -91,7 +91,7 @@ epilogue staging     : 32 KB（与 32 关相同）
 persistent kernel 中，每个 cluster 依次处理 tile；所有 cluster 同时各算一个 tile 叫一“轮”。时间 ≈ 轮数 × 每轮时间。
 
 ```
-square: 256 个 pair tile，74 个 pair 同时驻留  →  ⌈256 / 74⌉ = 4 轮（3.46，最后一轮 46% 的 pair 空闲）
+square: 256 个 pair tile，74 个 pair 同时驻留  →  ⌈256 / 74⌉ = 4 轮（3.46：最后一轮只有 34 个 pair 在算，54% 空闲）
 wide  : 1024 个 pair tile                      →  ⌈1024 / 74⌉ = 14 轮
 ```
 
@@ -179,7 +179,7 @@ lab::tma_load_2d_cg2(sm.a(s), &a_map, lab::map_shared_rank(&sm.full[s], leader),
 
 ### 4.4 pair MMA：`tcgen05.mma.cta_group::2`
 
-**pair**：cluster 中 rank 2p 与 2p+1 两个 CTA；偶数的是 **leader**。leader 的一个线程发：
+**pair**：cluster 中 rank 2p 与 2p+1 两个 CTA；偶数的叫 **leader**。PTX 只要求 pair 中**一个**线程发出这条 MMA；按约定（CUTLASS 也如此）由 leader 的一个线程发：
 
 ```cpp
 constexpr uint32_t idesc = lab::make_idesc_f16(/*M=*/256, /*N=*/256, /*bf16=*/true);
@@ -209,7 +209,7 @@ TMEM（peer）  lane 0..127│ C[m0 + 128..255, n0 + 0..255]       │
 
 | 指令 | 谁执行 | 说明 |
 |---|---|---|
-| `tcgen05.alloc.cta_group::2` | **两个** CTA 中同一编号的一个 warp | 两边得到同一个列地址 |
+| `tcgen05.alloc.cta_group::2` | pair 中**每个** CTA 各一个 warp（本关约定用同一编号：warp 5） | 两边得到同一个列地址 |
 | `tcgen05.relinquish_alloc_permit.cta_group::2` | 同上 | |
 | `tcgen05.mma.cta_group::2` | leader 的一个线程 | |
 | `tcgen05.commit.cta_group::2 ... .multicast::cluster [bar], mask` | leader 发 MMA 的线程 | MMA 完成后，在 mask 中每个 CTA 的同一偏移 `bar` 上各到达一次 |
@@ -251,8 +251,8 @@ rank 3：读 A[m0 +192 ..255]  multicast → rank 1、3
 | setup 只用 `__syncthreads()` | peer 的 TMA / leader 的 commit 可能在对方 `mbarrier.init` 之前到达：随机挂起或错误 |
 | peer 的 TMA 用自己的 `full[s]` 地址 | leader 永远等不到这 32 KB：`TIMEOUT`；peer 的 `full` 计数也乱了 |
 | leader 的 `expect_tx` 只写本 CTA 的 32 KB | leader 的 MMA 可能在 peer 数据到达前开始：结果中 peer 那一半随机错误 |
-| peer 也执行 `arrive_expect_tx` | `full[s]` 的 count 是 1，第二次到达推进到下一个相位，后面全乱 |
-| 两个 CTA 都发 MMA | peer 的 cta_group::2 MMA 是非法的（只能由偶数 rank 发） |
+| peer 也对自己的 `full[s]` 执行 `arrive_expect_tx` | 那份 barrier 永远收不到 `complete_tx`，相位不会完成；下一轮再到达就是对未完成相位的超额到达（未定义行为）。只有 leader arm |
+| 两个 CTA 都发 MMA | PTX 只要求由 pair 中的**一个**线程发出（哪个 CTA 都可以，“偶数 rank 当 leader”是约定）。两边都发时每个 K 块算两遍，两个发出者还在同一块 TMEM / smem 上竞争：结果错误 |
 | tcgen05 指令混用 `cta_group::1` 与 `::2` | PTX 规定同一 kernel 必须一致：编译或运行错误 |
 | `commit` 不带 multicast | 只有 leader 的 `empty` / `acc_full` 到达，peer 的 producer / epilogue 永远等待 |
 | `acc_empty` 的 count 仍是 128 | leader 的 128 个线程读完就算空，MMA 覆盖 peer 还没读完的累加器 |
@@ -394,11 +394,13 @@ cluster 4 = 两个 pair 沿 N 并排，cluster tile 256 × 512。与步骤 2 的
 | `square` | 256 / 74 → 4 轮 | 128 / 33 → 4 轮 | cluster 4（轮数相同，少读 A） |
 | `wide`、`flat` | 1024 / 74 → 14 轮 | 512 / 33 → 16 轮 | cluster 2 |
 
-所以 `run()` 的步骤 3 在 host 上算这两个轮数，`rounds4 ≤ rounds2` 时用 cluster 4 的 multicast kernel，否则用步骤 2 的 kernel。
+所以 `run()` 的步骤 3 在 host 上算这两个轮数，`rounds3 ≤ rounds2`（rounds3 是步骤 3 的 cluster 4 形状的轮数） 时用 cluster 4 的 multicast kernel，否则用步骤 2 的 kernel。
 
 ## 6. 分步练习
 
 ### 步骤 1 · TODO(1a)–(1h)：cluster 与 pair MMA
+
+不带 `--step` 的 `./lab check 33` / `./lab bench 33` 运行最后一步（步骤 3），在 host 上先遇到 TODO(3c)；做步骤 1、2 时请始终加 `--step 1` / `--step 2`。
 
 - TODO(1a)：cluster 身份、cluster 屏障、`mapa`（4.1、4.2 节）；
 - TODO(1b)：pair 版的 TMA、TMEM alloc/dealloc、MMA、multicast commit（4.3、4.4 节）；
@@ -523,8 +525,8 @@ cuBLAS 在 `wide` 上本机波动较大（同卡 0.39–0.43 ms），比值随�
   [cp.async.bulk.tensor（.cta_group、.multicast::cluster）](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-bulk-tensor)、
   [tcgen05.mma（cta_group::2）](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma)、
   [tcgen05.alloc](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-memory-alloc-manage-instructions)、
-  [tcgen05.commit](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instructions-tcgen05-commit)。
-- CUDA Programming Guide：[Thread Block Clusters](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#thread-block-clusters)、[Distributed Shared Memory](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#distributed-shared-memory)；Runtime API `cudaLaunchKernelEx`、`cudaOccupancyMaxActiveClusters`。
+  [tcgen05.commit](https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen-async-sync-operations-commit)。
+- CUDA Programming Guide：[Thread Block Clusters](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html#thread-block-clusters)、[Distributed Shared Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#distributed-shared-memory)；Runtime API `cudaLaunchKernelEx`、`cudaOccupancyMaxActiveClusters`。
 - 上游源码（`third_party/` 中固定版本）：
   - `third_party/cutlass/include/cute/arch/mma_sm100_umma.hpp`：`SM100_MMA_F16BF16_2x1SM_SS`（pair MMA 的 PTX 形式）；
   - `third_party/cutlass/include/cute/arch/copy_sm100_tma.hpp`：`SM100_TMA_2SM_LOAD_2D`、`SM100_TMA_2SM_LOAD_MULTICAST_2D`（`Sm100MmaPeerBitMask`）；
