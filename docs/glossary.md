@@ -1,6 +1,6 @@
 # 术语表
 
-按主题分组。“首次出现”指第一次讲解这个概念的关卡；部分 4（40–44）还在编写，只写编号。
+按主题分组。“首次出现”指第一次讲解这个概念的关卡；
 
 ## 线程与执行
 
@@ -24,7 +24,7 @@
 | 生产者 / 消费者 | producer / consumer | 往 buffer 里放数据的一方 / 取数据的一方 | [30](../course/30_tma_mbarrier/README.md) |
 | `elect.sync` | elect | warp 中所有活跃线程一起执行，恰好选出一个线程 | [30](../course/30_tma_mbarrier/README.md) |
 | `setmaxnreg` | — | 运行时在 warpgroup 之间重新分配寄存器 | [32](../course/32_ws_gemm/README.md)（介绍）、40 |
-| LPT 调度 | Longest Processing Time first | 先发射工作量最大的块，减少最后一轮的空闲 | 43 |
+| LPT 调度 | Longest Processing Time first | 先发射工作量最大的块，减少最后一轮的空闲 | [43](../course/43_fa4_schedule/README.md) |
 
 ## 存储
 
@@ -119,4 +119,4 @@
 | atol / rtol | absolute / relative tolerance | 判定通过的条件 `|实际 − 参考| ≤ atol + rtol·|参考|` | [attention 的数学](attention-math.md#7-怎样判断结果正确) |
 | ulp | unit in the last place | 浮点数最后一位的单位，用来描述 `ex2.approx` 等的误差 | [01](../course/01_softmax/README.md) |
 | BF16 / FP16 / FP8（E4M3） | — | 16 位 / 16 位 / 8 位浮点格式。BF16 指数位多、尾数位少 | [20](../course/20_mma_gemm/README.md)、44 |
-| descale | descale | FP8 输入的缩放系数，乘回才得到真实值 | 44 |
+| descale | descale | FP8 输入的缩放系数，乘回才得到真实值 | [44](../course/44_fa4_fp8/README.md) |

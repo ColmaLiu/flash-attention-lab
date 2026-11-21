@@ -98,7 +98,7 @@ u = a·u_A + b·u_B
 | 一个 K/V 块一次：FA1 Algorithm 1，状态存在 HBM | [12 §3.2–3.3](../course/12_fa1/README.md) |
 | 状态留在寄存器，最后才除以 ℓ（延迟归一化） | [22 §3.1](../course/22_fa2/README.md) |
 | O 在 TMEM，由 softmax 或 correction warp 乘以 a | [34 §3.2](../course/34_fa3/README.md)、40 |
-| 只在 m 增长超过阈值时才重新缩放 | 41（编写中） |
+| 只在 m 增长超过阈值时才重新缩放 | [41](../course/41_fa4_softmax/README.md) |
 
 **两个边界情况**：
 

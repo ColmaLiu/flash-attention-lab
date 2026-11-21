@@ -88,12 +88,12 @@ bash scripts/bootstrap.sh            # 可加 --with-cuda、--with-fa4，见下�
 | [32_ws_gemm](course/32_ws_gemm/README.md) | warp specialization | 生产者/消费者分工、TMEM 双缓冲、persistent kernel、L2 光栅化 |
 | [33_2cta_gemm](course/33_2cta_gemm/README.md) | 2-CTA MMA | cluster、distributed shared memory、`cta_group::2`、TMA multicast |
 | [34_fa3](course/34_fa3/README.md) | FA3 式 attention | S/O 放在 TMEM、softmax 与 MMA 重叠 |
-| **部分 4 · FA4：Blackwell 上的完整优化（编写中）** | | |
-| 40_fa4_pipeline | FA4 流水结构 | 两个 Q tile ping-pong、P 写回 TMEM、correction warpgroup |
-| 41_fa4_softmax | softmax 吞吐 | MUFU 瓶颈、多项式 `exp2`、条件 rescale |
-| 42_fa4_2cta | 2-CTA attention | 2-CTA 的 QKᵀ/PV 划分、cluster 同步 |
-| 43_fa4_schedule | 调度与 causal | 块分类、persistent、LPT 排序 |
-| 44_fa4_fp8 | FP8 前向 | E4M3 量化、descale、`kind::f8f6f4` |
+| **部分 4 · FA4：Blackwell 上的完整优化** | | |
+| [40_fa4_pipeline](course/40_fa4_pipeline/README.md) | FA4 流水结构 | 两个 Q tile ping-pong、P 写回 TMEM、correction warpgroup |
+| [41_fa4_softmax](course/41_fa4_softmax/README.md) | softmax 吞吐 | MUFU 瓶颈、多项式 `exp2`、条件 rescale |
+| [42_fa4_2cta](course/42_fa4_2cta/README.md) | 2-CTA attention | 2-CTA 的 QKᵀ/PV 划分、cluster 同步 |
+| [43_fa4_schedule](course/43_fa4_schedule/README.md) | 调度与 causal | 块分类、persistent、LPT 排序 |
+| [44_fa4_fp8](course/44_fa4_fp8/README.md) | FP8 前向 | E4M3 量化、descale、`kind::f8f6f4` |
 
 建议按顺序学。每关讲义开头写了前置关卡。部分 4 的设计见 [设计稿 §3](docs/design-v2.md#3-课程地图)。
 
