@@ -43,7 +43,7 @@ ID 采用 `<部分><序号>_<名字>`。部分 0 预备，1–4 分别对应 FA1
 | `22_fa2` | FlashAttention-2 | 循环交换（Q 外层）、延迟归一化、warp 按 Q 切分、P 留在寄存器作 A 操作数、causal 跳块 | QKᵀ fragment → online softmax in registers → PV → causal | cuDNN |
 | **部分 3：FA3 的思想在 SM100 上 — 异步与分工** |||||
 | `30_tma_mbarrier` | TMA 与 mbarrier | tensor map、swizzle 模式、`cp.async.bulk.tensor`、expect_tx、phase/parity、TMA store | 单 tile 搬运 → 多级环形 buffer（full/empty barrier） | torch copy |
-| `31_tcgen05_gemm` | tcgen05 与 TMEM | TMEM 分配/释放、smem descriptor、instruction descriptor、`tcgen05.mma/commit/ld` | 单 tile → 完整 K 循环 → 多 CTA | cuBLAS |
+| `31_tcgen05_gemm` | tcgen05 与 TMEM | TMEM 分配/释放、smem descriptor、instruction descriptor、`tcgen05.mma/commit/ld` | 单 tile → 完整 K 循环（已覆盖全部 tile） → TMA store epilogue 与 tile 形状 | cuBLAS |
 | `32_ws_gemm` | warp specialization | 生产者/消费者、TMA warp + MMA warp + epilogue warps、TMEM 双缓冲、persistent | 分工流水 → 累加器双缓冲 → persistent 调度 | cuBLAS |
 | `33_2cta_gemm` | 2-CTA MMA | cluster、distributed smem、`cta_group::2`、TMA multicast | 2-CTA 单 tile → 完整流水 | cuBLAS |
 | `34_fa3` | FA3 式 attention | FA3 三个思想（异步生产者、GEMM/softmax 重叠、pingpong）在 tcgen05 上的对应；S/O 在 TMEM、P 经 smem | 单 KV 块 → 完整循环 → S 双缓冲重叠 QKᵀ 与 softmax | cuDNN |
@@ -136,7 +136,7 @@ GEMM 统一为 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 都是 K-major，与 QKᵀ
 | `mma_sync.cuh` | `ldmatrix`、`mma.sync` 封装、fragment 坐标函数 | 20 → 21 |
 | `cp_async.cuh` | `cp.async` 与 wait_group | 21 → 22 |
 | `tma.cuh`、`mbarrier.cuh` | tensor map 编码、TMA load/store、mbarrier | 30 → 31 |
-| `tcgen05.cuh` | TMEM alloc/ld/st、descriptor、mma/commit | 31 → 32 |
+| `tcgen05.cuh` | TMEM alloc/dealloc/relinquish、`tcgen05.ld`/`st`（32x32b，含 ld+wait 合一的 `_sync` 版本）与 wait、smem/instruction descriptor、mma/commit、tcgen05 fence | 31 → 32 |
 | `cluster.cuh` | cluster、2-CTA 辅助 | 33 → 34 |
 
 例如 `mma_sync.cuh`：学生在 20 关的骨架里自己实现这些函数（骨架给出签名与语义注释），20 关的参考答案 `#include` 它；从 21 关起骨架直接 `#include` 它。

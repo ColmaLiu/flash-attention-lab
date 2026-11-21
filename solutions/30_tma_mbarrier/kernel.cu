@@ -131,19 +131,15 @@ __device__ __forceinline__ void transpose_slice(const float *in, float *out,
       const int R = lane % 8, C = (lane % 8 + lane / 8 + 4 * t) % 8;
       float4 a[4];
 #pragma unroll
-      for (int k = 0; k < 4; ++k) {
-        const int row = 4 * R + k;
-        a[k] = in4[row * 8 + (C ^ (row % 8))];
-      }
+      for (int k = 0; k < 4; ++k) // columns 4C..4C+3 of row 4R+k
+        a[k] = in4[tile_offset<true>(4 * R + k, 4 * C) / 4];
       float4 b[4] = {{a[0].x, a[1].x, a[2].x, a[3].x},
                      {a[0].y, a[1].y, a[2].y, a[3].y},
                      {a[0].z, a[1].z, a[2].z, a[3].z},
                      {a[0].w, a[1].w, a[2].w, a[3].w}};
 #pragma unroll
-      for (int k = 0; k < 4; ++k) {
-        const int row = 4 * C + k;
-        out4[row * 8 + (R ^ (row % 8))] = b[k];
-      }
+      for (int k = 0; k < 4; ++k) // columns 4R..4R+3 of row 4C+k
+        out4[tile_offset<true>(4 * C + k, 4 * R) / 4] = b[k];
     }
   }
 }

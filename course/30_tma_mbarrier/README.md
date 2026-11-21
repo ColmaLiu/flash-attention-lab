@@ -15,7 +15,7 @@
 - 用 `cuTensorMapEncodeTiled` 编码 tensor map，说清 box、越界填零、swizzle 模式各自的含义；
 - 写出 `cp.async.bulk.tensor` load/store、`mbarrier` 的 init / arrive.expect_tx / try_wait.parity 封装，并画出 phase 时间线；
 - 解释 generic proxy 与 async proxy，知道 `fence.proxy.async` 必须放在哪里、由谁执行；
-- 把转置推到约 6.2 TB/s，接近同机 `y.copy_(x)`（无转置的连续拷贝）约 6.5 TB/s 的上限；而每个 SM 只用 9 个 warp，全部 load 由 1 个线程发起。
+- 把转置推到约 6.2 TB/s，接近同机 `y.copy_(x)`（无转置的连续拷贝）约 6.4 TB/s 的上限；而每个 SM 只用 9 个 warp，全部 load 由 1 个线程发起。
 
 本关写的封装从 31 关起由 [`include/lab/mbarrier.cuh`](../../include/lab/mbarrier.cuh) 和 [`include/lab/tma.cuh`](../../include/lab/tma.cuh) 提供。这是 transpose 的最后一关。
 
@@ -37,9 +37,9 @@ FlashAttention-3 论文第 3.1 节的第一个思想就是这件事：**生产�
 
 ### 3.1 下界与在途字节
 
-转置读写各 `rows·cols·4` 字节。`big`（8192×8192）共 512 MiB，按 8 TB/s 标称峰值的下界约 0.067 ms，按本机 `y.copy_(x)` 实测的约 6.5 TB/s 约 0.083 ms。
+转置读写各 `rows·cols·4` 字节。`big`（8192×8192）共 512 MiB，按 8 TB/s 标称峰值的下界约 0.067 ms，按本机 `y.copy_(x)` 实测的约 6.4 TB/s 约 0.083 ms。
 
-Little 定律（00 关 §4.5）：要跑 6.5 TB/s、延迟按约 700 ns 估算，全 GPU 需要约 4.5 MB 在路上，即每个 SM 约 30 KB。TMA 下，在途的读取字节数直接由 buffer 数决定：
+Little 定律（00 关 §4.5）：要跑 6.4 TB/s、延迟按约 700 ns 估算，全 GPU 需要约 4.5 MB 在路上，即每个 SM 约 30 KB。TMA 下，在途的读取字节数直接由 buffer 数决定：
 
 ```
 每 SM 在途读取 ≈ 每 CTA 的 stage 数 × 每个 stage 的字节数 × 每 SM 的 CTA 数
@@ -230,7 +230,7 @@ cp.async.bulk.wait_group N;           最多 N 组尚未完成（包括写 globa
 elect.sync %r|%p, 0xffffffff;
 ```
 
-warp 中所有活跃线程一起执行，恰好一个得到 `p = true`。用它选出 producer 线程，比 `lane == 0` 更明确地表达“warp 内选一个”，编译器也知道这个分支只有一个线程。
+warp 中所有活跃线程一起执行，恰好一个得到 `p = true`。用它选出 producer 线程，比 `lane == 0` 更明确地表达“warp 内选一个”。
 
 ### 4.7 常见误用
 
@@ -342,7 +342,7 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 ./lab sanitize 30 --step 2 --case tail --tool racecheck
 ```
 
-先用 `--case tiny`、`--case tail` 调通（一个 CTA 一个 tile），再跑 `ring`（每个 CTA 约 7 个 tile，环形 buffer 绕圈）。
+先用 `--case tiny`、`--case tail` 调通（一个 CTA 一个 tile），再跑 `ring`（每个 CTA 约 7 个 tile，环形 buffer 绕圈）和 `ring_tail`（绕圈的同时有尾部 tile）。
 
 ### 步骤 3 · TODO(3a)(3b)(3c)：swizzle 与调参
 
@@ -374,23 +374,30 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 
 ## 7. 性能
 
-本机实测（3 号卡，CUDA Graph）。基线 PyTorch `y.copy_(x.t())` 在本机多次运行之间在约 1.0 TB/s 和约 1.8 TB/s 两种状态之间跳动（我们的 kernel 很稳定），所以下表以 GB/s 为主，`vs torch` 给出两种状态下的比值：
+本机实测（CUDA Graph）。`./lab bench 30` 打印两条基线：
 
-| 版本 | `big` 8192×8192 GB/s | `wide` 4096×16384 GB/s | % HBM 标称峰值 | `vs torch` |
+- `torch`：PyTorch `y.copy_(x.t())`，一个通用的转置拷贝；
+- `copy`：`y.copy_(x)`，搬同样多的字节，但读写都是完全连续的，不做转置。它是本机 HBM 的**实际上限**。
+
+`vs` 列是相对第一条基线 `torch` 的比值。本关的主要尺子是 **`vs copy`**（`copy` 耗时 / 你的耗时，即下表最后一列）：转置最多做到和连续拷贝一样快，比值越接近 1 越好。
+
+| 版本 | `big` 8192×8192 GB/s | `wide` 4096×16384 GB/s | % HBM 标称峰值 | `vs copy` |
 |---|---|---|---|---|
-| 步骤 1：单 tile | ≈ 1030 | — | ≈ 13% | ≈ 0.55–1.0× |
-| 步骤 2：环形 buffer（标量、无 swizzle） | ≈ 1060 | — | ≈ 13% | ≈ 0.6–1.06× |
-| 步骤 3：swizzle，`Config<128, 4>` | ≈ 5600 | ≈ 5600 | ≈ 70% | ≈ 3.1–5.6× |
-| 步骤 3：swizzle，`Config<256, 2>`（答案） | ≈ 6200 | ≈ 6100 | ≈ 78% | ≈ 3.3–6.2× |
-| 参考：00 关步骤 4（同次测量） | ≈ 5900 | — | ≈ 74% | |
-| 参考：`y.copy_(x)`（无转置） | ≈ 6460 | — | ≈ 81% | |
+| 步骤 1：单 tile | ≈ 1950 | ≈ 1950 | ≈ 24% | ≈ 0.30× |
+| 步骤 2：环形 buffer（标量、无 swizzle） | ≈ 2100 | ≈ 2100 | ≈ 26% | ≈ 0.33× |
+| 步骤 3：swizzle，`Config<128, 4>` | ≈ 5600 | ≈ 5600 | ≈ 70% | ≈ 0.87× |
+| 步骤 3：swizzle，`Config<256, 2>`（答案） | ≈ 6200 | ≈ 6100 | ≈ 77% | ≈ 0.95× |
+| 参考：00 关步骤 4 | ≈ 5900 | — | ≈ 74% | ≈ 0.92× |
+| 参考：`torch`（`y.copy_(x.t())`） | ≈ 1860–1900 | ≈ 1890–1910 | ≈ 23% | ≈ 0.29× |
+| 参考：`copy`（`y.copy_(x)`，无转置） | ≈ 6430 | ≈ 6430 | ≈ 80% | 1 |
 
-答案达到连续拷贝的约 96%。它只比 00 关步骤 4 快约 5%（`--cold` 时约 2%）：转置本来就可以用满整个 SM 来搬运，TMA 在这里的收益不是带宽，而是**用 1 个线程、9 个 warp 做到了 00 关 2048 个线程才做到的事**。后面的关卡里，省下来的线程和寄存器用来做 Tensor Core 计算和 softmax。步骤 3 达到 `vs torch` 0.9 倍以上即通过本关的性能门槛；GB/s 达到 5000 以上说明 swizzle 和流水都生效了。
+答案达到连续拷贝的约 95%。它只比 00 关步骤 4 快约 5%（`--cold` 时约 2%）：转置本来就可以用满整个 SM 来搬运，TMA 在这里的收益不是带宽，而是**用 1 个线程、9 个 warp 做到了 00 关 2048 个线程才做到的事**。后面的关卡里，省下来的线程和寄存器用来做 Tensor Core 计算和 softmax。本关的性能门槛是步骤 3 在两个 perf case 上都达到 `vs copy` 0.85 倍以上（`copy` 耗时 / 你的耗时 ≥ 0.85）；`vs torch` 通常在 3 倍以上，但它不是好尺子，原因见下。
 
 **读这张表**：
 
-- **步骤 1、2 一样慢**：瓶颈是 bank conflict，而不是搬运。`./lab profile` 中，步骤 1、2 的 shared load 有约 6600 万次 bank conflict，对应约 210 万条 LDS：每条约 31 次额外的 wavefront，正是 32 路冲突。流水做得再好，也被转置本身卡住。
-- **步骤 3 一下快了 5 倍**：LDS/STS 各约 52 万条（16 字节一条，是原来的 1/4），bank conflict 约 70 万（load）和 100 万（store），平均每条不到 2 次。剩下这些不是下标公式造成的（换一种 lane 分配几乎不变），推测来自与 TMA 读写同一块 shared memory 的仲裁，未进一步证实。
+- **步骤 1、2 都慢，而且相差不到 10%**：瓶颈是 bank conflict，而不是搬运。`./lab profile` 中，步骤 1、2 的 shared load 有约 6600 万次 bank conflict，对应约 210 万条 LDS：每条约 31 次额外的 wavefront，正是 32 路冲突。步骤 2 的流水让 load 与转置重叠，只换来约 8%，被转置本身卡住。
+- **步骤 3 一下快了约 3 倍**：LDS/STS 各约 52 万条（16 字节一条，是原来的 1/4），bank conflict 约 70 万（load）和 100 万（store），平均每条不到 2 次。剩下这些不是下标公式造成的（换一种 lane 分配几乎不变），推测来自与 TMA 读写同一块 shared memory 的仲裁，未进一步证实。
+- **为什么不用 `vs torch` 当尺子**：`torch` 的转置和步骤 1、2 一样，不是被 HBM 卡住的。早先另一次测量中，步骤 1、2 只有约 1030、1060 GB/s（约为上表的一半），`torch` 在约 1.0 TB/s 与约 1.8 TB/s 之间跳动，而步骤 3 和 `copy` 与上表相同。一个**未经验证的假设**是 GPU 当时处于较低的 SM 时钟：受 bank conflict 或延迟限制的 kernel 的速度随 SM 时钟变化，受 HBM 限制的 kernel（`copy`、步骤 3）几乎不受影响。不论原因是什么，`copy` 和答案都由 HBM 决定，二者的比值在这种波动下是稳定的。
 - **调参**（`big`，swizzle 版）：
 
 | `Config<Rows, Stages>` | smem / CTA | CTA / SM | GB/s |

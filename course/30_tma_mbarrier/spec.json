@@ -63,6 +63,13 @@
       "purpose": "每个 persistent CTA 处理约 7 个 tile：环形 buffer 绕圈，phase/parity 或 empty barrier 写错会读到旧 tile。坐标模式可以精确定位。"
     },
     {
+      "name": "ring_tail",
+      "shape": [4100, 2052],
+      "dtype": "fp32",
+      "pattern": "coordinate",
+      "purpose": "环形 buffer 绕圈的同时两个方向都有尾部：尾部 box 在第几圈、落在哪个 stage 都不固定，越界填零的字节计数和 parity 必须同时正确。"
+    },
+    {
       "name": "big",
       "shape": [8192, 8192],
       "dtype": "fp32",
@@ -78,8 +85,8 @@
     }
   ],
   "perf_target": {
-    "baseline": "torch",
-    "ratio": 0.9
+    "baseline": "copy",
+    "ratio": 0.85
   },
   "profile_metrics": [
     "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",

@@ -44,8 +44,8 @@ __device__ __forceinline__ void tmem_alloc(uint32_t *dst, uint32_t ncols) {
 }
 
 // tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;
-// This CTA promises not to allocate again, so a blocked allocation of
-// another CTA on the same SM does not have to wait for us to exit.
+// The CTA relinquishes the right to allocate Tensor Memory: after any of its
+// threads executes this, a tcgen05.alloc by the CTA is illegal (PTX ISA).
 __device__ __forceinline__ void tmem_relinquish_alloc_permit() {
   asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;" ::
                    : "memory");
@@ -158,6 +158,16 @@ __device__ __forceinline__ void tcgen05_commit(uint64_t *bar) {
 // receives lane (taddr.lane + i), columns taddr.col .. taddr.col + N - 1, in
 // registers v[0..N-1]. Asynchronous: the registers are valid only after
 // tmem_wait_ld().
+//
+// Caveat: the compiler does not know that v[] depends on tmem_wait_ld(). The
+// wait asm has no register operands, so nothing ties the output registers to
+// it; "volatile"/"memory" only keep the two asm statements (and memory
+// accesses) in order. Register-only math on v[] (e.g. v[i] * scale, max)
+// could in principle be scheduled between the ld and the wait, i.e. before
+// the values arrive. Storing v[] straight to memory after the wait is safe in
+// practice. For anything else prefer the *_sync variants below, which issue
+// tcgen05.ld and tcgen05.wait::ld in one asm statement, so the outputs only
+// exist after the wait.
 // ===========================================================================
 __device__ __forceinline__ void tmem_ld_32x32b_x8(uint32_t taddr,
                                                   float (&v)[8]) {
@@ -200,6 +210,110 @@ __device__ __forceinline__ void tmem_ld_32x32b_x32(uint32_t taddr,
 // tcgen05.wait::ld.sync.aligned;  all prior tcgen05.ld of this thread done.
 __device__ __forceinline__ void tmem_wait_ld() {
   asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+}
+
+// tcgen05.ld.sync.aligned.32x32b.xN.b32 followed by tcgen05.wait::ld in the
+// same asm statement: same data as tmem_ld_32x32b_xN + tmem_wait_ld, but the
+// output registers are defined only after the wait (no compiler reordering
+// of their uses before it). The wait also covers every earlier tcgen05.ld of
+// this thread, so there is no overlap between several loads.
+__device__ __forceinline__ void tmem_ld_32x32b_x8_sync(uint32_t taddr,
+                                                       float (&v)[8]) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x8.b32 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7}, [%8];\n\t"
+               "tcgen05.wait::ld.sync.aligned;"
+               : "=f"(v[0]), "=f"(v[1]), "=f"(v[2]), "=f"(v[3]), "=f"(v[4]),
+                 "=f"(v[5]), "=f"(v[6]), "=f"(v[7])
+               : "r"(taddr)
+               : "memory");
+}
+
+__device__ __forceinline__ void tmem_ld_32x32b_x16_sync(uint32_t taddr,
+                                                        float (&v)[16]) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, "
+               "%14, %15}, [%16];\n\t"
+               "tcgen05.wait::ld.sync.aligned;"
+               : "=f"(v[0]), "=f"(v[1]), "=f"(v[2]), "=f"(v[3]), "=f"(v[4]),
+                 "=f"(v[5]), "=f"(v[6]), "=f"(v[7]), "=f"(v[8]), "=f"(v[9]),
+                 "=f"(v[10]), "=f"(v[11]), "=f"(v[12]), "=f"(v[13]),
+                 "=f"(v[14]), "=f"(v[15])
+               : "r"(taddr)
+               : "memory");
+}
+
+__device__ __forceinline__ void tmem_ld_32x32b_x32_sync(uint32_t taddr,
+                                                        float (&v)[32]) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x32.b32 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, "
+               "%14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, "
+               "%26, %27, %28, %29, %30, %31}, [%32];\n\t"
+               "tcgen05.wait::ld.sync.aligned;"
+               : "=f"(v[0]), "=f"(v[1]), "=f"(v[2]), "=f"(v[3]), "=f"(v[4]),
+                 "=f"(v[5]), "=f"(v[6]), "=f"(v[7]), "=f"(v[8]), "=f"(v[9]),
+                 "=f"(v[10]), "=f"(v[11]), "=f"(v[12]), "=f"(v[13]),
+                 "=f"(v[14]), "=f"(v[15]), "=f"(v[16]), "=f"(v[17]),
+                 "=f"(v[18]), "=f"(v[19]), "=f"(v[20]), "=f"(v[21]),
+                 "=f"(v[22]), "=f"(v[23]), "=f"(v[24]), "=f"(v[25]),
+                 "=f"(v[26]), "=f"(v[27]), "=f"(v[28]), "=f"(v[29]),
+                 "=f"(v[30]), "=f"(v[31])
+               : "r"(taddr)
+               : "memory");
+}
+
+// ===========================================================================
+// Registers -> TMEM. PTX: "tcgen05.st", "tcgen05.wait".
+// tcgen05.st.sync.aligned.32x32b.xN.b32 [taddr], {v[0..N-1]}: the mirror of
+// tcgen05.ld 32x32b -- thread i writes lane (taddr.lane + i), columns
+// taddr.col .. taddr.col + N - 1 (same lane restriction per warp).
+// Asynchronous: before a tcgen05.mma reads those cells, or before another
+// thread uses them, call tmem_wait_st() (then tcgen05 fence + sync as usual).
+// Syntax as in CUTLASS cute/arch/copy_sm100.hpp (SM100_TMEM_STORE_32dp32b*x)
+// and cutlass/arch/barrier.h (fence_view_async_tmem_store).
+// ===========================================================================
+__device__ __forceinline__ void tmem_st_32x32b_x8(uint32_t taddr,
+                                                  const float (&v)[8]) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x8.b32 "
+               "[%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+               :
+               : "r"(taddr), "f"(v[0]), "f"(v[1]), "f"(v[2]), "f"(v[3]),
+                 "f"(v[4]), "f"(v[5]), "f"(v[6]), "f"(v[7])
+               : "memory");
+}
+
+__device__ __forceinline__ void tmem_st_32x32b_x16(uint32_t taddr,
+                                                   const float (&v)[16]) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x16.b32 "
+               "[%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, "
+               "%14, %15, %16};"
+               :
+               : "r"(taddr), "f"(v[0]), "f"(v[1]), "f"(v[2]), "f"(v[3]),
+                 "f"(v[4]), "f"(v[5]), "f"(v[6]), "f"(v[7]), "f"(v[8]),
+                 "f"(v[9]), "f"(v[10]), "f"(v[11]), "f"(v[12]), "f"(v[13]),
+                 "f"(v[14]), "f"(v[15])
+               : "memory");
+}
+
+__device__ __forceinline__ void tmem_st_32x32b_x32(uint32_t taddr,
+                                                   const float (&v)[32]) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x32.b32 "
+               "[%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, "
+               "%14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, "
+               "%26, %27, %28, %29, %30, %31, %32};"
+               :
+               : "r"(taddr), "f"(v[0]), "f"(v[1]), "f"(v[2]), "f"(v[3]),
+                 "f"(v[4]), "f"(v[5]), "f"(v[6]), "f"(v[7]), "f"(v[8]),
+                 "f"(v[9]), "f"(v[10]), "f"(v[11]), "f"(v[12]), "f"(v[13]),
+                 "f"(v[14]), "f"(v[15]), "f"(v[16]), "f"(v[17]), "f"(v[18]),
+                 "f"(v[19]), "f"(v[20]), "f"(v[21]), "f"(v[22]), "f"(v[23]),
+                 "f"(v[24]), "f"(v[25]), "f"(v[26]), "f"(v[27]), "f"(v[28]),
+                 "f"(v[29]), "f"(v[30]), "f"(v[31])
+               : "memory");
+}
+
+// tcgen05.wait::st.sync.aligned;  all prior tcgen05.st of this thread done.
+__device__ __forceinline__ void tmem_wait_st() {
+  asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
 }
 
 // ===========================================================================

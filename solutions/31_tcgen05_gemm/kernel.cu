@@ -83,6 +83,7 @@ __device__ __forceinline__ void store_direct(uint32_t tmem, float *c, int m,
 // fence / barrier / fence sequence that orders TMEM use across threads.
 __device__ __forceinline__ uint32_t setup_tmem(uint32_t *slot, int ncols) {
   if (threadIdx.x / 32 == 0) {
+    __syncwarp(); // .sync.aligned: the whole warp must be converged
     lab::tmem_alloc(slot, ncols);
     lab::tmem_relinquish_alloc_permit();
   }
@@ -131,6 +132,8 @@ __global__ void __launch_bounds__(kThreads)
     lab::tma_load_2d(sa, &a_map, &full, 0, 0); // (x = k, y = row)
     lab::tma_load_2d(sb, &b_map, &full, 0, 0);
     lab::mbar_wait(&full, 0);
+    // Defensive: TMA and MMA are both async proxy, ordered by the mbarrier;
+    // CUTLASS (PipelineTmaUmmaAsync::consumer_wait) has no fence here.
     lab::tcgen05_fence_after_thread_sync();
     mma_k_tile<kOneBN>(tmem, sa, sb, /*accumulate=*/false);
     lab::tcgen05_commit(&mma_done); // arrives when the 4 MMAs are complete
@@ -145,14 +148,25 @@ __global__ void __launch_bounds__(kThreads)
 // ===========================================================================
 // Steps 2 and 3: full K loop, ring of stages.
 // ===========================================================================
+// tcgen05.alloc takes a power of 2 between 32 and 512 columns.
+constexpr int tmem_alloc_cols(int ncols) {
+  int c = 32;
+  while (c < ncols)
+    c *= 2;
+  return c;
+}
+
 template <int BN, int Stages, bool TmaEpilogue> struct Config {
   static constexpr int kBN = BN, kStages = Stages;
   static constexpr bool kTmaEpilogue = TmaEpilogue;
   static constexpr int kStageBytes = (kBM + BN) * kBK * 2;
   static constexpr int kTxBytes = kStageBytes; // bytes TMA delivers per stage
   static constexpr int kSmemBytes = 1024 + Stages * kStageBytes;
-  static constexpr int kTmemCols = BN; // FP32 accumulator: one column per n
-  static_assert(BN % 32 == 0 && BN <= 256, "MMA N: multiple of 16, <= 256");
+  // FP32 accumulator: one column per n, rounded up to a legal allocation
+  // size (BN = 96 allocates 128 columns).
+  static constexpr int kTmemCols = tmem_alloc_cols(BN);
+  static_assert(BN % 32 == 0 && BN <= 256,
+                "BN: multiple of 32 (32-column tcgen05.ld epilogue), <= 256");
   static_assert(!TmaEpilogue || kBM * BN * 4 <= Stages * kStageBytes,
                 "the C staging area reuses the stage buffers");
 };
@@ -200,8 +214,8 @@ __global__ void __launch_bounds__(kThreads)
       load(t);
     for (int t = 0; t < k_tiles; ++t) {
       const int s = t % S;
-      lab::mbar_wait(&full[s], (t / S) & 1); // fill number t / S of stage s
-      lab::tcgen05_fence_after_thread_sync();
+      lab::mbar_wait(&full[s], (t / S) & 1);  // fill number t / S of stage s
+      lab::tcgen05_fence_after_thread_sync(); // defensive, see step 1
       mma_k_tile<BN>(tmem, stage_a(s), stage_b(s), t > 0);
       lab::tcgen05_commit(&empty[s]); // stage s is free once these MMAs end
       // Refill the stage of tile t - 1 with tile t - 1 + S. MMA t is already

@@ -42,4 +42,11 @@ def baselines():
         y = torch.empty(x.shape[1], x.shape[0], device="cuda", dtype=x.dtype)
         return (lambda: y.copy_(x.t())), {"y": y}
 
-    return {"torch": torch_copy}
+    def contiguous_copy(inputs, options, case):
+        # Not a transpose: y.copy_(x) moves the same bytes with perfectly
+        # sequential reads and writes, i.e. a practical HBM ceiling.
+        x = inputs["x"]
+        y = torch.empty_like(x)
+        return (lambda: y.copy_(x)), {"y": y}
+
+    return {"torch": torch_copy, "copy": contiguous_copy}

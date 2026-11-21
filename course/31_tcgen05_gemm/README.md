@@ -80,9 +80,9 @@ TMEM 地址 = (lane << 16) | column
                     ↑ alloc 返回的 base（lane 0, column c0）
 ```
 
-- **分配按列**：一次分配 `ncols` 列（2 的幂，32 ≤ ncols ≤ 512），总是包含全部 128 个 lane。FP32 累加器一个元素占一个 32 位单元，所以 128×N 的累加器要 N 列。
+- **分配按列**：一次分配 `ncols` 列（2 的幂，32 ≤ ncols ≤ 512），总是包含全部 128 个 lane。FP32 累加器一个元素占一个 32 位单元，所以 128×N 的累加器要 N 列；N 不是 2 的幂时向上取整（N = 96 分配 128 列）。
 - **由一个 warp 执行** `tcgen05.alloc`（`.sync.aligned`，32 个线程一起），它把 base 地址写到 shared memory 中你给的位置。
-- `tcgen05.relinquish_alloc_permit`：声明本 CTA 不会再分配，让同一 SM 上其他 CTA 的分配不必等本 CTA 退出。
+- `tcgen05.relinquish_alloc_permit`：本 CTA 放弃继续分配 TMEM 的权利。执行之后，本 CTA 的任何线程再执行 `tcgen05.alloc` 都是非法的（PTX ISA 的表述）。
 - `tcgen05.dealloc`：CTA 退出前**必须**释放全部列，否则后面在这个 SM 上的 CTA 分配时永远等待。
 - 本关的 `cta_group::1`、M = 128 的 MMA：**累加器第 i 行在 lane i，第 j 列在 column base + j**。
 
@@ -187,9 +187,11 @@ tcgen05 指令是异步的，普通的线程同步（`__syncthreads`、mbarrier�
 | 位置 | before（发出方） | 同步 | after（接收方） |
 |---|---|---|---|
 | alloc 后，所有线程读 base 地址 | warp 0 的 alloc | `__syncthreads` | 所有线程 |
-| TMA 数据到达后发 MMA | （TMA 由 mbarrier 完成） | `wait(full[s])` | 发 MMA 的线程 |
+| TMA 数据到达后发 MMA | （TMA 由 mbarrier 完成） | `wait(full[s])` | 发 MMA 的线程（可选，防御性，见下） |
 | MMA 完成后读累加器 | commit（隐含） | `wait(mma_done)` | 所有线程，再 `tcgen05.ld` |
 | 所有 ld 完成后 dealloc | 所有线程 | `__syncthreads` | warp 0，再 dealloc |
+
+第二行的 after fence 不是必需的：TMA 写 shared memory 和 MMA 读 shared memory 都属于 async proxy，`full[s]` 的 mbarrier 完成已经给它们排好了顺序。CUTLASS 的 `PipelineTmaUmmaAsync::consumer_wait` 在这里只等 mbarrier、不加 fence。本关答案保留它作为防御性写法，代价可以忽略。
 
 ### 4.8 常见误用
 
@@ -219,7 +221,7 @@ thread 0 : mbar_init(full, 1); mbar_init(mma_done, 1); fence_barrier_init
 warp 0   : tmem_alloc(&tmem_slot, 128); relinquish
 all      : fence::before; __syncthreads; fence::after;  tmem = tmem_slot
 thread 0 : arrive_expect_tx(full, 32 KB); TMA A(0,0); TMA B(0,0)
-           wait(full, 0); fence::after
+           wait(full, 0); fence::after（可选）
            4 × mma(tmem, descA + 32kk B, descB + 32kk B, idesc, kk > 0)
            commit(mma_done)
 all      : __syncwarp; wait(mma_done, 0); fence::after
@@ -235,7 +237,7 @@ all      : fence::before; __syncthreads;  warp 0: fence::after; dealloc
 prologue:  load(0) .. load(S−1)
 for t in 0 .. k_tiles−1:
     s = t % S
-    wait(full[s], (t/S) & 1); fence::after
+    wait(full[s], (t/S) & 1); fence::after（可选）
     mma_k_tile(stage s, accumulate = t > 0)
     commit(empty[s])                       ← MMA t 读完 stage s 时到达
     if t ≥ 1 且 t−1+S < k_tiles:
