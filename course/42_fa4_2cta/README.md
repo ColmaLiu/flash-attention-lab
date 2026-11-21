@@ -291,11 +291,11 @@ pair tile t 的最后一行是 `q0 + 256t + 255`，它走的块数是 `min(⌈N/
 ```
 leader MMA  │PV⁰QK⁰│      │PV¹QK¹│      │PV⁰QK⁰│      │PV¹QK¹│
 Tensor(L,P) │██████│      │██████│      │██████│      │██████│     ← 两个 SM 同时执行同一条 pair MMA
-softmax 0 L │      │ld max exp exp exp P │      │ld max exp exp exp P│
-softmax 0 P │      │ld max exp exp exp P │      │ld max exp exp exp P│  ← 两边都 arrive 后 PV⁰ 才能发
-softmax 1 L │ exp P│      │ld max exp exp exp P│      │ld max …
-softmax 1 P │ exp P│      │ld max exp exp exp P│      │ld max …
-              ↑p_ready⁰ = 两个 CTA 中较晚的那一个 + 远程 arrive 的延迟
+softmax 0 L │      │ld max exp exp exp P│      │ld max exp exp exp P│
+softmax 0 P │      │ld max exp exp exp P│      │ld max exp exp exp P│  ← 两边都 arrive 后 PV⁰ 才能发
+softmax 1 L │  … exp exp P│      │ld max exp exp exp P│      │ld max …
+softmax 1 P │  … exp exp P│      │ld max exp exp exp P│      │ld max …
+                                        ↑ p_ready⁰ = 两个 CTA 中较晚的那一个 + 远程 arrive 的延迟
 ```
 
 ## 6. 分步练习
@@ -458,7 +458,7 @@ softmax 1 P │ exp P│      │ld max exp exp exp P│      │ld max …
 
 ## 9. 延伸阅读
 
-- Tri Dao 等，FlashAttention-4（2025）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
+- Zadouri 等，[FlashAttention-4](https://arxiv.org/abs/2603.05451v1)（2026）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
   - `__init__`：`use_2cta_instrs`、`cta_group_size`、`mma_tiler_qk = (cta_group_size · m_block_size, n_block_size, D)`、`mma_tiler_pv`、`cluster_shape_mn = (2, 1)`；
   - `_setup_attributes`：`smem_size_kv_per_stage = max(K, V) // cta_group_size`、`kv_stage`；
   - `tma_copy_bytes[...] *= cta_group_size`（leader 一次 arm 两边的字节）；

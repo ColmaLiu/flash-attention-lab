@@ -495,6 +495,6 @@ Nsight Compute（锁频，只用来比较指标；`perf` case）：
   - `flash_attn/cute/softmax.py`：`SoftmaxSm100.apply_exp2_convert`（`ex2_emu_freq`、`ex2_emu_res`、`ex2_emu_start_frg`：每 32 个元素中哪些走多项式）、`update_row_max`（`rescale_threshold`）；
   - `flash_attn/cute/flash_fwd_sm100.py`：`_TUNING_CONFIG`（各配置的 `ex2_emu_freq`）、`rescale_threshold = 8.0` 与 Note [Low Precision Scaling]、`correction_loop` 中的 `vote_ballot_sync(scale < 1.0)`。
 - PTX ISA：[ex2](https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-ex2)、[fma（含 `.f32x2`）](https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-fma)、[add（含 `.f32x2` 与舍入模式）](https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-add)、[vote.sync](https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-vote-sync)。
-- CUDA C++ Programming Guide 的算术指令吞吐表（[Arithmetic Instructions](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/#arithmetic-instructions)）；本关 §4.1 的数字是实测的，以实测为准。
+- CUDA C++ Best Practices Guide 的算术指令吞吐表（[Arithmetic Instructions](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/#arithmetic-instructions)）；本关 §4.1 的数字是实测的，以实测为准。
 - 多项式逼近：J.-M. Muller，*Elementary Functions: Algorithms and Implementation*（范围约简、minimax 逼近）；Sollya 的 `fpminimax`（https://www.sollya.org/）。
 - 后续：42 关（2-CTA attention）。

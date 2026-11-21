@@ -44,7 +44,7 @@
 
 ## 验证
 
-- `./lab check 32 --solution`：3 个 step × 10 个 case 通过（`int` case 精确相等，`random` 最大误差 1.9e-4）。`persistent` case（372 个 tile）让部分 CTA 处理 3 个 tile，累加器 0→1→0 轮换，每 tile 6 个 K 块使环形 buffer 位置跨 tile 错开，最后一组只有 7 行 tile。
+- `./lab check 32 --solution`：3 个 step × 9 个 case 通过（`int` case 精确相等，`random` 最大误差 1.9e-4）。`persistent` case（372 个 tile）让部分 CTA 处理 3 个 tile，累加器 0→1→0 轮换，每 tile 6 个 K 块使环形 buffer 位置跨 tile 错开，最后一组只有 7 行 tile。
 - compute-sanitizer memcheck / racecheck / synccheck：`tail` 上 3 个 step 均 0 错误；step 3 `persistent` 上三种工具均 0 错误。racecheck 不跟踪 TMA 与 tcgen05（async proxy）访问，所以 0 错误只覆盖 generic proxy（staging 写入）。async 部分的顺序按下表推理：
 
 | 访问 | 先 | 后 | 保证 |

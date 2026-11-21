@@ -39,7 +39,7 @@ FlashAttention-3 论文 §3.3 第一次在 Hopper 上把 attention 做成 FP8，
 
 在 B200 上第 1 点不存在了：`tcgen05.mma` 对 E4M3 允许 MN-major 的操作数（§4.6），V 可以照 40 关的方式直接用。第 2 点中的 Q/K/V 量化发生在**输入**里，本关的 harness 已经给了量化好的张量和 per-tensor descale；kernel 自己引入的量化只有 **P**。FA4（`flash_fwd_sm100.py`）的做法是把 P 乘 2⁸ 后量化成 E4M3，本关照做，并测量它的误差。
 
-一个提醒：40 关 §7.2 的结论是**瓶颈在 softmax（MUFU）**，Tensor Core 只忙约 57%。FP8 只让 GEMM 变快，所以不要期待 2 倍——§3.6 会先算出预期，§7 再用实测对上。
+一个提醒：40 关 §7.2 的结论是**瓶颈在 softmax（MUFU）**，Tensor Core 只忙约 57%。FP8 只让 GEMM 变快，所以不要期待 2 倍——本关 §7.2 会先算出预期，再用实测对上。
 
 ## 3. 数学
 
@@ -141,7 +141,7 @@ O 的误差有这些来源（括号里是本关测得的量级）：
 |ŵ_j − w_j| ≤ w_j · 2u/(1 − u)   ⇒   |Ô − O| ≤ 2u/(1−u) · Σ_j w_j |v_j − O|
 ```
 
-- 权重分散在很多 key 上时（随机数据），δ_j 正负抵消，误差约 u·√(Σw_j²)·σ_V，很小（`medium` 约 7e-3，主要是输出的 BF16 舍入）；
+- 权重分散在很多 key 上时（随机数据），δ_j 正负抵消，误差约 u·√(Σw_j²)·σ_V，很小（`medium` 约 7e-3；P 保持 BF16 时约 1e-3，见下表）；
 - 权重集中在一两个 key 上时（`large_logits`、causal 的前几行），抵消不了，误差约 u·|v_a − v_b| 量级——`peaked`、`causal_peaked` 的 5e-2–7.5e-2 就是这样来的。
 
 **ℓ 用 FP32 的 p 还是量化后的 p̂？** 步骤 2（与 FA4 相同）用 FP32 的 p 求 ℓ，分子却是 Σp̂·v，两者不一致：V = 1 时 O = Σp̂/Σp ≠ 1。步骤 3 改用 Σp̂ 归一化，O 重新成为凸组合，`ones_v` 精确为 1。**但 LSE 必须仍用 FP32 的 ℓ**：LSE 描述的是真实的 softmax，Σp̂ 带着最大约 1% 的偏差（LSE 的容差是 1e-3）。所以 softmax 线程维护两个和：`l`（FP32，给 LSE）和 `lo`（给 O）。
@@ -412,7 +412,7 @@ Tensor Core 的忙碌比例正好减半，MUFU 的比例不变：瓶颈仍然是
 ## 9. 延伸阅读
 
 - Jay Shah 等，*FlashAttention-3*（2024）§3.3：FP8 的布局要求（V 转置、P 的寄存器排列）、block quantization、incoherent processing 及其误差实验。
-- Tri Dao 等，FlashAttention-4（2025）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
+- Zadouri 等，[FlashAttention-4](https://arxiv.org/abs/2603.05451v1)（2026）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
   - Note [Low Precision Scaling] 与 `_LOG2_DTYPE_MAX`：P 乘 2^max_offset、与 rescale_threshold 的约束；
   - `_load_effective_descales`：`qk_descale = q_descale · k_descale` 折进 `softmax_scale_log2`；
   - `correction_epilogue` 附近：`scale = rcp(row_sum) * v_descale`，LSE 中的 `− max_offset`；

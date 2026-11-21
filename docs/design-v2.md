@@ -150,7 +150,7 @@ GEMM 统一为 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 都是 K-major，与 QKᵀ
 | `./lab list` / `./lab status` | 课程列表与各关、各 step 进度 |
 | `./lab check ID [--step n] [--case name]` | 编译学生代码并对照 oracle；默认运行全部 correctness case |
 | `./lab bench ID [--case name] [--cold]` | 计时：学生、答案、库基线，同一输入，CUDA Graph |
-| `./lab solution ID ...` | 对答案运行 check/bench |
+| check/bench/sass/profile/sanitize 加 `--solution` | 运行参考答案而不是学生代码 |
 | `./lab sass ID` | 编译产物的寄存器、spill、smem 用量与 SASS 摘录 |
 | `./lab profile ID --case name` | 用本关预设的 NCU 指标采集 |
 | `./lab sanitize ID --tool memcheck/racecheck/synccheck` | Compute Sanitizer |
@@ -160,7 +160,7 @@ GEMM 统一为 `C[M,N] = A[M,K] · B[N,K]ᵀ`：A、B 都是 K-major，与 QKᵀ
 正确性检查：
 
 - 数学 oracle：PyTorch FP64（GEMM/attention 分块计算以控制显存）；
-- 容差按 dtype 与归约长度给出，定义在 `labkit/tolerance.py`，并在讲义中解释；
+- 容差按 dtype 与归约长度给出，由 `labkit/kinds/<kind>.py` 中的 `tolerance()` 定义，并在讲义中解释；
 - 输出与 scratch 都先填 NaN 或垃圾值；检查输入未被修改；默认流与非默认流各跑一次；
 - step 通过 `spec.json` 中的 case 子集、`probe` 输出及对应 oracle 定义。
 

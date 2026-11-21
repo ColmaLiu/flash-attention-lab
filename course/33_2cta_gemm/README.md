@@ -336,10 +336,11 @@ epilogue（两边）: 对每个 tile：
 一个 cluster（3 个 tile）
 L.producer : │t0 k0..│t1 k0..                │t2 ...
 P.producer : │t0 k0..│t1 k0..                │t2 ...         （各自等自己的 empty，按 multicast 节奏前进）
-L.MMA      :  │══ t0 → acc0 ══│══ t1 → acc1 ══│ wait acc_empty[0]：L 与 P 的 256 次到达 │══ t2 → acc0 ══│
-L.epilogue :                  │ld acc0 → store│              │ld acc1 → store│
-P.epilogue :                  │ld acc0 → store│              │ld acc1 → store│
-                                    ↑ 两边 epilogue 各自读本 CTA 的 TMEM，同时进行
+L.MMA      :  │══ t0 → acc0 ══│══ t1 → acc1 ══│┄ wait acc_empty[0] ┄│══ t2 → acc0 ══│
+L.epilogue :                  │ld acc0 ·························│store│ld acc1 → store│
+P.epilogue :                  │ld acc0 ·····························│store│ld acc1 → store│
+                                                                    ↑ 较晚的 CTA 读完 acc0 的最后一次 ld，凑齐 L 的 acc_empty[0] 的 256 次到达
+                                    两边 epilogue 各自读本 CTA 的 TMEM，同时进行
 ```
 
 ### 5.4 启动与退出：为什么要“排空”

@@ -20,7 +20,7 @@
     },
     {
       "step": 3,
-      "title": "LPT 排序（重 tile 先做）与 L2 友好的 head 分段",
+      "title": "LPT 排序（重 tile 先做）",
       "cases": "all"
     }
   ],

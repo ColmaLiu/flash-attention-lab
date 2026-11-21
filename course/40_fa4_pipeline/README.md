@@ -36,7 +36,7 @@
 
 34 关 §7.2 的结论：S 双缓冲之后 Tensor Core 仍有约 60% 的时间空闲，它在等**唯一的** softmax warpgroup。一个块里 softmax warpgroup 要依次做：读 S、求最大值、128×128 次 `exp2`、写 32 KB 的 P、把 O 读出来乘 α 再写回。
 
-FA4（Tri Dao 等，2025，代码在 `flash_attn/cute/flash_fwd_sm100.py`）给出的办法正好对应 34 关 §7.2 表中的前三行：
+FA4（Zadouri 等，2026，代码在 `flash_attn/cute/flash_fwd_sm100.py`）给出的办法正好对应 34 关 §7.2 表中的前三行：
 
 | 34 关剩下的问题 | FA4 的办法 | 本关步骤 |
 |---|---|---|
@@ -471,7 +471,7 @@ correction   │   ×α¹   │   ×α⁰   │         │   ×α¹   │   ×�
 
 ## 9. 延伸阅读
 
-- Tri Dao 等，FlashAttention-4（2025）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
+- Zadouri 等，[FlashAttention-4](https://arxiv.org/abs/2603.05451v1)（2026）；上游实现 `third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py`：
   - `__init__`：warp 角色（`softmax0_warp_ids` … `empty_warp_ids`）、`tmem_s_offset` / `tmem_o_offset` / `tmem_s_to_p_offset = n_block_size // 2`（本关 §5.1 的表）、`num_regs_softmax` 等寄存器预算；
   - `mma()`：两个 Q stage 的发射顺序（本关 §5.3）与 “PV 之后才写 S” 的注释；
   - `softmax_step()`：读 S、最大值、把 `acc_scale` 交给 correction、写 P 回 TMEM；

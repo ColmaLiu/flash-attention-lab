@@ -254,11 +254,11 @@ epilogue: acc 跨 tile 连续；对每个 tile：
 
 ```
 步骤 2 的一个 CTA（3 个 tile）
-producer : │tile0 k0..k63 ··························│tile1 k0..k63 ························│tile2 ...
+producer : │tile0 k0..k63 ·······│tile1 k0..k63 ··········│tile2 k0..k63 ···
 MMA      :  │═════ tile0 → acc0 ═════│═════ tile1 → acc1 ═════│═════ tile2 → acc0 ═════│
                                      ↓ acc_full[0]            ↓ acc_full[1]          ↑ 需要 acc_empty[0]：
-epilogue : ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄│ld acc0│store t0 ···│┄┄┄┄┄┄┄┄┄┄│ld acc1│store t1 ···│   tile0 的 epilogue
-                                             ↑ acc_empty[0]（早释放）                       早已读完
+epilogue : ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄│ld acc0│store t0 ···│┄┄┄│ld acc1│store t1 ···│   tile0 的 epilogue
+                                             ↑ acc_empty[0]（早释放）                  早已读完
 Tensor   :   ══════════════════════════════════════════════════════════════════════════  不再停
 ```
 
