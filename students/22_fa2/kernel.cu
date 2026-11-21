@@ -194,7 +194,8 @@ __device__ __forceinline__ void online_softmax(float (&s)[C::kMTiles][C::kBN / 8
   //      spread over the 4 lanes of a quad: finish with quad_max.
   //   2. alpha = 2^(m_old * scale_log2 - mx * scale_log2); if mx is still
   //      -inf (row fully masked so far), use 0 in place of mx * scale_log2.
-  //   3. s <- 2^(s * scale_log2 - mx * scale_log2)  (exp2_approx, fmaf).
+  //   3. s <- 2^(s * scale_log2 - mx * scale_log2)  (exp2_approx, fmaf),
+  //      using the same substituted value for mx * scale_log2 as in item 2.
   //   4. l <- l * alpha + (sum of this lane's new s of the row): keep l
   //      per lane, do NOT quad-reduce here (lesson §3.3).
   //   5. o <- o * alpha for the row; m <- mx.

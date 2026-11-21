@@ -29,7 +29,7 @@
 
 12 关 §7.2 的结论是：在 SIMT FP32 上，FA1 多出的 HBM 往返不是瓶颈，计算才是。换成 Tensor Core 以后，矩阵乘快了十几倍，原来藏在计算后面的开销都露了出来。FA2 论文（Dao 2023）第 3 节针对的就是这三点：
 
-1. **O、ℓ、m 的 HBM 往返**（论文 3.1、3.2 节）。FA1 的 K/V 外层循环让每个 Q 块的状态在 HBM 里进出 Tc 次。把 Q 放到外层，一个 CTA 处理完一个 Q 块的全部 K/V，状态就能一直留在寄存器里。同时，Q 块之间互不相关，可以按 Q 块再并行一层：12 关的 `few_heads` 只有 16 个 CTA，本关同样形状有 16 × 64 = 1024 个。
+1. **O、ℓ、m 的 HBM 往返**（论文 3.1、3.2 节）。FA1 的 K/V 外层循环让每个 Q 块的状态在 HBM 里进出 Tc 次。把 Q 放到外层，一个 CTA 处理完一个 Q 块的全部 K/V，状态就能一直留在寄存器里。同时，Q 块之间互不相关，可以按 Q 块再并行一层：12 关的 `few_heads`（B=1、N=4096、H=16）只有 16 个 CTA；同样的 B、N、H 在本关是 16 个 head × 32 个 Q 块（D=64 时每块 128 行）= 512 个 CTA。
 2. **非矩阵乘运算**（论文 3.1 节）。Tensor Core 的吞吐比普通 FP32 单元高一个数量级，所以“每个 O 元素多乘一次、多除一次”都不便宜。FA2 让 O 在循环中保持**未归一化**，最后只除一次；反向传播只需要 LSE，不再分别保存 ℓ 和 m。
 3. **warp 之间的通信**（论文 3.3 节）。FA1 的 CUDA 实现把 K/V 分给不同 warp（“split-K”），每个 warp 算出部分 S·V 后，要经过 shared memory 和同步把各 warp 的结果加起来，softmax 的行最大值也要跨 warp 合并。FA2 改成按 **Q 行**分给 warp：一行的全部 key 都在同一个 warp 里，行最大值和行和只需要 warp 内的 shuffle，PV 的结果也不用合并。
 
@@ -131,7 +131,7 @@ a[2] = pack2(s[2t+1][0], s[2t+1][1]);  a[3] = pack2(s[2t+1][2], s[2t+1][3]);
 
 `pack2(x, y)` 把 x 放在低 16 位：低半是列号较小的元素（`mma_sync.cuh` 文件头的约定）。
 
-P 转成 16 位时会舍入（BF16 约 3 位有效十进制数字）。ℓ 用的是舍入前的 FP32 值，所以分子分母有微小的不一致。这是上游 FA2 的做法，误差远小于 BF16 输出本身的舍入，`ones_v` case（V = 1，O 应为 1）可以看到这个误差有多小。
+P 转成 16 位时会舍入（BF16 有 8 位有效二进制位，约 2–3 位有效十进制数字）。ℓ 用的是舍入前的 FP32 值，所以分子分母有微小的不一致。这是上游 FA2 的做法，误差远小于 BF16 输出本身的舍入，`ones_v` case（V = 1，O 应为 1）可以看到这个误差有多小。
 
 ### 4.4 V 是 MN-major：`ldmatrix.trans`
 
@@ -288,7 +288,7 @@ for j:
 | `position` 错，其他随机 case 误差也大 | P 的 A 寄存器顺序错（寄存器 1 和 2 弄反），或 V 没有用 `.trans` |
 | 只有 `tail`/`short_tail` 出 NaN | 越界的 K/V 行没有 zero-fill，或尾部块没有 mask |
 | `large_logits` 类 case 出 inf/NaN | 指数里没减最大值，或 m 和 S 的单位不一致（§3.3） |
-| causal 的第一个 Q 块之后都错 | 3a 的块数少算了一块（对角块） |
+| 第一个 Q 块的 O 为 NaN、LSE 为 −inf，其余 Q 块全错 | 3a 的块数少算了一块（对角块），常见写法是 `(q0 + kBM - 1) / kBN` 少了 `+1` |
 | step 4 偶尔错 | 少了 barrier，或在 barrier 之前就覆盖了另一个 stage |
 | `TIMEOUT` 或挂起 | 不同 warp 走了不同次数的循环、少走了 `__syncthreads()`：块数必须对整个 CTA 一致 |
 
@@ -327,7 +327,7 @@ for j:
 
 ### 7.3 和 12 关比
 
-12 关的 FA1 是 FP32 SIMT，`perf`（[4,4096,64,64]）约 25 TFLOP/s。本关 D = 64 的 `perf_d64` 约 320 TFLOP/s，约 **13 倍**。两者 dtype 不同（FP32 vs FP16），这个比例主要来自 Tensor Core；但如果仍按 FA1 的循环顺序把 O/ℓ/m 每块写回 HBM，12 关 §7.2 那份“不是瓶颈”的额外流量（读写约 40–70 倍 Q/K/V/O 的大小）在这个速度下就会成为瓶颈。本关 profile 中 `dram__bytes_read` ≈ 200 MB，正好是 Q、K、V 各读一次（K/V 被同一 head 的 64 个 Q 块重复读，命中 L2）。
+12 关的 FA1 是 FP32 SIMT，`perf`（[4,4096,64,64]）约 25 TFLOP/s。本关 D = 64 的 `perf_d64` 约 320 TFLOP/s，约 **13 倍**。两者 dtype 不同（FP32 vs FP16），这个比例主要来自 Tensor Core；但如果仍按 FA1 的循环顺序把 O/ℓ/m 每块写回 HBM，12 关 §7.2 那份“不是瓶颈”的额外流量（读写约为 Q/K/V/O 大小的几十倍，见 12 关 §2 与 §7.2）在这个速度下就会成为瓶颈。本关 profile 中 `dram__bytes_read` ≈ 200 MB，正好是 Q、K、V 各读一次（K/V 被同一 head 的 64 个 Q 块重复读，命中 L2）。
 
 ### 7.4 时间花在哪里
 
@@ -380,7 +380,7 @@ for j:
 - Tri Dao，*FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning*（2023）：3.1 节（减少非矩阵乘运算、只保存 logsumexp）、3.2 节（按序列长度并行）、3.3 节（warp 间按 Q 划分）、Algorithm 1
 - PTX ISA：[Matrix Fragments for mma.m16n8k16 with floating point type](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float)、[ldmatrix](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix)、[cp.async](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async)、[ex2](https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-ex2)
 - 上游 FA2（`third_party/flash-attention`，提交 `1fc0221`）：
-  - `csrc/flash_attn/src/flash_fwd_kernel.h`：`compute_attn_1rowblock`（一个 CTA 处理一个 Q 块；`n_block_max` 是 causal 跳块；先处理需要 mask 的块，再处理其余块）
+  - `csrc/flash_attn/src/flash_fwd_kernel.h`：`compute_attn_1rowblock`（一个 CTA 处理一个 Q 块；`n_block_max` 是 causal 跳块；先处理需要 mask 的块，再处理其余块。本关按 K 块从前往后遍历，让同一个循环也能用于步骤 4 的流水，见 NOTES.md）
   - `csrc/flash_attn/src/softmax.h`：`Softmax::softmax_rescale_o`（§3.1 的更新）、`normalize_softmax_lse`（最后的除法与 LSE）、`quad_allreduce_`（quad shuffle）
   - `csrc/flash_attn/src/utils.h`：`convert_layout_acc_Aregs`（§4.3：C fragment 重新解释为 A fragment）
   - `csrc/flash_attn/src/mask.h`：`apply_mask_causal`
