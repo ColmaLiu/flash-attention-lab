@@ -180,7 +180,7 @@ The A operand of P·V is read from shared memory, so the softmax threads must wr
 
 A 16-byte store is processed in phases (wavefronts) of 8 threads: threads r..r+7 write the same logical chunk q of their own rows; the physical positions `q ^ (r%8)` are all different and cover all 32 banks, with no conflict.
 
-After writing, each thread executes **`fence.proxy.async`** (lab 30 §4.7): ordinary stores go through the generic proxy, while `tcgen05.mma` reads shared memory through the async proxy. Without this fence, the MMA may read a stale P.
+After writing, each thread executes **`fence.proxy.async`** (lab 30 §4.5): ordinary stores go through the generic proxy, while `tcgen05.mma` reads shared memory through the async proxy. Without this fence, the MMA may read a stale P.
 
 ### 4.5 `tcgen05.st`: writing the corrected O back to TMEM
 
