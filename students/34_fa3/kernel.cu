@@ -209,7 +209,8 @@ __device__ __forceinline__ void mma_pv(uint32_t o_tmem, const T *sp,
   //   A = P: K-major (keys contiguous) [2 panels][128 rows][64], like Q.
   //   B = V: "N x K" = D x keys, but V is stored [keys][D]: MN-major. Set
   //       the B-major bit of the instruction descriptor and use
-  //       lab::make_smem_desc_mnmajor_sw128 with LBO = one D panel of V in bytes.
+  //       lab::make_smem_desc_mnmajor_sw128 with LBO = one D panel of V
+  //       in bytes.
   //       Key slice kk starts kk * 16 rows further.
   // The first MMA accumulates only if `accumulate`.
   LAB_TODO(2);

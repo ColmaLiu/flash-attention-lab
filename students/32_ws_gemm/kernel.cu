@@ -54,8 +54,7 @@ template <int BN, int Stages, int AccStages, int GroupM> struct Config {
   // g tile rows, m fastest inside a group.
   static constexpr int kGroupM = GroupM;
   static constexpr int kStageBytes = (kBM + BN) * kBK * 2;
-  static constexpr int kSmemBytes =
-      1024 + Stages * kStageBytes + kStagingBytes;
+  static constexpr int kSmemBytes = 1024 + Stages * kStageBytes + kStagingBytes;
   static constexpr int kTmemCols = AccStages * BN; // FP32: one column per n
   static_assert(BN % 32 == 0 && BN <= 256, "MMA N: multiple of 16, <= 256");
   static_assert(kTmemCols == 128 || kTmemCols == 256 || kTmemCols == 512,
@@ -83,13 +82,15 @@ __device__ __forceinline__ void mma_k_tile(uint32_t d_tmem, const bf16 *sa,
 
 // Shared-memory layout and barriers of one CTA.
 template <class Cfg> struct Smem {
-  uint8_t *stages;  // kStages x (A [128][64], B [BN][64]) BF16, 1024-aligned
-  float *staging;   // kEpilogueWarps x 2 boxes of 32 x 32 FP32
+  uint8_t *stages; // kStages x (A [128][64], B [BN][64]) BF16, 1024-aligned
+  float *staging;  // kEpilogueWarps x 2 boxes of 32 x 32 FP32
   uint64_t *full, *empty, *acc_full, *acc_empty;
   __device__ bf16 *a(int s) const {
     return reinterpret_cast<bf16 *>(stages + s * Cfg::kStageBytes);
   }
-  __device__ bf16 *b(int s) const { return a(s) + kBM * kBK; }
+  __device__ bf16 *b(int s) const {
+    return a(s) + kBM * kBK;
+  }
 };
 
 // Position in a ring of N slots: slot index and the parity of the current
@@ -114,8 +115,8 @@ template <int N> struct RingPos {
 template <class Cfg>
 __device__ __forceinline__ void
 produce_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring,
-             const CUtensorMap *a_map, const CUtensorMap *b_map, int m0,
-             int n0, int k_tiles) {
+             const CUtensorMap *a_map, const CUtensorMap *b_map, int m0, int n0,
+             int k_tiles) {
   // -------------------------------------------------------------------------
   // TODO(1a) — producer (lesson §5.2). For each K tile t = 0 .. k_tiles - 1,
   // in slot s = ring.index:
@@ -135,10 +136,9 @@ produce_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring,
 // accumulator at TMEM column `acc_tmem`. Never waits for an MMA to finish.
 // ---------------------------------------------------------------------------
 template <class Cfg>
-__device__ __forceinline__ void mma_tile(const Smem<Cfg> &sm,
-                                         RingPos<Cfg::kStages> &ring,
-                                         uint32_t acc_tmem, uint64_t *acc_done,
-                                         int k_tiles) {
+__device__ __forceinline__ void
+mma_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring, uint32_t acc_tmem,
+         uint64_t *acc_done, int k_tiles) {
   // -------------------------------------------------------------------------
   // TODO(1b) — MMA issuer (lesson §5.2). For each K tile t, in slot
   // s = ring.index:
@@ -241,8 +241,7 @@ __device__ __forceinline__ uint32_t setup(Smem<Cfg> &sm, uint32_t *tmem_slot,
 
 // Every MMA has completed (the epilogue waited for acc_full) and every
 // tcgen05.ld has completed (wait_ld): order them before the dealloc.
-template <class Cfg>
-__device__ __forceinline__ void teardown(uint32_t tmem) {
+template <class Cfg> __device__ __forceinline__ void teardown(uint32_t tmem) {
   lab::tcgen05_fence_before_thread_sync();
   __syncthreads();
   if (threadIdx.x / 32 == kMmaWarp) {
@@ -456,7 +455,7 @@ Plan make_plan(const lab::GemmProblem &p) {
   LAB_REQUIRE(p.k % 8 == 0, "K must be a multiple of 8 (TMA: 16-byte rows)");
   LAB_REQUIRE(p.n % 4 == 0, "N must be a multiple of 4 (TMA: 16-byte rows)");
   LAB_REQUIRE(p.k > 0, "K must be positive (K = 0 would store an "
-                          "accumulator no MMA ever wrote)");
+                       "accumulator no MMA ever wrote)");
   Plan plan{};
   allow_smem(gemm_ws_tile<Step1>, Step1::kSmemBytes);
   allow_smem(gemm_ws_persistent<Step2>, Step2::kSmemBytes);

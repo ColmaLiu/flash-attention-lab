@@ -14,7 +14,8 @@
 //   warps 4-7   softmax warpgroup 1 (tile 1)
 //   warps 8-11  correction warpgroup (step 3 only)
 //   MMA warp    all tcgen05.mma (all lanes wait, one elected lane issues)
-//   TMA warp    (lane 0) Q^0, Q^1, then K_0, V_0, K_1, V_1, ... through one ring
+//   TMA warp    (lane 0) Q^0, Q^1, then K_0, V_0, K_1, V_1, ... through
+//               one ring
 //   steps 1-2: 10 warps (MMA = 8, TMA = 9); step 3: 16 warps (MMA = 12,
 //   TMA = 13, 14-15 idle).
 //
@@ -527,7 +528,9 @@ __global__ void __launch_bounds__(C::kThreads, 1)
           //     s_col(t) (it overwrites the P^t just used -- why is that
           //     safe?), commit s_full[t]; otherwise commit o_full[t].
           // Then __syncwarp().
-          (void)v; (void)k; (void)o_col;
+          (void)v;
+          (void)k;
+          (void)o_col;
           LAB_TODO(1);
         }
         // TODO(1c, continued): if there is a next block, the leader releases
@@ -540,7 +543,7 @@ __global__ void __launch_bounds__(C::kThreads, 1)
       // TODO(3a): this warpgroup's register count (C::kRegSoftmax).
       LAB_TODO(3);
     }
-    const int r = threadIdx.x % kBM;  // row in the tile = TMEM lane
+    const int r = threadIdx.x % kBM; // row in the tile = TMEM lane
     // TODO(1d) -- lesson section 5.1: this warpgroup's tile t, the first row
     // qt of the tile, and the TMEM addresses (this warp's lanes, i.e. based
     // on lane_addr) of S^t and O^t (see Config).

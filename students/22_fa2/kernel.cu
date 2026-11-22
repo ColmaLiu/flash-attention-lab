@@ -48,10 +48,9 @@ template <int D_, int Warps, int MTiles, int BN, int Stages> struct Config {
 // chunk address. Each 64-column (128-byte) segment of a row is swizzled on
 // its own: banks repeat every 128 bytes, so this is enough to make 8 rows of
 // the same logical chunk hit 8 different bank groups.
-template <int D>
-__device__ __forceinline__ int tile_offset(int row, int col) {
-  return row * D + (col / 64) * 64 + lab::swizzle_chunk<8>(row, col % 64 / 8) * 8 +
-         col % 8;
+template <int D> __device__ __forceinline__ int tile_offset(int row, int col) {
+  return row * D + (col / 64) * 64 +
+         lab::swizzle_chunk<8>(row, col % 64 / 8) * 8 + col % 8;
 }
 
 // ---------------------------------------------------------------- dtype glue
@@ -118,8 +117,9 @@ __device__ __forceinline__ void issue_rows(T *s, const T *g, int row0, int n,
 // Q fragments of this warp's rows, loaded once: qf[mi][kk] is the A operand
 // for rows w0 + 16 mi .. +15, columns 16 kk .. +15.
 template <class C>
-__device__ __forceinline__ void load_q(uint32_t (&qf)[C::kMTiles][C::kD / 16][4],
-                                       const void *sq, int w0, int lane) {
+__device__ __forceinline__ void
+load_q(uint32_t (&qf)[C::kMTiles][C::kD / 16][4], const void *sq, int w0,
+       int lane) {
   // -------------------------------------------------------------------------
   // TODO(1a) — fill qf[mi][kk] (mi < kMTiles, kk < D/16) with the A fragment
   // of rows w0 + 16 mi .. +15, columns 16 kk .. +15 of the Q tile in sq
@@ -135,9 +135,10 @@ __device__ __forceinline__ void load_q(uint32_t (&qf)[C::kMTiles][C::kD / 16][4]
 // K is [keys][D] = [n][k] for the B operand: K-major, plain ldmatrix (as B
 // in labs 20/21). One x4 gives the B fragments of two n8 tiles.
 template <class T, class C>
-__device__ __forceinline__ void qk_block(float (&s)[C::kMTiles][C::kBN / 8][4],
-                                         const uint32_t (&qf)[C::kMTiles][C::kD / 16][4],
-                                         const T *sk, int lane) {
+__device__ __forceinline__ void
+qk_block(float (&s)[C::kMTiles][C::kBN / 8][4],
+         const uint32_t (&qf)[C::kMTiles][C::kD / 16][4], const T *sk,
+         int lane) {
   // -------------------------------------------------------------------------
   // TODO(1b) — s[mi][j] = (Q rows of tile mi) . (K rows 8j .. 8j+7)^T, i.e.
   // the 16x8 C fragment of S for keys 8j .. 8j+7 of this block (lesson §4.2).
@@ -152,8 +153,9 @@ __device__ __forceinline__ void qk_block(float (&s)[C::kMTiles][C::kBN / 8][4],
 // Set S to -inf where key >= n (tail) or, if causal, key > query.
 // C fragment element e of tile j: row group + 8 (e / 2), col 2 quad + e % 2.
 template <class C, bool kCausal>
-__device__ __forceinline__ void apply_mask(float (&s)[C::kMTiles][C::kBN / 8][4],
-                                           int row0, int k0, int n, int lane) {
+__device__ __forceinline__ void
+apply_mask(float (&s)[C::kMTiles][C::kBN / 8][4], int row0, int k0, int n,
+           int lane) {
 #pragma unroll
   for (int mi = 0; mi < C::kMTiles; ++mi)
 #pragma unroll
@@ -182,11 +184,10 @@ __device__ __forceinline__ void apply_mask(float (&s)[C::kMTiles][C::kBN / 8][4]
 // 4 lanes of the quad, so the partial sums rescale correctly on their own.
 // On return s holds P~ = exp(scale * (s - m_new)) and o, l are rescaled.
 template <class C>
-__device__ __forceinline__ void online_softmax(float (&s)[C::kMTiles][C::kBN / 8][4],
-                                               float (&o)[C::kMTiles][C::kD / 8][4],
-                                               float (&m)[C::kMTiles][2],
-                                               float (&l)[C::kMTiles][2],
-                                               float scale_log2) {
+__device__ __forceinline__ void
+online_softmax(float (&s)[C::kMTiles][C::kBN / 8][4],
+               float (&o)[C::kMTiles][C::kD / 8][4], float (&m)[C::kMTiles][2],
+               float (&l)[C::kMTiles][2], float scale_log2) {
   // -------------------------------------------------------------------------
   // TODO(2a) — for each of this lane's rows (mi, h), h = 0: row group,
   // h = 1: row group + 8 (C floats 2h and 2h+1 of every tile j):
@@ -206,9 +207,9 @@ __device__ __forceinline__ void online_softmax(float (&s)[C::kMTiles][C::kBN / 8
 // o += P~ . V for one block, with P~ (the s array after online_softmax)
 // taken straight from registers and V from shared memory.
 template <class T, class C>
-__device__ __forceinline__ void pv_block(float (&o)[C::kMTiles][C::kD / 8][4],
-                                         const float (&s)[C::kMTiles][C::kBN / 8][4],
-                                         const T *sv, int lane) {
+__device__ __forceinline__ void
+pv_block(float (&o)[C::kMTiles][C::kD / 8][4],
+         const float (&s)[C::kMTiles][C::kBN / 8][4], const T *sv, int lane) {
   // -------------------------------------------------------------------------
   // TODO(2b) — o[mi][dj] += P~[rows of tile mi][keys 16t .. 16t+15] .
   // V[keys 16t .. 16t+15][d 8dj .. 8dj+7], for t < kBN/16, dj < D/8.
@@ -252,7 +253,8 @@ __global__ void __launch_bounds__(C::kThreads) fa2_scores(Params p) {
   uint32_t qf[C::kMTiles][C::kD / 16][4];
   load_q<C>(qf, sq, w0, lane);
 
-  float *probe = p.probe + (static_cast<int64_t>(batch) * p.h + head) * p.n * p.n;
+  float *probe =
+      p.probe + (static_cast<int64_t>(batch) * p.h + head) * p.n * p.n;
   const int blocks = (p.n + C::kBN - 1) / C::kBN;
   for (int jb = 0; jb < blocks; ++jb) {
     const int k0 = jb * C::kBN;
@@ -273,7 +275,8 @@ __global__ void __launch_bounds__(C::kThreads) fa2_scores(Params p) {
           lab::FragCoord rc = lab::frag_c_coord(lane, e);
           const int row = q0 + w0 + mi * 16 + rc.row, key = k0 + j * 8 + rc.col;
           if (row < p.n && key < p.n)
-            probe[static_cast<int64_t>(row) * p.n + key] = s[mi][j][e] * p.scale;
+            probe[static_cast<int64_t>(row) * p.n + key] =
+                s[mi][j][e] * p.scale;
         }
   }
 }
@@ -309,7 +312,8 @@ __global__ void __launch_bounds__(C::kThreads) fa2_forward(Params p) {
     T *sk = skv + stage * 2 * C::kKVElems;
     const int64_t off = static_cast<int64_t>(jb) * C::kBN * stride;
     issue_rows<C, C::kBN>(sk, k + off, 0, n - jb * C::kBN, stride);
-    issue_rows<C, C::kBN>(sk + C::kKVElems, v + off, 0, n - jb * C::kBN, stride);
+    issue_rows<C, C::kBN>(sk + C::kKVElems, v + off, 0, n - jb * C::kBN,
+                          stride);
   };
 
   issue_rows<C, C::kBM>(sq, q + static_cast<int64_t>(q0) * stride, 0, n - q0,
@@ -419,8 +423,8 @@ template <class Kernel> void allow_smem(Kernel kernel, int bytes) {
 
 template <class T, int D>
 void launch(const lab::AttentionProblem &pr, cudaStream_t stream, bool setup) {
-  Params p{pr.q, pr.k, pr.v, pr.o, pr.lse, pr.probe, pr.n, pr.h, pr.scale,
-           pr.scale * 1.4426950408889634f};
+  Params p{pr.q,     pr.k, pr.v, pr.o,     pr.lse,
+           pr.probe, pr.n, pr.h, pr.scale, pr.scale * 1.4426950408889634f};
   using C1 = typename Pick<D, 1>::type;
   using C2 = typename Pick<D, 2>::type;
   auto grid = [&](int bm) { return dim3((pr.n + bm - 1) / bm, pr.h, pr.b); };
@@ -428,7 +432,8 @@ void launch(const lab::AttentionProblem &pr, cudaStream_t stream, bool setup) {
     if (setup)
       allow_smem(fa2_scores<T, C1>, C1::kSmemBytes);
     else
-      fa2_scores<T, C1><<<grid(C1::kBM), C1::kThreads, C1::kSmemBytes, stream>>>(p);
+      fa2_scores<T, C1>
+          <<<grid(C1::kBM), C1::kThreads, C1::kSmemBytes, stream>>>(p);
     return;
   }
   auto go = [&](auto kernel, auto cfg) {

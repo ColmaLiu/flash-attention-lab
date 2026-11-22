@@ -36,7 +36,8 @@ using bf16 = __nv_bfloat16;
 
 // ---------------------------------------------------------------------------
 // TODO(1a) — TMEM allocation (lesson §4.1). Executed by one whole warp.
-//   tmem_alloc:  tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [dst], ncols;
+//   tmem_alloc:  tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32
+//                [dst], ncols;
 //                ncols: power of 2, 32..512; the TMEM base address is
 //                written to shared *dst.
 //   tmem_relinquish_alloc_permit:
@@ -54,8 +55,10 @@ __device__ __forceinline__ void tmem_dealloc(uint32_t taddr, uint32_t ncols) {
 }
 
 // TMEM address of (lane, column) relative to an allocated base (given).
-__device__ __forceinline__ uint32_t tmem_addr(uint32_t base, int lane, int col) {
-  return base + (static_cast<uint32_t>(lane) << 16) + static_cast<uint32_t>(col);
+__device__ __forceinline__ uint32_t tmem_addr(uint32_t base, int lane,
+                                              int col) {
+  return base + (static_cast<uint32_t>(lane) << 16) +
+         static_cast<uint32_t>(col);
 }
 
 // ---------------------------------------------------------------------------
@@ -78,12 +81,15 @@ __device__ __forceinline__ uint32_t make_idesc(int m, int n) {
 
 // ---------------------------------------------------------------------------
 // TODO(1c) — MMA, commit, TMEM loads, fences (lesson §4.5–§4.7).
-//   mma_f16_ss: tcgen05.mma.cta_group::1.kind::f16 [d], a_desc, b_desc, idesc, p;
+//   mma_f16_ss: tcgen05.mma.cta_group::1.kind::f16
+//               [d], a_desc, b_desc, idesc, p;
 //     p is a predicate: true -> D += A.B^T, false -> D = A.B^T (set it from
 //     `accumulate` with setp inside the asm block).
-//   tcgen05_commit: tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [bar];
-//   tmem_ld_32x32b_x32: tcgen05.ld.sync.aligned.32x32b.x32.b32 {32 regs}, [taddr];
-//     ("=f" outputs v[0..31]).
+//   tcgen05_commit:
+//     tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64
+//     [bar];
+//   tmem_ld_32x32b_x32: tcgen05.ld.sync.aligned.32x32b.x32.b32
+//     {32 regs}, [taddr]; ("=f" outputs v[0..31]).
 //   tmem_wait_ld: tcgen05.wait::ld.sync.aligned;
 //   tcgen05_fence_before_thread_sync: tcgen05.fence::before_thread_sync;
 //   tcgen05_fence_after_thread_sync:  tcgen05.fence::after_thread_sync;
@@ -110,9 +116,9 @@ __device__ __forceinline__ void tcgen05_fence_after_thread_sync() {
   LAB_TODO(1);
 }
 
-constexpr int kBM = 128;  // MMA M: one TMEM lane per row of C
-constexpr int kBK = 64;   // 64 BF16 = 128 bytes: one 128B swizzle row
-constexpr int kUmmaK = 16; // K of one tcgen05.mma for 16-bit inputs
+constexpr int kBM = 128;      // MMA M: one TMEM lane per row of C
+constexpr int kBK = 64;       // 64 BF16 = 128 bytes: one 128B swizzle row
+constexpr int kUmmaK = 16;    // K of one tcgen05.mma for 16-bit inputs
 constexpr int kThreads = 128; // 4 warps = the 128 TMEM lanes
 
 __device__ __forceinline__ uint8_t *align_1024(uint8_t *p) {
@@ -205,7 +211,8 @@ __global__ void __launch_bounds__(kThreads)
     lab::mbar_init(&mma_done, 1);
     lab::fence_barrier_init();
   }
-  const uint32_t tmem = setup_tmem(&tmem_slot, kOneBN); // includes __syncthreads
+  // setup_tmem includes a __syncthreads.
+  const uint32_t tmem = setup_tmem(&tmem_slot, kOneBN);
   LAB_TODO(1);
 }
 
@@ -363,9 +370,9 @@ Plan make_plan(const lab::GemmProblem &p) {
   plan.a_map = operand_map(p.a, p.m, p.k, kBM);
   plan.b_map = operand_map(p.b, p.n, p.k, bn);
   // C: FP32 [m, n], 32 x 32 boxes (128-byte rows), 128B swizzle.
-  plan.c_map = lab::make_tensor_map_2d(p.c, CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
-                                       p.m, p.n, 32, 32,
-                                       CU_TENSOR_MAP_SWIZZLE_128B);
+  plan.c_map =
+      lab::make_tensor_map_2d(p.c, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, p.m, p.n,
+                              32, 32, CU_TENSOR_MAP_SWIZZLE_128B);
   return plan;
 }
 
@@ -381,14 +388,14 @@ void run(const Plan &plan, const lab::GemmProblem &p, cudaStream_t stream) {
                                                      p.m, p.n);
     break;
   case 2:
-    gemm_pipelined<Step2><<<grid_of<Step2>(p), kThreads, Step2::kSmemBytes,
-                            stream>>>(plan.a_map, plan.b_map, plan.c_map, c,
-                                      p.m, p.n, p.k);
+    gemm_pipelined<Step2>
+        <<<grid_of<Step2>(p), kThreads, Step2::kSmemBytes, stream>>>(
+            plan.a_map, plan.b_map, plan.c_map, c, p.m, p.n, p.k);
     break;
   default:
-    gemm_pipelined<Step3><<<grid_of<Step3>(p), kThreads, Step3::kSmemBytes,
-                            stream>>>(plan.a_map, plan.b_map, plan.c_map, c,
-                                      p.m, p.n, p.k);
+    gemm_pipelined<Step3>
+        <<<grid_of<Step3>(p), kThreads, Step3::kSmemBytes, stream>>>(
+            plan.a_map, plan.b_map, plan.c_map, c, p.m, p.n, p.k);
     break;
   }
 }

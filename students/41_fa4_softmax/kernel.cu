@@ -78,7 +78,8 @@ __device__ __forceinline__ float2 exp2_poly2(float2 x) {
   //  1. clamp: x = max(x, -127) (masked keys arrive as -inf);
   //  2. r = x + 1.5 * 2^23 rounded DOWN (__fadd2_rd): the low mantissa
   //     bits of r now hold n = floor(x) as an integer;
-  //  3. n = r - 1.5 * 2^23 (exact), f = x - n in [0, 1] (one FFMA2: n * -1 + x);
+  //  3. n = r - 1.5 * 2^23 (exact), f = x - n in [0, 1]
+  //     (one FFMA2: n * -1 + x);
   //  4. p = ((c3 f + c2) f + c1) f + c0 (Horner, __ffma2_rn, kExp2C*);
   //  5. add n to p's exponent field (bits 23-30) with integer arithmetic
   //     on the bit patterns (__float_as_int / __int_as_float); n is
@@ -317,8 +318,8 @@ __device__ __forceinline__ float exp_and_sum(float (&s)[kBN], float scale_log2,
     s[c + 1] = x.y;
     sum[(c / 2) % 4] = __fadd2_rn(sum[(c / 2) % 4], x);
   }
-  const float2 t = __fadd2_rn(__fadd2_rn(sum[0], sum[1]),
-                              __fadd2_rn(sum[2], sum[3]));
+  const float2 t =
+      __fadd2_rn(__fadd2_rn(sum[0], sum[1]), __fadd2_rn(sum[2], sum[3]));
   return t.x + t.y;
 }
 
@@ -570,8 +571,8 @@ __global__ void __launch_bounds__(C::kThreads, 1)
         LAB_TODO(3);
       } else {
         // Always move the base (labs 22-40). Block 0: alpha = 0.
-        alpha = m_new == -INFINITY ? 1.f
-                                   : exp2_approx((m - m_new) * p.scale_log2);
+        alpha =
+            m_new == -INFINITY ? 1.f : exp2_approx((m - m_new) * p.scale_log2);
         m = m_new;
       }
       const float base = m == -INFINITY ? 0.f : m * p.scale_log2;
@@ -621,8 +622,8 @@ __global__ void __launch_bounds__(C::kThreads, 1)
       lab::mbar_wait(&bar.final_full[t], 0);
       lab::mbar_wait(&bar.o_full[t], 0);
       lab::tcgen05_fence_after_thread_sync();
-      store_o_and_lse<T, C>(&o_map, sq(t), lane_addr + C::kOCol + t * C::kD,
-                            r, head, batch, q0 + t * kBM, st.fin_m[t][r],
+      store_o_and_lse<T, C>(&o_map, sq(t), lane_addr + C::kOCol + t * C::kD, r,
+                            head, batch, q0 + t * kBM, st.fin_m[t][r],
                             st.fin_l[t][r], p);
     }
   }

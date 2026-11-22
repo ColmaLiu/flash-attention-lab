@@ -64,8 +64,12 @@ __device__ __forceinline__ uint32_t num_clusters_x() {
   LAB_TODO(1);
   return 0;
 }
-__device__ __forceinline__ void cluster_arrive() { LAB_TODO(1); }
-__device__ __forceinline__ void cluster_wait() { LAB_TODO(1); }
+__device__ __forceinline__ void cluster_arrive() {
+  LAB_TODO(1);
+}
+__device__ __forceinline__ void cluster_wait() {
+  LAB_TODO(1);
+}
 __device__ __forceinline__ void cluster_sync() { // given
   cluster_arrive();
   cluster_wait();
@@ -90,13 +94,11 @@ __device__ __forceinline__ uint32_t map_shared_rank(const void *p,
 //     tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster
 //         .multicast::cluster.b64 [bar], cta_mask;
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ void tma_load_2d_cg2(void *dst,
-                                                const CUtensorMap *map,
-                                                uint32_t bar, int x, int y) {
+__device__ __forceinline__ void
+tma_load_2d_cg2(void *dst, const CUtensorMap *map, uint32_t bar, int x, int y) {
   LAB_TODO(1);
 }
-__device__ __forceinline__ void tmem_alloc_cg2(uint32_t *dst,
-                                               uint32_t ncols) {
+__device__ __forceinline__ void tmem_alloc_cg2(uint32_t *dst, uint32_t ncols) {
   LAB_TODO(1);
 }
 __device__ __forceinline__ void tmem_relinquish_alloc_permit_cg2() {
@@ -106,14 +108,13 @@ __device__ __forceinline__ void tmem_dealloc_cg2(uint32_t taddr,
                                                  uint32_t ncols) {
   LAB_TODO(1);
 }
-__device__ __forceinline__ void mma_f16_ss_cg2(uint32_t d_tmem,
-                                               uint64_t a_desc,
+__device__ __forceinline__ void mma_f16_ss_cg2(uint32_t d_tmem, uint64_t a_desc,
                                                uint64_t b_desc, uint32_t idesc,
                                                bool accumulate) {
   LAB_TODO(1);
 }
-__device__ __forceinline__ void tcgen05_commit_cg2_multicast(
-    uint64_t *bar, uint16_t cta_mask) {
+__device__ __forceinline__ void
+tcgen05_commit_cg2_multicast(uint64_t *bar, uint16_t cta_mask) {
   LAB_TODO(1);
 }
 
@@ -188,13 +189,13 @@ namespace {
 
 using bf16 = __nv_bfloat16;
 
-constexpr int kBM = 128;          // rows of C per CTA (= TMEM lanes)
-constexpr int kPairM = 2 * kBM;   // MMA M of the pair
-constexpr int kBN = 256;          // MMA N (columns of C per tile)
-constexpr int kHalfN = kBN / 2;   // B rows held by each CTA
-constexpr int kBK = 64;           // 64 BF16 = one 128-byte swizzle row
-constexpr int kUmmaK = 16;        // K of one tcgen05.mma for 16-bit inputs
-constexpr int kPairSize = 2;      // CTAs per pair
+constexpr int kBM = 128;        // rows of C per CTA (= TMEM lanes)
+constexpr int kPairM = 2 * kBM; // MMA M of the pair
+constexpr int kBN = 256;        // MMA N (columns of C per tile)
+constexpr int kHalfN = kBN / 2; // B rows held by each CTA
+constexpr int kBK = 64;         // 64 BF16 = one 128-byte swizzle row
+constexpr int kUmmaK = 16;      // K of one tcgen05.mma for 16-bit inputs
+constexpr int kPairSize = 2;    // CTAs per pair
 
 constexpr int kEpilogueWarps = 4;
 constexpr int kProducerWarp = 4;
@@ -208,8 +209,7 @@ constexpr int kStagingBytes = kEpilogueWarps * 2 * kBoxFloats * 4; // 32 KB
 // Bytes one CTA's TMA loads bring per stage: A half + B half.
 constexpr int kStageBytes = (kBM + kHalfN) * kBK * 2; // 32 KB
 
-template <int Stages, int AccStages, int GroupM, int Pairs = 1>
-struct Config {
+template <int Stages, int AccStages, int GroupM, int Pairs = 1> struct Config {
   static constexpr int kStages = Stages, kAccStages = AccStages;
   static constexpr int kGroupM = GroupM; // 0: row-major tile order
   // Pairs = 2: a cluster of 4 CTAs = two pairs side by side along N (same
@@ -249,7 +249,9 @@ template <class Cfg> struct Smem {
   __device__ bf16 *a(int s) const {
     return reinterpret_cast<bf16 *>(stages + s * kStageBytes);
   }
-  __device__ bf16 *b(int s) const { return a(s) + kBM * kBK; }
+  __device__ bf16 *b(int s) const {
+    return a(s) + kBM * kBK;
+  }
 };
 
 template <int N> struct RingPos {
@@ -265,8 +267,8 @@ template <int N> struct RingPos {
 
 // Who am I in the cluster.
 struct PairInfo {
-  uint32_t rank;   // 0 = leader, 1 = peer (rank inside the pair)
-  uint32_t pair;   // which pair of the cluster (0 when Pairs = 1)
+  uint32_t rank;        // 0 = leader, 1 = peer (rank inside the pair)
+  uint32_t pair;        // which pair of the cluster (0 when Pairs = 1)
   uint32_t leader_rank; // cluster rank of our pair's leader
   bool leader;
   __device__ static PairInfo get() {
@@ -354,10 +356,9 @@ __device__ __forceinline__ void producer_drain(const Smem<Cfg> &sm,
 // commit is multicast to both CTAs of the pair.
 // ---------------------------------------------------------------------------
 template <class Cfg>
-__device__ __forceinline__ void mma_tile(const Smem<Cfg> &sm,
-                                         RingPos<Cfg::kStages> &ring,
-                                         uint32_t acc_tmem, uint64_t *acc_done,
-                                         uint16_t pair_mask, int k_tiles) {
+__device__ __forceinline__ void
+mma_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring, uint32_t acc_tmem,
+         uint64_t *acc_done, uint16_t pair_mask, int k_tiles) {
   // -------------------------------------------------------------------------
   // TODO(1g) — pair MMA issuer (lesson §5.2): lab 32's mma_tile with
   //   - mma_k_tile_pair instead of mma_k_tile;
@@ -375,11 +376,9 @@ __device__ __forceinline__ void mma_tile(const Smem<Cfg> &sm,
 // .shared::cluster address of our pair leader's acc_empty) receives one
 // arrival per thread after its last TMEM read.
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ void epilogue_tile(uint32_t acc_tmem,
-                                              float *warp_staging, int &box,
-                                              bool release, uint32_t acc_free,
-                                              const CUtensorMap *c_map, int m0,
-                                              int n0) {
+__device__ __forceinline__ void
+epilogue_tile(uint32_t acc_tmem, float *warp_staging, int &box, bool release,
+              uint32_t acc_free, const CUtensorMap *c_map, int m0, int n0) {
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
 #pragma unroll 1
   for (int j = 0; j < kBN / 32; ++j) {
@@ -428,7 +427,7 @@ __device__ __forceinline__ uint32_t setup(Smem<Cfg> &sm, uint32_t *tmem_slot,
   const int warp = threadIdx.x / 32;
   if (threadIdx.x == 0) {
     for (int s = 0; s < Cfg::kStages; ++s) {
-      lab::mbar_init(&sm.full[s], 1);  // leader's arrive_expect_tx (+ bytes)
+      lab::mbar_init(&sm.full[s], 1); // leader's arrive_expect_tx (+ bytes)
       // multicast commit of every pair leader that reads this CTA's loads
       lab::mbar_init(&sm.empty[s], Cfg::kPairs);
     }
@@ -664,12 +663,12 @@ Plan make_plan(const lab::GemmProblem &p) {
   allow_smem(gemm_pair_tile<Step1>, Step1::kSmemBytes);
   allow_smem(gemm_pair_persistent<Step2>, Step2::kSmemBytes);
   allow_smem(gemm_pair_persistent<Step3>, Step3::kSmemBytes);
-  plan.clusters2 = lab::max_active_clusters(gemm_pair_persistent<Step2>,
-                                            dim3(kThreads), Step2::kSmemBytes,
-                                            Step2::kClusterSize);
-  plan.clusters3 = lab::max_active_clusters(gemm_pair_persistent<Step3>,
-                                            dim3(kThreads), Step3::kSmemBytes,
-                                            Step3::kClusterSize);
+  plan.clusters2 =
+      lab::max_active_clusters(gemm_pair_persistent<Step2>, dim3(kThreads),
+                               Step2::kSmemBytes, Step2::kClusterSize);
+  plan.clusters3 =
+      lab::max_active_clusters(gemm_pair_persistent<Step3>, dim3(kThreads),
+                               Step3::kSmemBytes, Step3::kClusterSize);
   LAB_REQUIRE(plan.clusters2 > 0 && plan.clusters3 > 0,
               "no 2-CTA cluster fits on this GPU");
   plan.a_map = operand_map(p.a, p.m, p.k, kBM);
@@ -682,9 +681,8 @@ Plan make_plan(const lab::GemmProblem &p) {
 }
 
 template <class Cfg>
-void launch_persistent(const Plan &plan, const CUtensorMap &a_map,
-                       int clusters, const lab::GemmProblem &p,
-                       cudaStream_t stream) {
+void launch_persistent(const Plan &plan, const CUtensorMap &a_map, int clusters,
+                       const lab::GemmProblem &p, cudaStream_t stream) {
   const int tiles = ((p.m + kPairM - 1) / kPairM) *
                     ((p.n + Cfg::kClusterN - 1) / Cfg::kClusterN);
   const int grid = Cfg::kClusterSize * std::min(tiles, clusters);
@@ -696,11 +694,10 @@ void launch_persistent(const Plan &plan, const CUtensorMap &a_map,
 void run(const Plan &plan, const lab::GemmProblem &p, cudaStream_t stream) {
   switch (p.step) {
   case 1:
-    lab::launch_cluster(gemm_pair_tile<Step1>,
-                        dim3(Step1::kClusterSize * num_tiles(p)),
-                        dim3(kThreads), Step1::kSmemBytes, stream,
-                        Step1::kClusterSize, plan.a_map,
-                        plan.b_map, plan.c_map, p.n, p.k);
+    lab::launch_cluster(
+        gemm_pair_tile<Step1>, dim3(Step1::kClusterSize * num_tiles(p)),
+        dim3(kThreads), Step1::kSmemBytes, stream, Step1::kClusterSize,
+        plan.a_map, plan.b_map, plan.c_map, p.n, p.k);
     break;
   case 2:
     launch_persistent<Step2>(plan, plan.a_map, plan.clusters2, p, stream);

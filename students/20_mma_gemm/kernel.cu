@@ -3,7 +3,8 @@
 //
 // A is [M, K], B is [N, K], both BF16, row-major (K fastest, "K-major");
 // C is [M, N] FP32, row-major:
-//   A[m][k] is at a[m * K + k],  B[n][k] at b[n * K + k],  C[m][n] at c[m * N + n].
+//   A[m][k] is at a[m * K + k],  B[n][k] at b[n * K + k],
+//   C[m][n] at c[m * N + n].
 // Supported: K % 8 == 0 (rows are whole 16-byte chunks); step 1 also needs
 // M % 16 == 0, N % 8 == 0, K % 16 == 0. make_plan rejects anything else.
 // run() picks a version by p.step:  ./lab bench 20 --step 1 ... --step 3
@@ -130,8 +131,8 @@ constexpr int kChunks = kBK / 8; // 16-byte chunks per tile row (= 4)
 
 // Element offset of (row, col) in a [rows][kBK] shared tile; col is a
 // multiple of 8 (we only address whole 16-byte chunks).
-template <bool kSwizzle> __device__ __forceinline__ int tile_offset(int row,
-                                                                   int col) {
+template <bool kSwizzle>
+__device__ __forceinline__ int tile_offset(int row, int col) {
   int chunk = col / 8;
   if constexpr (kSwizzle)
     chunk = swizzle_chunk4(row, chunk);
