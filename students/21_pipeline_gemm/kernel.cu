@@ -4,7 +4,8 @@
 //
 // A is [M, K], B is [N, K], both BF16, row-major (K fastest, "K-major");
 // C is [M, N] FP32, row-major:
-//   A[m][k] is at a[m * K + k],  B[n][k] at b[n * K + k],  C[m][n] at c[m * N + n].
+//   A[m][k] is at a[m * K + k],  B[n][k] at b[n * K + k],
+//   C[m][n] at c[m * N + n].
 // Supported: K % 8 == 0 (a 16-byte copy never straddles the end of a row).
 // make_plan rejects anything else. Shared tiles are K-major with XOR-swizzled
 // 16-byte chunks (lab 20), one "stage" = one A tile followed by one B tile.
@@ -66,7 +67,8 @@ struct Config {
 };
 
 // Element offset of (row, col) in a swizzled [rows][kBK] tile (col % 8 == 0).
-template <class C> __device__ __forceinline__ int tile_offset(int row, int col) {
+template <class C>
+__device__ __forceinline__ int tile_offset(int row, int col) {
   return row * C::kBK + lab::swizzle_chunk<C::kChunks>(row, col / 8) * 8 +
          col % 8;
 }
@@ -89,8 +91,8 @@ __device__ __forceinline__ void issue_tile(bf16 *s, const bf16 *g, int rows,
 
 template <class C>
 __device__ __forceinline__ void issue_stage(bf16 *stage, const bf16 *a,
-                                            const bf16 *b, int m, int n,
-                                            int k, int m0, int n0, int k0) {
+                                            const bf16 *b, int m, int n, int k,
+                                            int m0, int n0, int k0) {
   issue_tile<C, C::kBM>(stage, a, m, k, m0, k0);
   issue_tile<C, C::kBN>(stage + C::kBM * C::kBK, b, n, k, n0, k0);
 }
@@ -111,9 +113,9 @@ __device__ __forceinline__ void compute_stage(const bf16 *stage,
 #pragma unroll
     for (int j = 0; j < C::kNJ; j += 2) {
       uint32_t r[4];
-      lab::ldmatrix_x4(r, sb + tile_offset<C>(wn + j * 8 + lane % 8 +
-                                                  lane / 16 * 8,
-                                              kk + (lane / 8) % 2 * 8));
+      lab::ldmatrix_x4(
+          r, sb + tile_offset<C>(wn + j * 8 + lane % 8 + lane / 16 * 8,
+                                 kk + (lane / 8) % 2 * 8));
       bfr[j][0] = r[0];
       bfr[j][1] = r[1];
       bfr[j + 1][0] = r[2];
@@ -128,8 +130,8 @@ __device__ __forceinline__ void compute_stage(const bf16 *stage,
 }
 
 template <class C>
-__device__ __forceinline__ void store_c(float *c, int m, int n, int m0,
-                                        int n0, int wm, int wn, int lane,
+__device__ __forceinline__ void store_c(float *c, int m, int n, int m0, int n0,
+                                        int wm, int wn, int lane,
                                         const float (&acc)[C::kMI][C::kNJ][4]) {
 #pragma unroll
   for (int i = 0; i < C::kMI; ++i)
@@ -147,8 +149,8 @@ __device__ __forceinline__ void store_c(float *c, int m, int n, int m0,
 
 // Map the linear CTA index to a (tile_m, tile_n).
 template <int kGroup>
-__device__ __forceinline__ void tile_coords(int tiles_m, int tiles_n,
-                                            int &tm, int &tn) {
+__device__ __forceinline__ void tile_coords(int tiles_m, int tiles_n, int &tm,
+                                            int &tn) {
   const int pid = blockIdx.x;
   if constexpr (kGroup <= 1) {
     // Row by row: consecutive CTAs walk along N.

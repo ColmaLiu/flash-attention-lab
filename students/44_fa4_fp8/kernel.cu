@@ -23,7 +23,8 @@
 //     D = 128, 64B for D = 64), a single panel per tile; UINT8 tensor maps;
 //   - O is BF16 and is staged over Q^0 + Q^1 (2 * 128 * D bytes);
 //   - new header functions (include/lab/tcgen05.cuh): lab::mma_f8f6f4_ss,
-//     lab::mma_f8f6f4_ts, lab::make_idesc_f8f6f4, lab::make_smem_desc_kmajor_sw64,
+//     lab::mma_f8f6f4_ts, lab::make_idesc_f8f6f4,
+//     lab::make_smem_desc_kmajor_sw64,
 //     lab::make_smem_desc_mnmajor_sw64.
 #include "lab/lab.h"
 #include "lab/mbarrier.cuh"
@@ -74,11 +75,15 @@ __device__ __forceinline__ uint32_t pack2_bf16(float x, float y) {
 __device__ __forceinline__ uint32_t pack4_e4m3(float x0, float x1, float x2,
                                                float x3) {
   // TODO(2a) -- lesson section 4.4. Two instructions
-  //   asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(u16) : "f"(a), "f"(b));
+  //   asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;"
+  //       : "=h"(u16) : "f"(a), "f"(b));
   // each convert two floats into a 16-bit pair -- mind which operand lands
   // in which byte (see the comment above) -- then combine the two pairs
   // into one word with x0 in byte 0 and x3 in byte 3.
-  (void)x0; (void)x1; (void)x2; (void)x3;
+  (void)x0;
+  (void)x1;
+  (void)x2;
+  (void)x3;
   LAB_TODO(2);
   return 0;
 }
@@ -210,7 +215,9 @@ __device__ __forceinline__ void mma_qk(uint32_t s_tmem, const fp8 *sq,
   //    32 kk + 31 of every row: how many BYTES further does it start, and
   //    what is that in descriptor start-address units (16 bytes)?
   //  - the first MMA overwrites S, the others accumulate.
-  (void)s_tmem; (void)sq; (void)sk;
+  (void)s_tmem;
+  (void)sq;
+  (void)sk;
   LAB_TODO(1);
 }
 
@@ -228,7 +235,10 @@ __device__ __forceinline__ void mma_pv_ts(uint32_t o_tmem, uint32_t p_tmem,
   //    further does it start in P (four keys per column), and how many
   //    bytes further in V (one D-byte row per key)?
   //  - the first MMA accumulates only if `accumulate`.
-  (void)o_tmem; (void)p_tmem; (void)sv; (void)accumulate;
+  (void)o_tmem;
+  (void)p_tmem;
+  (void)sv;
+  (void)accumulate;
   LAB_TODO(2);
 }
 
@@ -294,7 +304,12 @@ __device__ __forceinline__ void write_probe(const Params &p, int batch,
   // `row` and key k0 + c. Write it in real units (scale * Q . K, see
   // TODO(1a)) to p.probe[b][h][row][key] ([B, H, N, N] FP32, p.h heads,
   // p.n rows and keys), only for row < p.n and key < p.n. No mask.
-  (void)p; (void)batch; (void)head; (void)row; (void)k0; (void)s;
+  (void)p;
+  (void)batch;
+  (void)head;
+  (void)row;
+  (void)k0;
+  (void)s;
   LAB_TODO(1);
 }
 
@@ -316,7 +331,8 @@ __device__ __forceinline__ float write_p_tmem(uint32_t p_addr,
   // FP32 sum of the E4M3 values just stored (add_e4m3x4 adds the four
   // values of one word to an FP32 accumulator; use a few independent
   // partial sums). Leave the step-2 path returning 0.
-  (void)p_addr; (void)s;
+  (void)p_addr;
+  (void)s;
   LAB_TODO(2);
   if constexpr (kQuantL) {
     LAB_TODO(3);
@@ -382,7 +398,8 @@ store_o_and_lse(const CUtensorMap *o_map, bf16 *so, uint32_t o_addr, int r,
   if (row < p.n) {
     // TODO(2c, continued): LSE of the REAL scores from the raw maximum m
     // and the FP32 sum l (which also carries 2^8). ln 2 = 0.6931471805599453.
-    (void)m; (void)l;
+    (void)m;
+    (void)l;
     LAB_TODO(2);
   }
 }

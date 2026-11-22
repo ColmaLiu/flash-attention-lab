@@ -39,17 +39,23 @@ __device__ __forceinline__ uint32_t shared_addr(const void *p) {
 //                         phase 0, `count` arrivals expected per phase.
 //   fence_barrier_init:   fence.mbarrier_init.release.cluster;
 //                         makes the init visible to the async proxy (TMA).
-//   mbar_arrive_expect_tx: mbarrier.arrive.expect_tx.shared::cta.b64 _, [bar], bytes;
-//                         add `bytes` to the phase's tx-count, then arrive once.
-//   mbar_wait:            loop on mbarrier.try_wait.parity.shared::cta.b64 p, [bar], parity;
+//   mbar_arrive_expect_tx:
+//                         mbarrier.arrive.expect_tx.shared::cta.b64 _, [bar],
+//                         bytes;
+//                         add `bytes` to the phase's tx-count; arrive once.
+//   mbar_wait:            loop on
+//                         mbarrier.try_wait.parity.shared::cta.b64 p, [bar],
+//                         parity;
 //                         until the phase with this parity has completed.
 //   fence_proxy_async:    fence.proxy.async.shared::cta;
 //                         orders this thread's generic shared-memory writes
 //                         before later async-proxy (TMA) reads.
-//   tma_load_2d:   cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes
+//   tma_load_2d:   cp.async.bulk.tensor.2d.shared::cluster.global
+//                    .mbarrier::complete_tx::bytes
 //                  [dst], [map, {x, y}], [bar];
 //                  box with origin (x, y) -> shared dst; complete_tx on bar.
-//   tma_store_2d:  cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [map, {x, y}], [src];
+//   tma_store_2d:  cp.async.bulk.tensor.2d.global.shared::cta.bulk_group
+//                  [map, {x, y}], [src];
 //   bulk_commit_group:   cp.async.bulk.commit_group;
 //   bulk_wait_group<N>:  cp.async.bulk.wait_group N;   ("n" constraint)
 //                  at most N of this thread's store groups still pending.
@@ -159,18 +165,17 @@ __global__ void __launch_bounds__(kOneTileThreads)
 // Steps 2 and 3: persistent CTAs, a ring of input buffers.
 // ===========================================================================
 template <int Rows, int Stages, bool Swizzle> struct Config {
-  static constexpr int kRows = Rows;       // input tile: kRows x 32 floats
-  static constexpr int kStages = Stages;   // input buffers in the ring
+  static constexpr int kRows = Rows;     // input tile: kRows x 32 floats
+  static constexpr int kStages = Stages; // input buffers in the ring
   static constexpr bool kSwizzle = Swizzle;
   static constexpr int kConsumers = Rows / 32; // one 32x32 slice per warp
   static constexpr int kThreads = 32 * (1 + kConsumers);
   static constexpr int kInBytes = Rows * kTile * 4;
   static constexpr int kOutBytes = kTile * kTile * 4; // one 32x32 box
-  static constexpr int kOutBufs = 2; // per consumer warp
-  static constexpr int kSmemBytes = 1024 /* alignment slack */ +
-                                    Stages * kInBytes +
-                                    kConsumers * kOutBufs * kOutBytes +
-                                    2 * Stages * 8 /* barriers */;
+  static constexpr int kOutBufs = 2;                  // per consumer warp
+  static constexpr int kSmemBytes =
+      1024 /* alignment slack */ + Stages * kInBytes +
+      kConsumers * kOutBufs * kOutBytes + 2 * Stages * 8 /* barriers */;
   static_assert(Rows % 32 == 0 && Rows <= 256, "TMA box height <= 256");
 };
 
@@ -295,11 +300,13 @@ template <class Cfg> int persistent_grid(int rows, int cols) {
   LAB_REQUIRE(per_sm > 0, "configuration does not fit on an SM");
   const long tiles = static_cast<long>((rows + Cfg::kRows - 1) / Cfg::kRows) *
                      ((cols + kTile - 1) / kTile);
-  return static_cast<int>(std::min<long>(tiles, static_cast<long>(sms) * per_sm));
+  return static_cast<int>(
+      std::min<long>(tiles, static_cast<long>(sms) * per_sm));
 }
 
 template <class Cfg> CUtensorMapSwizzle swizzle_of() {
-  return Cfg::kSwizzle ? CU_TENSOR_MAP_SWIZZLE_128B : CU_TENSOR_MAP_SWIZZLE_NONE;
+  return Cfg::kSwizzle ? CU_TENSOR_MAP_SWIZZLE_128B
+                       : CU_TENSOR_MAP_SWIZZLE_NONE;
 }
 
 } // namespace
@@ -323,15 +330,15 @@ Plan make_plan(const lab::TransposeProblem &p) {
     allow_smem(transpose_pipelined<Step2>, Step2::kSmemBytes);
     plan.x_map = encode_2d(p.x, p.rows, p.cols, Step2::kRows, kTile,
                            swizzle_of<Step2>());
-    plan.y_map = encode_2d(p.y, p.cols, p.rows, kTile, kTile,
-                           swizzle_of<Step2>());
+    plan.y_map =
+        encode_2d(p.y, p.cols, p.rows, kTile, kTile, swizzle_of<Step2>());
     plan.grid = persistent_grid<Step2>(p.rows, p.cols);
   } else {
     allow_smem(transpose_pipelined<Step3>, Step3::kSmemBytes);
     plan.x_map = encode_2d(p.x, p.rows, p.cols, Step3::kRows, kTile,
                            swizzle_of<Step3>());
-    plan.y_map = encode_2d(p.y, p.cols, p.rows, kTile, kTile,
-                           swizzle_of<Step3>());
+    plan.y_map =
+        encode_2d(p.y, p.cols, p.rows, kTile, kTile, swizzle_of<Step3>());
     plan.grid = persistent_grid<Step3>(p.rows, p.cols);
   }
   return plan;
@@ -347,14 +354,14 @@ void run(const Plan &plan, const lab::TransposeProblem &p,
     break;
   }
   case 2:
-    transpose_pipelined<Step2><<<plan.grid, Step2::kThreads,
-                                 Step2::kSmemBytes, stream>>>(
-        plan.x_map, plan.y_map, p.rows, p.cols);
+    transpose_pipelined<Step2>
+        <<<plan.grid, Step2::kThreads, Step2::kSmemBytes, stream>>>(
+            plan.x_map, plan.y_map, p.rows, p.cols);
     break;
   default:
-    transpose_pipelined<Step3><<<plan.grid, Step3::kThreads,
-                                 Step3::kSmemBytes, stream>>>(
-        plan.x_map, plan.y_map, p.rows, p.cols);
+    transpose_pipelined<Step3>
+        <<<plan.grid, Step3::kThreads, Step3::kSmemBytes, stream>>>(
+            plan.x_map, plan.y_map, p.rows, p.cols);
     break;
   }
 }

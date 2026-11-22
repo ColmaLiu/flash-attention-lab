@@ -35,9 +35,9 @@ __global__ void gemm_naive(const float *__restrict__ a,
 // the 32 x 32 tile of C whose top-left element is
 // (m0, n0) = (blockIdx.y * 32, blockIdx.x * 32); thread (tx, ty) owns
 // C[m0 + ty][n0 + tx]. Loop over K in slices of width kTile = 32:
-//   1. Load as[ty][tx] = A[m0 + ty][k0 + tx] and bs[ty][tx] = B[n0 + ty][k0 + tx]
-//      (lanes read consecutive k: coalesced). Store 0 for elements outside
-//      A or B, so the tail slice adds nothing.
+//   1. Load as[ty][tx] = A[m0 + ty][k0 + tx] and
+//      bs[ty][tx] = B[n0 + ty][k0 + tx] (lanes read consecutive k: coalesced).
+//      Store 0 for elements outside A or B, so the tail slice adds nothing.
 //   2. __syncthreads()
 //   3. acc += as[ty][kk] * bs[tx][kk] for kk in 0..31
 //   4. __syncthreads() — why is this second one needed?
@@ -131,10 +131,14 @@ __device__ __forceinline__ float4 load4(const float *__restrict__ src, int row,
   const float *p = src + static_cast<int64_t>(row) * cols + col;
   if (vec && col + 3 < cols)
     return *reinterpret_cast<const float4 *>(p);
-  if (col + 0 < cols) v.x = p[0];
-  if (col + 1 < cols) v.y = p[1];
-  if (col + 2 < cols) v.z = p[2];
-  if (col + 3 < cols) v.w = p[3];
+  if (col + 0 < cols)
+    v.x = p[0];
+  if (col + 1 < cols)
+    v.y = p[1];
+  if (col + 2 < cols)
+    v.z = p[2];
+  if (col + 3 < cols)
+    v.w = p[3];
   return v;
 }
 
@@ -150,10 +154,14 @@ __device__ __forceinline__ void store4(float *__restrict__ dst, int row,
     *reinterpret_cast<float4 *>(p) = v;
     return;
   }
-  if (col + 0 < cols) p[0] = v.x;
-  if (col + 1 < cols) p[1] = v.y;
-  if (col + 2 < cols) p[2] = v.z;
-  if (col + 3 < cols) p[3] = v.w;
+  if (col + 0 < cols)
+    p[0] = v.x;
+  if (col + 1 < cols)
+    p[1] = v.y;
+  if (col + 2 < cols)
+    p[2] = v.z;
+  if (col + 3 < cols)
+    p[3] = v.w;
 }
 
 // ---------------------------------------------------------------------------

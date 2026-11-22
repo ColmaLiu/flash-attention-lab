@@ -57,8 +57,8 @@ void launch_tiled(const float *x, float *y, int rows, int cols,
                   cudaStream_t stream) {
   dim3 block(32, kThreadsY);
   dim3 grid((cols + kTile - 1) / kTile, (rows + kTile - 1) / kTile);
-  transpose_tiled<kPad, kThreadsY><<<grid, block, 0, stream>>>(x, y, rows,
-                                                               cols);
+  transpose_tiled<kPad, kThreadsY>
+      <<<grid, block, 0, stream>>>(x, y, rows, cols);
 }
 
 } // namespace
