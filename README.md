@@ -95,7 +95,7 @@ The first digit of a lab ID is the "Part": Part 0 is the preliminaries, and Part
 | [43_fa4_schedule](course/43_fa4_schedule/README.md) | Scheduling and causal | Block classification, persistent, LPT ordering |
 | [44_fa4_fp8](course/44_fa4_fp8/README.md) | FP8 forward | E4M3 quantization, descale, `kind::f8f6f4` |
 
-Work through the labs in order. Each lesson lists its prerequisite labs at the top. The design of Part 4 is in [design doc §3](docs/design-v2.md#3-course-map).
+Work through the labs in order. Each lesson lists its prerequisite labs at the top.
 
 ## How to work through a lab
 
@@ -162,4 +162,3 @@ The primitives in `include/lab/` follow "what you wrote earlier is provided late
 | [Environment and dependencies](docs/environment.md) | Install flags, `LAB_GPU`, CUDA versions, the FA4 baseline |
 | [Upstream sources](docs/sources.md) | Papers, pinned upstream sources |
 | [Code formatting](docs/formatting.md) | clang-format, Ruff, pre-commit |
-| [Design doc](docs/design-v2.md), [Writing labs](docs/authoring.md) | For maintainers |

@@ -38,8 +38,7 @@ Control: keeping only the vote with τ = 0 gives `perf` ≈ 0.91× and `perf_d64
 
 **New patterns (`labkit/kinds/attention.py`, only new branches added).** `growing_max`: q_i = a_i u + noise, k_j = g(j) u + noise,
 g(j) = 2j/128; each row's max rises by about 1.4–4.3 per block (log₂ units), never more than τ in a single block, but more than τ in total; `jump_max`: g jumps to 200 at key 3n/5 + 50 (the middle of a block),
-a jump of about 145–430. a_i/√d ∈ [0.5, 1.5) differs per row, so the rows of one warp get corrected in different blocks. The pattern list in `docs/authoring.md`
-now includes these two names.
+a jump of about 145–430. a_i/√d ∈ [0.5, 1.5) differs per row, so the rows of one warp get corrected in different blocks. Both patterns are defined in `labkit/kinds/attention.py`.
 
 ## Performance of each step (relative to cuDNN, CUDA Graph, GPU 7, same bench run)
 
