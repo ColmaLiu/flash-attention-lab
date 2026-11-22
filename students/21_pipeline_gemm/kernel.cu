@@ -193,7 +193,7 @@ __global__ void __launch_bounds__(C::kThreads)
   //   prologue: issue_stage(tile 0) into stage 0, commit.
   //   for t in 0 .. k_tiles-1:
   //     - wait for your own copies of tile t, then __syncthreads(). Write
-  //       down the TWO things this barrier guarantees (lesson §5.1).
+  //       down the TWO things this barrier guarantees (lesson §4.3).
   //     - if tile t+1 exists: issue it into the other stage, commit.
   //     - compute_stage(stage of tile t).
   // Exactly one wait and one __syncthreads per tile is enough.

@@ -81,7 +81,7 @@ __device__ __forceinline__ float exp2_approx(float x) {
 }
 
 // Minimax coefficients of 2^f on [0, 1) for the relative error, with
-// c0 = 1 exactly (lesson section 3.3). FP32 Horner evaluation, max relative
+// c0 = 1 exactly (lab 41, section 3.3). FP32 Horner evaluation, max relative
 // error measured over every FP32 f in [0, 1): 8.57e-5 = 2^-13.5.
 constexpr float kExp2C0 = 1.0f;
 constexpr float kExp2C1 = 0.6951168179512024f;  // 0x3F31F32D
@@ -99,7 +99,7 @@ constexpr float kExp2C3 = 0.07706717401742935f; // 0x3D9DD565
 //   2^x = 2^n * p: add n to p's exponent field (bits 23-30)
 // Valid for x <= 127 (here x <= kTau = 8). x = -127 gives exactly +0
 // because p(0) = c0 = 1 has the bit pattern 127 << 23. Two lanes per
-// instruction: FADD2 / FFMA2 do two FP32 operations each (lesson 4.2).
+// instruction: FADD2 / FFMA2 do two FP32 operations each (lab 41, section 4.2).
 __device__ __forceinline__ float2 exp2_poly2(float2 x) {
   const float2 magic = make_float2(12582912.f, 12582912.f); // 1.5 * 2^23
   x.x = fmaxf(x.x, -127.f);

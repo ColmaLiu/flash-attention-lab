@@ -327,7 +327,7 @@ __device__ __forceinline__ float write_p_tmem(uint32_t p_addr,
   // lab::tmem_st_32x32b_x16 (uint32_t overload), 16 columns at a time.
   // Finally lab::tmem_wait_st().
   //
-  // TODO(3) -- lesson section 3.5 (only when kQuantL): also return the
+  // TODO(3) -- lesson sections 3.5, 4.7 (only when kQuantL): also return the
   // FP32 sum of the E4M3 values just stored (add_e4m3x4 adds the four
   // values of one word to an FP32 accumulator; use a few independent
   // partial sums). Leave the step-2 path returning 0.

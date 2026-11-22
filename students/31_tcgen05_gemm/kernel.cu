@@ -62,7 +62,7 @@ __device__ __forceinline__ uint32_t tmem_addr(uint32_t base, int lane,
 }
 
 // ---------------------------------------------------------------------------
-// TODO(1b) — descriptors (lesson §4.3, §4.4; bit tables there).
+// TODO(1b) — descriptors (lesson §4.4, §4.5; bit tables there).
 //   make_smem_desc: shared-memory descriptor of a K-major, 128B-swizzled
 //     operand starting at `smem`: start address >> 4, LBO = 16 bytes
 //     (unused), SBO = 1024 bytes (distance between 8-row swizzle atoms),
@@ -80,7 +80,7 @@ __device__ __forceinline__ uint32_t make_idesc(int m, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// TODO(1c) — MMA, commit, TMEM loads, fences (lesson §4.5–§4.7).
+// TODO(1c) — MMA, commit, TMEM loads, fences (lesson §4.6, §4.7).
 //   mma_f16_ss: tcgen05.mma.cta_group::1.kind::f16
 //               [d], a_desc, b_desc, idesc, p;
 //     p is a predicate: true -> D += A.B^T, false -> D = A.B^T (set it from
@@ -140,7 +140,7 @@ __device__ __forceinline__ void mma_k_tile(uint32_t d_tmem, const bf16 *sa,
 
 // ---------------------------------------------------------------------------
 // TODO(1e) — epilogue of steps 1-2: copy the accumulator rows owned by this
-// warp to C (lesson §4.6, §5.1). Warp w may read TMEM lanes 32w..32w+31,
+// warp to C (lesson §4.2, §4.6). Warp w may read TMEM lanes 32w..32w+31,
 // which hold rows m0 + 32w + lane of C; columns 0..kBN-1 of the tile.
 // For each block of 32 columns: tmem_ld_32x32b_x32, tmem_wait_ld, then
 // store this thread's 32 values to C row (m0 + 32w + lane), columns

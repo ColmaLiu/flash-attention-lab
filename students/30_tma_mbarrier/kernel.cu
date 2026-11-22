@@ -34,7 +34,8 @@ __device__ __forceinline__ uint32_t shared_addr(const void *p) {
 }
 
 // ---------------------------------------------------------------------------
-// TODO(1a) — step 1 primitives (lesson §4.2–§4.5). One PTX instruction each.
+// TODO(1a) — step 1 primitives (lesson §4.2, §4.4, §4.5), one PTX instruction
+// each.
 //   mbar_init:            mbarrier.init.shared::cta.b64 [bar], count;
 //                         phase 0, `count` arrivals expected per phase.
 //   fence_barrier_init:   fence.mbarrier_init.release.cluster;

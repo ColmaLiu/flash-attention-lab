@@ -196,7 +196,8 @@ __device__ __forceinline__ void mma_qk(uint32_t s_tmem, const T *sq,
   // One descriptor per operand; slice kk only moves the start address
   // (bits 0-13, in 16-byte units), so it is a plain integer add (shared
   // addresses < 256 KB never carry out of the field). This keeps the single
-  // MMA thread's instruction stream short (lesson section 5.4).
+  // MMA thread's instruction stream short (descriptor fields: lab 31,
+  // section 4.4).
   const uint64_t da = lab::make_smem_desc_kmajor_sw128(sq);
   const uint64_t db = lab::make_smem_desc_kmajor_sw128(sk);
 #pragma unroll
