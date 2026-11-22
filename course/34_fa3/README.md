@@ -180,7 +180,7 @@ P·V 的 A 操作数从 shared memory 读，所以 softmax 线程要把 P（转�
 
 一条 16 字节 store 按 8 个线程一个阶段（wavefront）处理：线程 r..r+7 写各自行的同一个逻辑 chunk q，物理位置 `q ^ (r%8)` 两两不同，覆盖全部 32 个 bank，无冲突。
 
-写完后每个线程执行 **`fence.proxy.async`**（30 关 §4.7）：普通 store 走 generic proxy，`tcgen05.mma` 通过 async proxy 读 shared memory，不加这个 fence，MMA 可能读到旧的 P。
+写完后每个线程执行 **`fence.proxy.async`**（30 关 §4.5）：普通 store 走 generic proxy，`tcgen05.mma` 通过 async proxy 读 shared memory，不加这个 fence，MMA 可能读到旧的 P。
 
 ### 4.5 `tcgen05.st`：把修正后的 O 写回 TMEM
 
