@@ -38,8 +38,7 @@ k = 3/4/5：`perf` 0.90/0.89/0.89×、`perf_d64` 0.93/0.95/0.95×，差别在波
 
 **新增 pattern（`labkit/kinds/attention.py`，只增加分支）。** `growing_max`：q_i = a_i u + 噪声、k_j = g(j) u + 噪声，
 g(j) = 2j/128，每行最大值每块上涨约 1.4–4.3（log₂ 单位），单块不超过 τ，累计超过；`jump_max`：g 在 key 3n/5 + 50（块中间）
-处跳到 200，跳变约 145–430。a_i/√d ∈ [0.5, 1.5) 每行不同，使同一 warp 中的行在不同块修正。`docs/authoring.md` 的
-pattern 列表已补上这两个名字。
+处跳到 200，跳变约 145–430。a_i/√d ∈ [0.5, 1.5) 每行不同，使同一 warp 中的行在不同块修正。两个 pattern 都定义在 `labkit/kinds/attention.py` 中。
 
 ## 各 step 的性能（相对 cuDNN，CUDA Graph，7 号卡，同一次 bench）
 

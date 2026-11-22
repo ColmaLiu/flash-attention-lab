@@ -95,7 +95,7 @@ bash scripts/bootstrap.sh            # 可加 --with-cuda、--with-fa4，见下�
 | [43_fa4_schedule](course/43_fa4_schedule/README.md) | 调度与 causal | 块分类、persistent、LPT 排序 |
 | [44_fa4_fp8](course/44_fa4_fp8/README.md) | FP8 前向 | E4M3 量化、descale、`kind::f8f6f4` |
 
-建议按顺序学。每关讲义开头写了前置关卡。部分 4 的设计见 [设计稿 §3](docs/design-v2.md#3-课程地图)。
+建议按顺序学。每关讲义开头写了前置关卡。
 
 ## 一关怎么学
 
@@ -161,4 +161,3 @@ artifacts/  .cache/  progress/              bench/profile 结果、编译缓存�
 | [环境与依赖](docs/environment.md) | 安装参数、`LAB_GPU`、CUDA 版本、FA4 基线 |
 | [上游来源](docs/sources.md) | 论文、固定版本的上游源码 |
 | [代码格式](docs/formatting.md) | clang-format、Ruff、pre-commit |
-| [设计稿](docs/design-v2.md)、[编写关卡](docs/authoring.md) | 面向维护者 |
