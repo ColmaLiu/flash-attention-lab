@@ -121,7 +121,7 @@ produce_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring,
   // TODO(1a) — producer (lesson §5.2). For each K tile t = 0 .. k_tiles - 1,
   // in slot s = ring.index:
   //   - wait until the slot is free: empty[s] with which parity? (On the
-  //     first round nobody has consumed anything yet -- lab 30 §4.)
+  //     first round nobody has consumed anything yet -- lesson §3.2.)
   //   - arm full[s] with Cfg::kStageBytes and TMA-load the A box at
   //     (x = 64t, y = m0) into sm.a(s) and the B box at (x = 64t, y = n0)
   //     into sm.b(s), both completing on full[s];
