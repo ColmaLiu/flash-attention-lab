@@ -192,7 +192,7 @@ The four places this lab uses it:
 | Read the accumulator after the MMA completes | commit (implied) | `wait(mma_done)` | all threads, then `tcgen05.ld` |
 | dealloc after all lds complete | all threads | `__syncthreads` | warp 0, then dealloc |
 
-The before column is what orders the signaling side: in rows 1 and 4 those threads execute fence::before; rows 2 and 3 need no explicit fence, since mbarrier completion and the commit provide the ordering. The after column lists the threads that must execute fence::after. `setup_tmem` has every thread execute fence::before only to keep the code uniform; outside warp 0 it is a no-op.
+The before column is the side that must provide the ordering before the sync; the after column lists the threads that must execute fence::after.
 
 The after fence in the second row is not required: the TMA write to shared memory and the MMA read of shared memory both belong to the async proxy, and completion of the `full[s]` mbarrier already orders them. CUTLASS's `PipelineTmaUmmaAsync::consumer_wait` only waits on the mbarrier here, with no fence. This lab's solution keeps it as a defensive measure; the cost is negligible.
 
