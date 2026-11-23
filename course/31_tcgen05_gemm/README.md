@@ -191,7 +191,7 @@ tcgen05 指令是异步的，普通的线程同步（`__syncthreads`、mbarrier�
 | MMA 完成后读累加器 | commit（隐含） | `wait(mma_done)` | 所有线程，再 `tcgen05.ld` |
 | 所有 ld 完成后 dealloc | 所有线程 | `__syncthreads` | warp 0，再 dealloc |
 
-before 一列写的是同步之前由什么提供发出方一侧的顺序。第 1、4 行是做过 tcgen05 操作的线程，它们必须执行 fence::before。第 2、3 行没有显式的 fence::before：第 2 行的对方是 TMA，不是 tcgen05 操作，由 mbarrier 的完成机制排序；第 3 行由 commit 隐含提供。after 一列是必须执行 fence::after 的线程，即同步之后要依赖对方结果的线程。答案的 `setup_tmem` 让所有线程都执行 fence::before，只是为了代码统一：warp 0 以外的线程之前没有发过 tcgen05 操作，这条 fence 对它们是空操作。
+before 列是同步前提供顺序的一方：第 1、4 行由这些线程执行 fence::before；第 2、3 行没有显式 fence，分别由 mbarrier 完成机制和 commit 保证。after 列是必须执行 fence::after 的线程。`setup_tmem` 让所有线程都执行 fence::before 只是为了代码统一，对 warp 0 以外的线程是空操作。
 
 第二行的 after fence 不是必需的：TMA 写 shared memory 和 MMA 读 shared memory 都属于 async proxy，`full[s]` 的 mbarrier 完成已经给它们排好了顺序。CUTLASS 的 `PipelineTmaUmmaAsync::consumer_wait` 在这里只等 mbarrier、不加 fence。本关答案保留它作为防御性写法，代价可以忽略。
 
