@@ -386,7 +386,7 @@ softmax 线程的上限仍是 192（`setmaxnreg`）。整行 S（128 个 FP32）
 
 ### 7.1 相对库基线
 
-7 号卡实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好）：
+B200 实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好）：
 
 | 版本 | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|

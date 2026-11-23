@@ -349,7 +349,7 @@ barrier 初始化、TMEM 分配、角色分派、teardown 已写好。
 
 ## 7. 性能
 
-本机实测（B200，5 号卡，CUDA Graph；`vs cublas` 越大越好）：
+本机实测（B200，CUDA Graph；`vs cublas` 越大越好）：
 
 | 版本 | `square` 4096³ | `wide` 8192×8192×4096 | `flat` 8192×8192×1024 |
 |---|---|---|---|

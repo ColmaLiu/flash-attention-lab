@@ -468,7 +468,7 @@ cluster 4 = 两个 pair 沿 N 并排，cluster tile 256 × 512。与步骤 2 的
 
 ## 7. 性能
 
-本机实测（B200，2 号卡，CUDA Graph 中位数；`vs cublas` 越大越好）：
+本机实测（B200，CUDA Graph 中位数；`vs cublas` 越大越好）：
 
 | 版本 | `square` 4096³ | `wide` 8192×8192×4096 | `flat` 8192×8192×1024 |
 |---|---|---|---|

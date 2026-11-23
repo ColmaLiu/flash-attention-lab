@@ -74,7 +74,7 @@ P scale = 1 与 2⁸ 在随机数据的 case 上误差相同（p < 2⁻⁶ 的 k
 （`position` 类、`ones_v*`、`peaked*`、`long_tail` 等），步骤 3 有 6 个（`peaked*`、`causal_medium*`、`long_tail`）——
 步骤 3 的一致归一化抵消了截断的大部分偏差，只在集中权重的行和长尾行上可见。
 
-## 各 step 的性能（CUDA Graph，4 号卡，2–3 次运行的范围）
+## 各 step 的性能（CUDA Graph，2–3 次运行的范围）
 
 | 版本 | `perf` | `perf_causal` | `perf_d64` | `perf_8k` |
 |---|---|---|---|---|

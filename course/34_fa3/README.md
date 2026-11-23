@@ -455,7 +455,7 @@ softmax 线程把 `scale·S` 写进 probe（`[B,H,N,N]`，已写好），由 `fa
 
 ### 7.1 相对库基线
 
-6 号卡实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好）：
+B200 实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好）：
 
 | 版本 | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 |
 |---|---|---|---|

@@ -52,7 +52,7 @@ max 与 sum 各用 8 个独立累加器：每个 SMSP 只有一个 softmax warp�
 commit 哪个 barrier）和 softmax warp（读哪个 buffer、等哪个 parity）使用；单 buffer 分支在骨架中给出，两 buffer
 分支与 MMA 的提前发射（QK_1、QK_{j+2}）是 TODO(5)。
 
-## 各 step 的性能（相对 cuDNN，CUDA Graph，6 号卡）
+## 各 step 的性能（相对 cuDNN，CUDA Graph）
 
 | step | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 |
 |---|---|---|---|

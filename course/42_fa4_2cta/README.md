@@ -371,7 +371,7 @@ softmax 1 P │  … exp exp P│      │ld max exp exp exp P│      │ld max
 
 ### 7.1 相对库基线与 41 关
 
-3 号卡实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好；两次运行的范围）：
+B200 实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好；两次运行的范围）：
 
 | 版本 | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|

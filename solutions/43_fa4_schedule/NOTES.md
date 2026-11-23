@@ -39,7 +39,7 @@
 时分段可用（变体 C），但本关 case 上 L2 不是瓶颈，分段不比不分段快。动态调度（原子计数器 + 角色间广播，或 SM100 的
 CLC）在模拟中与蛇形相同，没有实现。
 
-## 各 step 的性能（相对 cuDNN，CUDA Graph，5 号卡，同一行同一次 bench）
+## 各 step 的性能（相对 cuDNN，CUDA Graph，同一行同一次 bench）
 
 | 版本 | `perf` | `perf_causal` | `perf_d64` | `perf_8k` | `perf_causal_bh16` |
 |---|---|---|---|---|---|
@@ -49,7 +49,7 @@ CLC）在模拟中与蛇形相同，没有实现。
 | 步骤 3 | ≈ 1.03× | ≈ 1.27× | ≈ 1.01× | ≈ 0.99× | ≈ 0.97× |
 | FA4 | ≈ 1.17× | ≈ 1.31–1.33× | ≈ 1.15× | ≈ 1.10× | ≈ 1.14× |
 
-`./lab selftest 43 --perf`（目标 0.9，7 号卡；5 号卡中途被其他用户占用）通过（审查修正后重测）：`perf` 1.02×、`perf_causal` 1.27×、`perf_d64` 1.02×、
+`./lab selftest 43 --perf`（目标 0.9）通过（审查修正后重测）：`perf` 1.02×、`perf_causal` 1.27×、`perf_d64` 1.02×、
 `perf_8k` 0.98×、`perf_causal_bh16` 1.03×（FA4 同次 1.16×、1.32×、1.15×、1.11×、1.14×）。最紧的是 `perf_8k`。
 
 Nsight Compute（锁频）`sm__cycles_active.max / avg`：`perf_causal_bh16` 步骤 1/2/3 = 1.33/1.52/1.04（FA4 1.07）；

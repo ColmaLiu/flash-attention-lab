@@ -10,7 +10,7 @@
 - **generic 读 → TMA 覆盖不加 proxy fence**：consumer 读 `in[s]` 后经 mbarrier arrive/wait 交给 producer 再发 TMA，与 CUTLASS 的 consumer_release 一致。generic 写 → TMA store 读则每个写线程都执行 `fence.proxy.async.shared::cta`。
 - **退出前 `bulk_wait_group<0>`**（不是 `.read`）：保守写法，确保 store 全部完成；代价是每个 consumer warp 末尾多等一次写延迟，对 persistent kernel 可以忽略。31 关用 CUTLASS 的 `.read` 写法，讲义两处都有说明。
 
-## 各 step 的性能（4 号卡，CUDA Graph，每个 step 各测 2–3 次）
+## 各 step 的性能（CUDA Graph，每个 step 各测 2–3 次）
 
 | step | `big` GB/s | `wide` GB/s | `vs copy` | 说明 |
 |---|---|---|---|---|
@@ -22,7 +22,7 @@
 | `torch`（`y.copy_(x.t())`） | ≈ 1860–1905 | ≈ 1885–1905 | ≈ 0.29 | |
 
 - 同机 00 关步骤 4 约 5910 GB/s（`vs copy` ≈ 0.92），所以 TMA 在带宽上只领先约 5%（`--cold` 约 2%）。讲义如实写了这一点，把收益表述为“1 个发起线程、9 个 warp 达到同样带宽”。
-- `perf_target` 是 `{"baseline": "copy", "ratio": 0.85}`：`copy` 与答案都受 HBM 限制，比值稳定。`torch` 不适合当门槛：早先一次（3 号卡）测量中 step 1/2 只有 ≈ 1030/1060 GB/s，torch 在约 1.0 与 1.8 TB/s 之间跳动，而 step 3 与 copy 不变。假设（未验证）：那次 GPU 处于较低 SM 时钟，受 bank conflict / 延迟限制的 kernel（torch 转置、step 1/2）随 SM 时钟变慢，HBM 限制的 kernel 不受影响。本次测量时 SM 时钟为 1965 MHz（最大值），各次结果稳定。
+- `perf_target` 是 `{"baseline": "copy", "ratio": 0.85}`：`copy` 与答案都受 HBM 限制，比值稳定。`torch` 不适合当门槛：早先一次测量中 step 1/2 只有 ≈ 1030/1060 GB/s，torch 在约 1.0 与 1.8 TB/s 之间跳动，而 step 3 与 copy 不变。假设（未验证）：那次 GPU 处于较低 SM 时钟，受 bank conflict / 延迟限制的 kernel（torch 转置、step 1/2）随 SM 时钟变慢，HBM 限制的 kernel 不受影响。本次测量时 SM 时钟为 1965 MHz（最大值），各次结果稳定。
 - 调参（`big`）：`<32,4>` ≈ 5180，`<64,4>` ≈ 5650，`<128,2>` ≈ 5720，`<128,3>` ≈ 5720，`<128,4>` ≈ 5630，`<128,6>` ≈ 5600，`<192,3>` ≈ 5790，`<256,2>` ≈ 6200，`<256,3>` ≈ 5770，`<256,4>` ≈ 5750。更多在途字节并不更快；原因未查明。
 - NCU（`big`）：step 1/2 shared load bank conflict ≈ 6.6e7（LDS ≈ 2.1e6 条）；step 3 load ≈ 7.3e5、store ≈ 1.0e6（LDS/STS 各 ≈ 5.2e5 条）。换一种 lane 分配后计数几乎不变，推测残余计数来自与 TMA 访问的仲裁，未证实。
 

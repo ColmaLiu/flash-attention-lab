@@ -10,7 +10,7 @@
 - **step 3**：`Config<256, 4, true>`：192 KB shared memory、256 列 TMEM、每 SM 1 个 CTA。epilogue 复用 stage buffer 作暂存（所有 load 已等待、所有 MMA 已完成），每个 warp、每 32 列一个 32×32 box，按 128B swizzle 写入（16 字节 store 无 bank conflict，NCU 计数为 0），`fence.proxy.async` + `__syncwarp` 后由 lane 0 发 TMA store；warp 之间不需要同步。退出前 `cp.async.bulk.wait_group.read 0`（与 CUTLASS 的 `tma_store_wait<0>` 相同）。
 - **TMEM 生命周期**：alloc 由 warp 0 执行并 relinquish；`fence::before → __syncthreads → fence::after` 后所有线程读 base；dealloc 前同样的 fence 序列保证所有 `tcgen05.ld` 已完成。
 
-## 各 step 的性能（3 号卡，CUDA Graph，相对 cuBLAS BF16→FP32）
+## 各 step 的性能（CUDA Graph，相对 cuBLAS BF16→FP32）
 
 | 配置 | 4096³ | 8192×8192×4096 |
 |---|---|---|

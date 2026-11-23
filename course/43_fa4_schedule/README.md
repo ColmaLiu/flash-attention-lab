@@ -29,7 +29,7 @@
 
 ## 2. 动机：41 关卡在哪里
 
-41 关答案（步骤 3）的实测（5 号卡，CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时）：
+41 关答案（步骤 3）的实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时）：
 
 | case | 形状 | 41 关 vs cuDNN | FA4 vs cuDNN |
 |---|---|---|---|
@@ -370,7 +370,7 @@ O^t 的 TMEM 不需要单独交接（§5.2）；`final_full` 的双缓冲（§5.
 
 ### 7.1 相对库基线
 
-5 号卡实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好；同一行来自同一次 `bench`，cuDNN 自身在多次运行间有约 ±4% 的波动）：
+B200 实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大越好；同一行来自同一次 `bench`，cuDNN 自身在多次运行间有约 ±4% 的波动）：
 
 | 版本 | `perf` | `perf_causal` | `perf_d64` | `perf_8k` | `perf_causal_bh16` |
 |---|---|---|---|---|---|

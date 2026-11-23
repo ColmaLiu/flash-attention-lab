@@ -16,7 +16,7 @@
 - **step 1** 用独立的 `gemm_ws_tile`（grid = 全部 tile，单累加器，与 31 关 step 3 同 tile/同 stage 数），只改变“谁发 TMA、谁发 MMA、谁做 epilogue”。**step 2/3** 用 `gemm_ws_persistent`，grid = min(tile 数, SM 数)，tile `blockIdx.x + i·gridDim.x`。step 3 只改 tile 顺序（分组光栅化，`kGroupM = 8`）。
 - **没有用 `setmaxnreg`**：寄存器 56–72、无 spill；每 SM 只有 6 个 warp，寄存器文件远没用满，重分配没有收益。它留到 FA4（40 关），那里 softmax warpgroup 需要大量寄存器。
 
-## 各 step 的性能（5 号卡，CUDA Graph，相对 cuBLAS BF16→FP32）
+## 各 step 的性能（CUDA Graph，相对 cuBLAS BF16→FP32）
 
 | 版本 | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
 |---|---|---|---|

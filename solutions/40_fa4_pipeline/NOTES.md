@@ -46,7 +46,7 @@ warp 等待、`elect.sync` 一个 lane 发射后降到约 40 周期，`perf` 约
 **未采用的尝试**（同次对比，差别在噪声内）：S 的 4 次 `tcgen05.ld` 同时在路上再统一 wait；去掉 `acquire` 中的
 `tcgen05.fence::after_thread_sync`；`p_ready` 改为每 warp 一个 arrive（count 4/8）；把 exp2 与写 P 分块交织。
 
-## 各 step 的性能（相对 cuDNN，CUDA Graph，7 号卡，每项 3 次的范围）
+## 各 step 的性能（相对 cuDNN，CUDA Graph，每项 3 次的范围）
 
 | 版本 | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|

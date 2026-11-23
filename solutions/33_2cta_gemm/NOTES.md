@@ -18,7 +18,7 @@
 - **step 1**（`gemm_pair_tile`）：grid = 2 × tile 数，cluster 2，每 cluster 一个 256×256 tile、单累加器。**step 2**（`gemm_pair_persistent<Config<6,2,8>>`）：grid = 2 × min(tile 数, 可驻留 cluster 数)，按 `%clusterid.x` / `%nclusterid.x` 静态轮转，累加器双缓冲，分组光栅化 G = 8（单位是 256 行的 tile 行）。**step 3**：cluster 4 = 沿 N 并排的两个 pair（cluster tile 256×512），A 的每一半由两个 pair 中同位置的两个 CTA 各读 64 行并 multicast 给对方（mask = bit r | bit r+2），`empty` count = 2（两个 leader 的 commit），`acc_full` 只 multicast 给本 pair。host 端按“轮数”在 cluster 4 与 cluster 2 之间选择。
 - **multicast 的 barrier 地址**：`.cta_group::2` + `.multicast::cluster` 的 TMA 只给一个 barrier 操作数（本 CTA 的 leader 的 `mapa` 地址），每个目标 CTA 的那份在“目标 CTA 所在 pair 的 leader”的同一偏移上 complete_tx。这一点由 `persistent` 等 case 实测确认（若信号落到错误的 leader，一个 leader 会多收字节、另一个永远等不到，即 `TIMEOUT`），与 CUTLASS `SM100_TMA_2SM_LOAD_MULTICAST` 清除 peer bit 的做法一致。
 
-## 各 step 的性能（2 号卡，CUDA Graph 中位数，相对 cuBLAS BF16→FP32）
+## 各 step 的性能（CUDA Graph 中位数，相对 cuBLAS BF16→FP32）
 
 | 版本 | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
 |---|---|---|---|

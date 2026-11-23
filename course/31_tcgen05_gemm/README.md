@@ -350,7 +350,7 @@ TODO(3b) 从下表开始实验，每次 `check` 再 `bench`：
 
 ## 7. 性能
 
-本机实测（3 号卡，CUDA Graph；`vs cublas` 越大越好）：
+本机实测（CUDA Graph；`vs cublas` 越大越好）：
 
 | 版本 | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | `square` TFLOP/s |
 |---|---|---|---|

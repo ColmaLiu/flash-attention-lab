@@ -54,7 +54,7 @@ CUTLASS（`ClusterBarrier::arrive(cta_id)`）和 FA4（pipeline `consumer_releas
 **寄存器。** causal 的 D = 128 kernel 最初在 48 寄存器的 TMA 段溢出 8 字节：`blocks` 在角色划分前计算、跨过
 `setmaxnreg` 存活；改为在各角色内重算，并给 K 一半的 panel 循环加 `#pragma unroll 1` 后无溢出。
 
-## 各 step 的性能（3 号卡，CUDA Graph，相对 cuDNN；两次运行的范围）
+## 各 step 的性能（CUDA Graph，相对 cuDNN；两次运行的范围）
 
 | 版本 | `perf` | `perf_causal` | `perf_d64` | `perf_8k` |
 |---|---|---|---|---|

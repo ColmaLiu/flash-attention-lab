@@ -51,7 +51,7 @@ K、V 分别成组、V 的拷贝与 QKᵀ 重叠的更细流水；3 级流水按
 `mma<T>`（按 dtype 选择 `lab::mma_m16n8k16_{f16,bf16}`）、`quad_max/quad_sum`、两段 swizzle 的
 `tile_offset`。都不是新的 PTX 原语，没有放进 `include/lab`。
 
-## 各 step 的性能（相对 cuDNN，CUDA Graph，7 号卡）
+## 各 step 的性能（相对 cuDNN，CUDA Graph）
 
 | step | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 |
 |---|---|---|---|
