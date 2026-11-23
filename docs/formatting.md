@@ -40,10 +40,12 @@ The contents of inline PTX strings are not changed.
 
 ## Directories that are not formatted
 
-`.pre-commit-config.yaml` excludes directories such as `students/`, `third_party/`, `artifacts/`, `.cache/` and `progress/`:
+`.pre-commit-config.yaml` excludes `third_party/`, `artifacts/`, `.cache/` and `progress/`:
 
-- `students/` is the learner's student code, and bulk tools should not change your implementations and notes. You can run `clang-format -i students/<ID>/kernel.cu` yourself on the file you are editing;
-- `third_party/` holds the pinned upstream sources.
+- `third_party/` holds the pinned upstream sources;
+- the rest are Git-ignored output directories.
+
+`students/` is checked too: when you commit student code, the hook formats the staged `kernel.cu`. Note that `run --all-files` rewrites every tracked file in the working tree, including exercises you have not finished; to check only the files you are editing, use `--files`.
 
 ## After formatting
 

@@ -1,6 +1,6 @@
 minimum_pre_commit_version: "4.5.1"
 default_stages: [pre-commit, manual]
-exclude: '^(third_party|students|artifacts|\.cache|progress)/'
+exclude: '^(third_party|artifacts|\.cache|progress)/'
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
