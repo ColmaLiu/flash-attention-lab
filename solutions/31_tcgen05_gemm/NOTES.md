@@ -22,7 +22,7 @@
 | `<128,3>` TMA 写回（2 CTA/SM） | ≈ 0.34–0.6×（不稳定） | ≈ 0.60× |
 | step 3：`<256,4>` TMA 写回 | ≈ 0.81–0.83× | ≈ 0.74–0.77× |
 
-- `selftest --perf`：square 0.830、wide 0.751，门槛 0.6（任务说明预期 0.5–0.7；实测更高，门槛留出余量，因为本机 GPU 在多次运行之间偶尔整体降速）。
+- `selftest --perf`：square 0.830、wide 0.751，门槛 0.6（任务说明预期 0.5–0.7；实测更高，门槛留出余量，因为 GPU 在多次运行之间偶尔整体降速）。
 - NCU（square）：`sm__pipe_tensor_cycles_active` step 2 ≈ 26%，step 3 ≈ 68%；DRAM 写入 step 2 ≈ 99 MB（C 为 67 MB，逐行 store 产生零散的部分 sector 写），step 3 ≈ 42 MB；epilogue 的 shared store bank conflict 为 0。
 - 剩余差距（推断，未逐项测量）：epilogue 不与主循环重叠（每 SM 1 个 CTA）、单线程串行地等 TMA 与 MMA、square 的 3.46 波尾部、A/B 每个 CTA 从 L2 重读。分别由 32 关（warp specialization、TMEM 双缓冲、persistent）与 33 关（2-CTA、multicast）处理。
 

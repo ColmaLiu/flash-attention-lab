@@ -349,7 +349,7 @@ barrier 初始化、TMEM 分配、角色分派、teardown 已写好。
 
 ## 7. 性能
 
-本机实测（B200，CUDA Graph；`vs cublas` 越大越好）：
+实测（B200，CUDA Graph；`vs cublas` 越大越好）：
 
 | 版本 | `square` 4096³ | `wide` 8192×8192×4096 | `flat` 8192×8192×1024 |
 |---|---|---|---|
@@ -360,7 +360,7 @@ barrier 初始化、TMEM 分配、角色分派、teardown 已写好。
 | 步骤 3：分组 G = 8 | ≈ 0.92× | ≈ 0.91× | ≈ 0.95× |
 | cuBLAS | 1 | 1 | 1 |
 
-本机 GPU 偶尔整体变慢（cuBLAS 同样变慢），请看比值。步骤 3 在全部 perf case 上达到 cuBLAS 的 0.85 倍以上即达标。
+GPU 偶尔整体变慢（cuBLAS 同样变慢），请看比值。步骤 3 在全部 perf case 上达到 cuBLAS 的 0.85 倍以上即达标。
 
 **读这张表**：
 

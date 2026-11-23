@@ -21,7 +21,7 @@
 
 ## 2. 动机：让搬运不再占用线程
 
-00 关步骤 4 在本机同一张卡上约 5.9 TB/s，已经接近连续拷贝。但它付出的代价是：每个 SM 驻留 32 个 CTA（每个 64 线程）、共 2048 个线程，每一个字节都要经过线程：
+00 关步骤 4 在同一张卡上实测约 5.9 TB/s，已经接近连续拷贝。但它付出的代价是：每个 SM 驻留 32 个 CTA（每个 64 线程）、共 2048 个线程，每一个字节都要经过线程：
 
 ```
 LDG（global → 寄存器） → STS（寄存器 → shared） → __syncthreads → LDS → STG
@@ -37,7 +37,7 @@ FlashAttention-3 论文第 3.1 节的第一个思想就是这件事：**生产�
 
 ### 3.1 下界与在途字节
 
-转置读写各 `rows·cols·4` 字节。`big`（8192×8192）共 512 MiB，按 8 TB/s 标称峰值的下界约 0.067 ms，按本机 `y.copy_(x)` 实测的约 6.4 TB/s 约 0.083 ms。
+转置读写各 `rows·cols·4` 字节。`big`（8192×8192）共 512 MiB，按 8 TB/s 标称峰值的下界约 0.067 ms，按 `y.copy_(x)` 实测的约 6.4 TB/s 约 0.083 ms。
 
 Little 定律（00 关 §4.5）：要跑 6.4 TB/s、延迟按约 700 ns 估算，全 GPU 需要约 4.5 MB 在路上，即每个 SM 约 30 KB。TMA 下，在途的读取字节数直接由 buffer 数决定：
 
@@ -241,7 +241,7 @@ warp 中所有活跃线程一起执行，恰好一个得到 `p = true`。用它�
 | `mbar_init` 后没有 `fence_barrier_init` + `__syncthreads` | 其他线程或 TMA 看到未初始化的 barrier，偶发挂起或错误 |
 | 等 `full` 用了错误的 parity | 第一圈就挂起（等一个不会来的 phase），或立刻通过、读到旧数据 |
 | producer 第一圈没有用 `(n & 1) ^ 1` | 挂起：没有人会对 `empty` 做第 −1 次释放 |
-| 写完 `out` 没有 `fence.proxy.async` | TMA store 可能读到旧值。**本机测试和 racecheck 都没有发现这个错误**，所以要靠推理而不是测试来保证 |
+| 写完 `out` 没有 `fence.proxy.async` | TMA store 可能读到旧值。**测试和 racecheck 都没有发现这个错误**，所以要靠推理而不是测试来保证 |
 | 只有 lane 0 执行 fence | 同上：其他 lane 的写没有被 fence |
 | CTA 退出前没有 `wait_group` | store 还没读完 shared memory，buffer 已被释放 |
 | 128B swizzle 的 buffer 没有 1024 字节对齐 | TMA 报错或 swizzle 下标对不上 |
@@ -374,10 +374,10 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 
 ## 7. 性能
 
-本机实测（CUDA Graph）。`./lab bench 30` 打印两条基线：
+实测（CUDA Graph）。`./lab bench 30` 打印两条基线：
 
 - `torch`：PyTorch `y.copy_(x.t())`，一个通用的转置拷贝；
-- `copy`：`y.copy_(x)`，搬同样多的字节，但读写都是完全连续的，不做转置。它是本机 HBM 的**实际上限**。
+- `copy`：`y.copy_(x)`，搬同样多的字节，但读写都是完全连续的，不做转置。它是 HBM 的**实际上限**。
 
 `vs` 列是相对第一条基线 `torch` 的比值。本关的主要尺子是 **`vs copy`**（`copy` 耗时 / 你的耗时，即下表最后一列）：转置最多做到和连续拷贝一样快，比值越接近 1 越好。
 
@@ -421,7 +421,7 @@ R 取 0..7 各一次，C = (R + 常数) % 8。可以逐一验证（或写个小�
 3. 步骤 2 中，若把 `empty[s]` 的 count 设为 consumer 线程数（128）但仍然每个 warp 只 arrive 一次，会怎样？
 4. 为什么 consumer 在复用 out buffer 之前用 `wait_group.read 1` 而不是 `wait_group.read 0`？
 5. 128B swizzle 下，`in` 的第 13 行第 22 列（float）的字节偏移是多少（相对 1024 对齐的 buffer）？
-6. 删掉 `fence_proxy_async()` 后本机测试仍然全部通过。为什么这不能说明 fence 可以省略？
+6. 删掉 `fence_proxy_async()` 后测试仍然全部通过。为什么这不能说明 fence 可以省略？
 
 <details>
 <summary>参考答案</summary>

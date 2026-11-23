@@ -125,7 +125,7 @@ tcgen05.ld.32x32b.x32 (lane 32w, col c)：线程 r 得到 S[r][c .. c+31]
 一行 128 列 = 4 次 x32 读，放进 float s[128]
 ```
 
-**`tcgen05.ld` 与 `wait::ld` 之间不能有计算。** `tcgen05.ld` 是异步的：寄存器在 `tcgen05.wait::ld` 之后才有效。31 关的 `tmem_ld_32x32b_x32` + `tmem_wait_ld()` 是两条独立的 asm 语句，`wait` 没有寄存器操作数，编译器不知道 `v[]` 依赖它，可能把“对 v[] 的纯寄存器运算”（求 max、乘 α）调度到 wait 之前，读到还没写好的寄存器。31 关的 epilogue 读完直接存内存，碰巧安全；本关读完就要计算，所以统一用头文件里的 **`lab::tmem_ld_32x32b_x32_sync`**：ld 和 wait 在同一条 asm 语句里，输出寄存器只在 wait 之后才“存在”。代价是同一线程的 4 次读不能同时在路上（本机测得约 1–3% 的差别，见 NOTES）。
+**`tcgen05.ld` 与 `wait::ld` 之间不能有计算。** `tcgen05.ld` 是异步的：寄存器在 `tcgen05.wait::ld` 之后才有效。31 关的 `tmem_ld_32x32b_x32` + `tmem_wait_ld()` 是两条独立的 asm 语句，`wait` 没有寄存器操作数，编译器不知道 `v[]` 依赖它，可能把“对 v[] 的纯寄存器运算”（求 max、乘 α）调度到 wait 之前，读到还没写好的寄存器。31 关的 epilogue 读完直接存内存，碰巧安全；本关读完就要计算，所以统一用头文件里的 **`lab::tmem_ld_32x32b_x32_sync`**：ld 和 wait 在同一条 asm 语句里，输出寄存器只在 wait 之后才“存在”。代价是同一线程的 4 次读不能同时在路上（实测约 1–3% 的差别，见 NOTES）。
 
 ### 4.2 S = Q·Kᵀ：和 31 关的 GEMM 一样
 
@@ -477,7 +477,7 @@ B200 实测（CUDA Graph；`vs cudnn` = cuDNN 耗时 / 本版本耗时，越大�
 ./lab profile 34 --case perf
 ```
 
-本机 Nsight Compute（`perf`）：
+Nsight Compute 实测（`perf`）：
 
 | 指标 | 步骤 3 | 步骤 5 | 说明 |
 |---|---|---|---|

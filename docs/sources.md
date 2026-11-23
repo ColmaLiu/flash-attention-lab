@@ -50,7 +50,7 @@ git ls-files --stage third_party/cutlass third_party/flash-attention   # 查看�
 
 ## 4. NVIDIA 文档
 
-在线文档会更新。指令用法以本机 CUDA 12.8 对应的 PTX ISA 8.7 为准；`include/lab/*.cuh` 中的封装注明了 PTX ISA 8.7 的章节名。
+在线文档会更新。指令用法以课程使用的 CUDA 12.8 对应的 PTX ISA 8.7 为准；`include/lab/*.cuh` 中的封装注明了 PTX ISA 8.7 的章节名。
 
 | 文档 | 用途 |
 |---|---|

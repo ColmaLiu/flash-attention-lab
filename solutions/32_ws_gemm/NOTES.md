@@ -39,7 +39,7 @@
 - 累加器双缓冲本身在 square 上只值约 1%，在 flat 上约 10%：K = 4096 时一个 tile 的主循环约为 epilogue 的 6–8 倍，而且单累加器也是“读完 TMEM 就释放”，MMA 只等 TMEM→寄存器那一段；K = 1024 时 epilogue 与主循环同量级，重叠才显出价值。为此增加了 `flat` perf case。
 - G > 0 在 A、B 都能放进 L2 的 case 上稍慢，原因未查明（推断与 B200 两个 die 各自的 L2 分区或同一 panel 被更多 CTA 同时读取有关，未验证）。G = 8 是三个 perf case 最差比值最高的选择。
 - `--cold`（每次迭代前清 L2）step 3：square ≈ 0.91×、wide ≈ 0.87×、flat ≈ 1.0×。
-- `selftest --perf` 门槛 0.85：实测最差约 0.91（square、wide），留约 6% 余量。本机 GPU 偶有整体降速时段（cuBLAS 同样变慢），比值基本不变。
+- `selftest --perf` 门槛 0.85：实测最差约 0.91（square、wide），留约 6% 余量。GPU 偶有整体降速时段（cuBLAS 同样变慢），比值基本不变。
 - 剩余差距（推断）：每个 128×256 tile 每 K 块从 L2 读 48 KB，148 个 SM 合计接近 L2 带宽；square 512 个 tile = 3.46 波，最后一波 46% 的 SM 空闲。前者由 33 关的 2-CTA MMA 与 TMA multicast 处理。
 
 ## 验证

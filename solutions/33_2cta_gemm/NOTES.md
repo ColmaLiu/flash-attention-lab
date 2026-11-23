@@ -29,7 +29,7 @@
 | 对照：强制 cluster 4 multicast | ≈ 1.00× | 比 step 2 慢 ≈ 8% | 比 step 2 慢 ≈ 5% |
 | step 3，`--cold` | ≈ 1.01× | ≈ 1.05× | ≈ 1.10× |
 
-- cuBLAS 在 `wide` 上本机波动较大（同一卡多次测得 0.39–0.43 ms），比值随之在 1.0–1.16 之间变化；本答案自身的时间很稳定（step 2/3 约为 32 关答案的 0.83 倍）。
+- cuBLAS 在 `wide` 上波动较大（同一卡多次测得 0.39–0.43 ms），比值随之在 1.0–1.16 之间变化；本答案自身的时间很稳定（step 2/3 约为 32 关答案的 0.83 倍）。
 - `selftest --perf`（门槛 0.9）：square 1.00、wide 1.16、flat 1.05。最差的 square 留约 10% 余量。
 - NCU（锁频，只看比例），square：`sm__pipe_tensor_cycles_active` 32 关 ≈ 84.5%，step 1 ≈ 75.7%，step 2 ≈ 87.7%，step 3 ≈ 88.7%。`lts__t_sectors_srcunit_tex_op_read`：step 2 ≈ 0.99 GB，step 3 ≈ 0.82 GB；推导值 32 关 1.61 GB、pair 1.07 GB、pair + A multicast 0.81 GB。锁频下 step 3 反而比 step 2 慢约 2%，不锁频时快约 1.5%：差别主要来自轮数与功耗/频率，不是 L2 带宽。
 - **为什么 step 3 要在 host 上选形状**：`cudaOccupancyMaxActiveClusters` 给出 B200 上 cluster 2 可驻留 74 个（148 SM 全用），cluster 4 只有 33 个（132 SM）：cluster 必须放在一个 GPC 内，GPC 的 SM 数不是 4 的倍数。两种形状下每个 pair 每轮都算一个 256×256 tile，所以时间 ≈ 轮数 × 每轮时间。square：256 个 pair tile / 74 = 3.46 → 4 轮；128 个 cluster tile / 33 = 3.88 → 4 轮，轮数相同，multicast 少读 A 而稍快。wide/flat：1024 / 74 → 14 轮，512 / 33 → 16 轮，cluster 4 慢约 8%（实测与 16/14 的 14% 有差，multicast 抵消了一部分）。CUTLASS 的解法是 preferred cluster（`cudaLaunchAttributePreferredClusterDimension`，examples/73），让放不下 4 的 GPC 用 2，需要动态调度，不在本课范围。

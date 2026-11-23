@@ -342,7 +342,7 @@ K_j、V_j 每个 j 只加载一次，在内层循环中被所有 Q 块复用；Q
 
 ### 7.1 相对库基线
 
-本机实测（CUDA Graph 计时，FP32，`vs efficient` 是 PyTorch memory-efficient attention 的耗时除以本版本耗时）：
+实测（CUDA Graph 计时，FP32，`vs efficient` 是 PyTorch memory-efficient attention 的耗时除以本版本耗时）：
 
 | case | 版本 | `vs efficient` | % FP32 标称峰值 |
 |---|---|---|---|
@@ -365,7 +365,7 @@ K_j、V_j 每个 j 只加载一次，在内层循环中被所有 Q 块复用；Q
 ./lab profile 12 --case perf
 ```
 
-本机 Nsight Compute 结果（`perf`，比例形式）：
+Nsight Compute 实测结果（`perf`，比例形式）：
 
 | 指标 | 结果 | 说明 |
 |---|---|---|
@@ -379,7 +379,7 @@ K_j、V_j 每个 j 只加载一次，在内层循环中被所有 Q 块复用；Q
 
 ### 7.3 为什么比库慢约 2 倍
 
-PyTorch 的 FP32 memory-efficient attention 在本机运行的是 CUTLASS kernel `fmha_cutlassF_f32_aligned_64x64_rf_sm80`。和本关相比：
+PyTorch 的 FP32 memory-efficient attention 在 B200 上运行的是 CUTLASS kernel `fmha_cutlassF_f32_aligned_64x64_rf_sm80`。和本关相比：
 
 | | 本关 | 库 |
 |---|---|---|

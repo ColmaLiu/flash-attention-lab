@@ -123,7 +123,7 @@ cp.async.wait_all;          = commit_group + wait_group 0
 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
 ```
 
-B200 每个 SM 有 228 KB shared memory，单个 CTA 最多 227 KB。shared memory 和 L1 共用每个 SM 上的同一块存储，比例（carveout）由驱动按 kernel 选择。骨架中的 `allow_smem` 同时设置了 `cudaFuncAttributePreferredSharedMemoryCarveout = cudaSharedmemCarveoutMaxShared`：在本机上，不设置时 3–4 级流水的版本偶尔出现慢一倍的运行（像是每个 SM 只放下了一个 CTA），设置后消失。这部分已经写好。
+B200 每个 SM 有 228 KB shared memory，单个 CTA 最多 227 KB。shared memory 和 L1 共用每个 SM 上的同一块存储，比例（carveout）由驱动按 kernel 选择。骨架中的 `allow_smem` 同时设置了 `cudaFuncAttributePreferredSharedMemoryCarveout = cudaSharedmemCarveoutMaxShared`：实测中，不设置时 3–4 级流水的版本偶尔出现慢一倍的运行（像是每个 SM 只放下了一个 CTA），设置后消失。这部分已经写好。
 
 ### 4.5 常见误用
 
@@ -252,7 +252,7 @@ pid: 0  1  2  3                 pid: 0  4  8 12
 
 ## 7. 性能
 
-本机实测（CUDA Graph；`vs cublas` 越大越好；“占 mma.sync 上限”是 TFLOP/s 除以 20 关 §4.1 测得的 560 TFLOP/s）：
+实测（CUDA Graph；`vs cublas` 越大越好；“占 mma.sync 上限”是 TFLOP/s 除以 20 关 §4.1 测得的 560 TFLOP/s）：
 
 | 版本 | `square` `vs cublas` | `wide` `vs cublas` | 占 mma.sync 上限 |
 |---|---|---|---|
@@ -268,7 +268,7 @@ pid: 0  1  2  3                 pid: 0  4  8 12
 
 - **步骤 1 的提升最大**：搬运和计算第一次重叠。
 - **步骤 2 几乎没有变化**：和 §3.1 的估计一致。双缓冲时每个 SM 上两个 CTA 各有一个 tile 在路上，已经接近所需的在途量。多级流水在“每个 SM 只能放一个 CTA”或“延迟更长”时才明显，例如部分 3 的 TMA 流水。
-- **步骤 3 的提升来自 tile 形状**，不是光栅化。步骤 3 配置实验（`square`，本机）：
+- **步骤 3 的提升来自 tile 形状**，不是光栅化。步骤 3 配置实验（`square`）：
 
 | 配置 | `vs cublas` |
 |---|---|

@@ -61,7 +61,7 @@ FLOP          = 2·M·N·K
 
 B200 的两个“屋顶”：
 
-- **FP32 CUDA core 峰值**：148 个 SM × 每 SM 128 条 FP32 通道 × 2 FLOP（一条 FFMA）× 1.965 GHz（`nvidia-smi -q -d CLOCK` 中的 Max Clocks，满载计时时实测仍为 1965 MHz）≈ **74.4 TFLOP/s**。`./lab bench` 的 `% peak` 用取整的 75 TFLOP/s。一个只做独立 FFMA 的微基准在本机能跑到这个值的约 97%。
+- **FP32 CUDA core 峰值**：148 个 SM × 每 SM 128 条 FP32 通道 × 2 FLOP（一条 FFMA）× 1.965 GHz（`nvidia-smi -q -d CLOCK` 中的 Max Clocks，满载计时时实测仍为 1965 MHz）≈ **74.4 TFLOP/s**。`./lab bench` 的 `% peak` 用取整的 75 TFLOP/s。一个只做独立 FFMA 的微基准实测能跑到这个值的约 97%。
 - **HBM 带宽**：标称 8 TB/s。
 
 两者之比是**屋脊点**：`74.4 / 8 ≈ 9.3 FLOP/B`。AI 低于 9.3 的 kernel 受带宽限制，高于 9.3 的受计算限制。
@@ -319,7 +319,7 @@ as[BK][BM + 4]，bs[BK][BN + 4]：as[kk][r] = A[m0 + r][k0 + kk]
 
 ## 7. 性能
 
-本机实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS SGEMM（关闭 TF32）的耗时除以本版本耗时）：
+实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS SGEMM（关闭 TF32）的耗时除以本版本耗时）：
 
 | 版本 | `square4k` vs cublas | `wide` vs cublas | `square4k` % FP32 峰值 |
 |---|---|---|---|

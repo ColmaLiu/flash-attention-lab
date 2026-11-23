@@ -336,7 +336,7 @@ B200 实测（CUDA Graph；`vs cudnn` 是 cuDNN 耗时除以本版本耗时，�
 ./lab profile 22 --case perf --step 2
 ```
 
-本机 Nsight Compute 结果（`perf`）：
+Nsight Compute 实测结果（`perf`）：
 
 | 指标 | 步骤 2 | 步骤 4 | 说明 |
 |---|---|---|---|
@@ -352,7 +352,7 @@ B200 实测（CUDA Graph；`vs cudnn` 是 cuDNN 耗时除以本版本耗时，�
 
 可以自己试的实验：
 
-- D = 128 改成 8 个 warp、Br = 128（`Config<128, 8, 1, 64, …>`）。本机上这样**更慢**（步骤 4 约 0.22×）：每个 SM 只放得下一个 CTA，它的 barrier 没有别的 CTA 来填补。
+- D = 128 改成 8 个 warp、Br = 128（`Config<128, 8, 1, 64, …>`）。实测这样**更慢**（步骤 4 约 0.22×）：每个 SM 只放得下一个 CTA，它的 barrier 没有别的 CTA 来填补。
 - D = 64 改成 Bc = 64，用 `./lab sass 22` 看 spill，再 bench。
 
 ## 8. 自测问题

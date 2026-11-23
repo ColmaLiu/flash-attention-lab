@@ -69,7 +69,7 @@ D[16×8] += A[16×16] · B[16×8]          （B 在这里按 k×n 理解）
 | `wgmma.mma_async` | 仅 Hopper（SM90） | 4 个 warp | shared memory / 寄存器 | 寄存器 |
 | `tcgen05.mma` | Blackwell（SM100） | 一个线程 | shared memory / TMEM | TMEM |
 
-B200 仍然支持 `mma.sync`，但它是“旧路径”。在本机上用一个只发 `mma.sync` 的微基准测得：
+B200 仍然支持 `mma.sync`，但它是“旧路径”。用一个只发 `mma.sync` 的微基准测得：
 
 | | BF16 吞吐 | 相对标称 2250 TFLOP/s |
 |---|---|---|
@@ -301,7 +301,7 @@ bank conflict 应该降到接近 0，wavefront 数降为 step 2 的 1/4。
 
 ## 7. 性能
 
-本机实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS BF16→FP32 的耗时除以本版本耗时；“占 mma.sync 上限”是 TFLOP/s 除以 §4.1 的 560 TFLOP/s）：
+实测（CUDA Graph 计时；`vs cublas` 是 cuBLAS BF16→FP32 的耗时除以本版本耗时；“占 mma.sync 上限”是 TFLOP/s 除以 §4.1 的 560 TFLOP/s）：
 
 | 版本 | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | 占 mma.sync 上限 |
 |---|---|---|---|

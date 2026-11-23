@@ -234,7 +234,7 @@ S/P 的流量是 Q/K/V/O 的 64 倍。一个融合的 kernel（例如 12 关的 
 
 ### 7.1 时间与库基线
 
-本机实测（CUDA Graph 计时；`vs efficient` 是 PyTorch memory-efficient attention 的耗时除以本实现的耗时）：
+实测（CUDA Graph 计时；`vs efficient` 是 PyTorch memory-efficient attention 的耗时除以本实现的耗时）：
 
 | case | 形状 [B, N, H, D] | vs efficient |
 |---|---|---|
