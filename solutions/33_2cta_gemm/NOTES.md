@@ -18,7 +18,7 @@
 - **step 1** (`gemm_pair_tile`): grid = 2 × number of tiles, cluster 2, one 256×256 tile per cluster, single accumulator. **step 2** (`gemm_pair_persistent<Config<6,2,8>>`): grid = 2 × min(number of tiles, number of resident clusters), static round-robin over `%clusterid.x` / `%nclusterid.x`, accumulator double buffering, grouped rasterization G = 8 (in units of tile rows of 256 rows). **step 3**: cluster 4 = two pairs side by side along N (cluster tile 256×512). For each half of A, the two CTAs at the same position in the two pairs each read 64 rows and multicast them to each other (mask = bit r | bit r+2); `empty` count = 2 (the commits of the two leaders); `acc_full` is multicast only to this pair. The host chooses between cluster 4 and cluster 2 by the number of "rounds".
 - **Barrier address of a multicast**: a `.cta_group::2` + `.multicast::cluster` TMA takes only one barrier operand (the `mapa` address of this CTA's leader), and each target CTA's copy does complete_tx at the same offset in "the leader of the pair the target CTA belongs to". This was confirmed by measurement on `persistent` and other cases (if the signal lands on the wrong leader, one leader receives extra bytes and the other never gets enough, i.e. `TIMEOUT`), and it matches the way CUTLASS `SM100_TMA_2SM_LOAD_MULTICAST` clears the peer bit.
 
-## Performance per step (GPU 2, CUDA Graph median, relative to cuBLAS BF16→FP32)
+## Performance per step (CUDA Graph median, relative to cuBLAS BF16→FP32)
 
 | Version | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
 |---|---|---|---|

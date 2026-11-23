@@ -10,7 +10,7 @@
 - **No proxy fence for generic read → TMA overwrite**: the consumer reads `in[s]`, hands it to the producer through an mbarrier arrive/wait, and only then is the TMA issued, consistent with CUTLASS's consumer_release. For generic write → TMA store read, every writing thread executes `fence.proxy.async.shared::cta`.
 - **`bulk_wait_group<0>` before exit** (not `.read`): a conservative choice that makes sure all stores complete; the cost is one extra write latency at the end of each consumer warp, negligible for a persistent kernel. Lab 31 uses CUTLASS's `.read` form; the lessons explain this in both places.
 
-## Performance per step (GPU 4, CUDA Graph, each step measured 2–3 times)
+## Performance per step (CUDA Graph, each step measured 2–3 times)
 
 | step | `big` GB/s | `wide` GB/s | `vs copy` | Notes |
 |---|---|---|---|---|
@@ -22,7 +22,7 @@
 | `torch` (`y.copy_(x.t())`) | ≈ 1860–1905 | ≈ 1885–1905 | ≈ 0.29 | |
 
 - On the same machine, lab 00 step 4 reaches about 5910 GB/s (`vs copy` ≈ 0.92), so TMA leads in bandwidth by only about 5% (about 2% with `--cold`). The lesson states this honestly and describes the gain as "1 issuing thread and 9 warps reach the same bandwidth".
-- `perf_target` is `{"baseline": "copy", "ratio": 0.85}`: `copy` and the solution are both HBM-bound, so the ratio is stable. `torch` is not suitable as a gate: in an earlier measurement (GPU 3), step 1/2 reached only ≈ 1030/1060 GB/s and torch jumped between about 1.0 and 1.8 TB/s, while step 3 and copy did not change. Hypothesis (unverified): the GPU was at a lower SM clock that time, and kernels limited by bank conflicts / latency (the torch transpose, step 1/2) slowed down with the SM clock, while HBM-bound kernels were not affected. During this measurement the SM clock was 1965 MHz (the maximum), and all results were stable.
+- `perf_target` is `{"baseline": "copy", "ratio": 0.85}`: `copy` and the solution are both HBM-bound, so the ratio is stable. `torch` is not suitable as a gate: in an earlier measurement, step 1/2 reached only ≈ 1030/1060 GB/s and torch jumped between about 1.0 and 1.8 TB/s, while step 3 and copy did not change. Hypothesis (unverified): the GPU was at a lower SM clock that time, and kernels limited by bank conflicts / latency (the torch transpose, step 1/2) slowed down with the SM clock, while HBM-bound kernels were not affected. During this measurement the SM clock was 1965 MHz (the maximum), and all results were stable.
 - Tuning (`big`): `<32,4>` ≈ 5180, `<64,4>` ≈ 5650, `<128,2>` ≈ 5720, `<128,3>` ≈ 5720, `<128,4>` ≈ 5630, `<128,6>` ≈ 5600, `<192,3>` ≈ 5790, `<256,2>` ≈ 6200, `<256,3>` ≈ 5770, `<256,4>` ≈ 5750. More bytes in flight is not faster; the cause was not found.
 - NCU (`big`): step 1/2 shared load bank conflicts ≈ 6.6e7 (LDS ≈ 2.1e6 instructions); step 3 load ≈ 7.3e5, store ≈ 1.0e6 (LDS/STS ≈ 5.2e5 instructions each). A different lane assignment barely changes the counts; the residual counts presumably come from arbitration with TMA accesses, not confirmed.
 

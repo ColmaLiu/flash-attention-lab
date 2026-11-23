@@ -10,7 +10,7 @@
 - **step 3**: `Config<256, 4, true>`: 192 KB shared memory, 256 TMEM columns, 1 CTA per SM. The epilogue reuses the stage buffers for staging (all loads have been waited on, all MMAs have completed). Each warp uses one 32×32 box per 32 columns and writes it with 128B swizzle (16-byte stores without bank conflicts; NCU counts 0). After `fence.proxy.async` + `__syncwarp`, lane 0 issues the TMA store; no synchronization between warps is needed. Before exit, `cp.async.bulk.wait_group.read 0` (the same as CUTLASS's `tma_store_wait<0>`).
 - **TMEM lifecycle**: warp 0 executes alloc and relinquish. After `fence::before → __syncthreads → fence::after`, all threads read the base. Before dealloc, the same fence sequence guarantees that all `tcgen05.ld` have completed.
 
-## Performance per step (GPU 3, CUDA Graph, relative to cuBLAS BF16→FP32)
+## Performance per step (CUDA Graph, relative to cuBLAS BF16→FP32)
 
 | Configuration | 4096³ | 8192×8192×4096 |
 |---|---|---|

@@ -74,7 +74,7 @@ cases (steps 2/3); the FA4 FP8 baseline still agrees with the oracle.
 (`position`-type, `ones_v*`, `peaked*`, `long_tail`, and so on), 6 in step 3 (`peaked*`, `causal_medium*`, `long_tail`):
 the consistent normalization of step 3 cancels most of the truncation bias, which is visible only in rows with concentrated weight and long-tail rows.
 
-## Performance per step (CUDA Graph, GPU 4, range of 2–3 runs)
+## Performance per step (CUDA Graph, range of 2–3 runs)
 
 | Version | `perf` | `perf_causal` | `perf_d64` | `perf_8k` |
 |---|---|---|---|---|

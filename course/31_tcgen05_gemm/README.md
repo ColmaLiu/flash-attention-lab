@@ -351,7 +351,7 @@ For TODO(3b), start experimenting from the table below; run `check` and then `be
 
 ## 7. Performance
 
-Measured on this machine (GPU 3, CUDA Graph; larger `vs cublas` is better):
+Measured on this machine (CUDA Graph; larger `vs cublas` is better):
 
 | Version | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | `square` TFLOP/s |
 |---|---|---|---|

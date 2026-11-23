@@ -455,7 +455,7 @@ After passing, try an experiment: swap the issue order of "PV_j" and "the next Q
 
 ### 7.1 Against the library baselines
 
-Measured on GPU 6 (CUDA Graph; `vs cudnn` = cuDNN time / this version's time, higher is better):
+Measured on B200 (CUDA Graph; `vs cudnn` = cuDNN time / this version's time, higher is better):
 
 | Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 |
 |---|---|---|---|

@@ -54,7 +54,7 @@ registers 192/72/56, 184/80/64: slower or more spills.
 **Registers.** The causal D = 128 kernel at first spilled 8 bytes in the 48-register TMA section: `blocks` was computed before the role split and stayed live across
 `setmaxnreg`; recomputing it inside each role and adding `#pragma unroll 1` to the panel loop over the K half removed the spill.
 
-## Performance of each step (GPU 3, CUDA Graph, relative to cuDNN; range over two runs)
+## Performance of each step (CUDA Graph, relative to cuDNN; range over two runs)
 
 | Version | `perf` | `perf_causal` | `perf_d64` | `perf_8k` |
 |---|---|---|---|---|

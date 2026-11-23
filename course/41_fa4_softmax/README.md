@@ -386,7 +386,7 @@ Implement `use_poly`: exactly `kPolyPairs` of the 16 pairs return true, spread e
 
 ### 7.1 Against the library baseline
 
-Measured on GPU 7 (CUDA Graph; `vs cudnn` = cuDNN time / time of this version, higher is better):
+Measured on B200 (CUDA Graph; `vs cudnn` = cuDNN time / time of this version, higher is better):
 
 | Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|

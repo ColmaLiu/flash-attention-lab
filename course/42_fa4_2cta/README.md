@@ -379,7 +379,7 @@ Then, in the step-3 branch of `arrive_leader`, switch to a remote arrive without
 
 ### 7.1 Against the library baseline and lab 41
 
-Measured on GPU 3 (CUDA Graph; `vs cudnn` = cuDNN time / time of this version, higher is better; range over two runs):
+Measured on B200 (CUDA Graph; `vs cudnn` = cuDNN time / time of this version, higher is better; range over two runs):
 
 | Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|

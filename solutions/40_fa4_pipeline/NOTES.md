@@ -46,7 +46,7 @@ instruction stream short.
 **Attempts not adopted** (compared in the same run, differences within noise): keeping the 4 `tcgen05.ld` of S in flight together with a single wait; removing the
 `tcgen05.fence::after_thread_sync` in `acquire`; one `p_ready` arrive per warp (count 4/8); interleaving exp2 and writing P in chunks.
 
-## Performance per step (vs cuDNN, CUDA Graph, GPU 7, range over 3 runs each)
+## Performance per step (vs cuDNN, CUDA Graph, range over 3 runs each)
 
 | Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|

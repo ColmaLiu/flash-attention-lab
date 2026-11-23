@@ -406,7 +406,7 @@ The skeleton already contains the host side (tensor maps, launch, dispatch), bar
 
 ### 7.1 Against the library baselines
 
-Measured on GPU 7 (CUDA Graph; `vs cudnn` = cuDNN time / this version's time, higher is better; each entry is the range over 3 runs):
+Measured on B200 (CUDA Graph; `vs cudnn` = cuDNN time / this version's time, higher is better; each entry is the range over 3 runs):
 
 | Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 | `perf_8k` [2,8192,16,128] BF16 |
 |---|---|---|---|---|

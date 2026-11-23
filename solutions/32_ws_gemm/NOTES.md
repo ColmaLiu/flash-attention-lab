@@ -16,7 +16,7 @@
 - **step 1** uses a separate `gemm_ws_tile` (grid = all tiles, single accumulator, the same tile and stage count as lab 31 step 3) and only changes "who issues TMA, who issues MMA, who runs the epilogue". **steps 2/3** use `gemm_ws_persistent`, grid = min(number of tiles, number of SMs), tiles `blockIdx.x + i·gridDim.x`. Step 3 only changes the tile order (grouped rasterization, `kGroupM = 8`).
 - **No `setmaxnreg`**: 56–72 registers, no spill; each SM has only 6 warps, the register file is far from full, and redistributing gives no benefit. It is left to FA4 (lab 40), where the softmax warpgroups need many registers.
 
-## Performance per step (GPU 5, CUDA Graph, relative to cuBLAS BF16→FP32)
+## Performance per step (CUDA Graph, relative to cuBLAS BF16→FP32)
 
 | Version | square 4096³ | wide 8192×8192×4096 | flat 8192×8192×1024 |
 |---|---|---|---|

@@ -469,7 +469,7 @@ All correctness cases of step 3 have very few rounds, so they all take cluster 4
 
 ## 7. Performance
 
-Measured on this machine (B200, GPU 2, CUDA Graph median; larger `vs cublas` is better):
+Measured on this machine (B200, CUDA Graph median; larger `vs cublas` is better):
 
 | Version | `square` 4096³ | `wide` 8192×8192×4096 | `flat` 8192×8192×1024 |
 |---|---|---|---|

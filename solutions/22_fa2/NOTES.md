@@ -51,7 +51,7 @@ K and V in separate groups and the V copy overlapped with QKᵀ, was not tried; 
 `mma<T>` (selects `lab::mma_m16n8k16_{f16,bf16}` by dtype), `quad_max/quad_sum`, and the two-segment swizzle
 `tile_offset`. None of them is a new PTX primitive, so they were not put into `include/lab`.
 
-## Performance per step (vs cuDNN, CUDA Graph, GPU 7)
+## Performance per step (vs cuDNN, CUDA Graph)
 
 | step | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 |
 |---|---|---|---|

@@ -349,7 +349,7 @@ The `persistent` case has 372 tiles: some CTAs process 3 tiles, with accumulator
 
 ## 7. Performance
 
-Measured on this machine (B200, GPU 5, CUDA Graph; larger `vs cublas` is better):
+Measured on this machine (B200, CUDA Graph; larger `vs cublas` is better):
 
 | Version | `square` 4096³ | `wide` 8192×8192×4096 | `flat` 8192×8192×1024 |
 |---|---|---|---|

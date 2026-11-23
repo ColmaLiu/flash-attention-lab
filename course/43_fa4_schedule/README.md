@@ -29,7 +29,7 @@ After this lab you should be able to:
 
 ## 2. Motivation: where lab 41 gets stuck
 
-Measurements of the lab 41 solution (step 3) (GPU 5, CUDA Graph; `vs cudnn` = cuDNN time / time of this version):
+Measurements of the lab 41 solution (step 3) (CUDA Graph; `vs cudnn` = cuDNN time / time of this version):
 
 | case | shape | lab 41 vs cuDNN | FA4 vs cuDNN |
 |---|---|---|---|
@@ -370,7 +370,7 @@ O^t's TMEM needs no separate handover (§5.2). The double buffering of `final_fu
 
 ### 7.1 Against the library baselines
 
-Measured on GPU 5 (CUDA Graph; `vs cudnn` = cuDNN time / time of this version, larger is better; each row comes from one `bench` run; cuDNN itself varies by about ±4% between runs):
+Measured on B200 (CUDA Graph; `vs cudnn` = cuDNN time / time of this version, larger is better; each row comes from one `bench` run; cuDNN itself varies by about ±4% between runs):
 
 | Version | `perf` | `perf_causal` | `perf_d64` | `perf_8k` | `perf_causal_bh16` |
 |---|---|---|---|---|---|

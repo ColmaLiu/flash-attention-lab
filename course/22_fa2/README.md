@@ -296,7 +296,7 @@ When you are done, try an experiment: change 3a back to not skipping blocks (kee
 
 ### 7.1 Against the library baselines
 
-Measured on GPU 7 (CUDA Graph; `vs cudnn` is cuDNN time divided by the time of this version, larger is better):
+Measured on B200 (CUDA Graph; `vs cudnn` is cuDNN time divided by the time of this version, larger is better):
 
 | Version | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 |
 |---|---|---|---|

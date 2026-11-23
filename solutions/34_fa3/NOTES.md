@@ -52,7 +52,7 @@ max and sum each use 8 independent accumulators: each SMSP has only one softmax 
 which barrier to commit) and by the softmax warps (which buffer to read, which parity to wait for); the one-buffer branch is given in the skeleton, and the two-buffer
 branch plus the early issue in the MMA (QK_1, QK_{j+2}) are TODO(5).
 
-## Performance per step (vs cuDNN, CUDA Graph, GPU 6)
+## Performance per step (vs cuDNN, CUDA Graph)
 
 | step | `perf` [4,4096,16,128] BF16 | `perf_causal` | `perf_d64` [4,4096,32,64] FP16 |
 |---|---|---|---|

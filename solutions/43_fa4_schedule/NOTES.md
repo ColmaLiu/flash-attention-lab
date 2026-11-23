@@ -39,7 +39,7 @@ show: static snake requires per-round work to be monotonic, and FA4's section or
 sections are usable (variant C), but on this lab's cases L2 is not the bottleneck, and sections are not faster than no sections. Dynamic scheduling (atomic counter + broadcast between roles, or SM100's
 CLC) matches snake in simulation and is not implemented.
 
-## Performance per step (relative to cuDNN, CUDA Graph, GPU 5, each row from the same bench run)
+## Performance per step (relative to cuDNN, CUDA Graph, each row from the same bench run)
 
 | Version | `perf` | `perf_causal` | `perf_d64` | `perf_8k` | `perf_causal_bh16` |
 |---|---|---|---|---|---|
@@ -49,7 +49,7 @@ CLC) matches snake in simulation and is not implemented.
 | step 3 | ≈ 1.03× | ≈ 1.27× | ≈ 1.01× | ≈ 0.99× | ≈ 0.97× |
 | FA4 | ≈ 1.17× | ≈ 1.31–1.33× | ≈ 1.15× | ≈ 1.10× | ≈ 1.14× |
 
-`./lab selftest 43 --perf` (target 0.9, GPU 7; GPU 5 was taken by another user partway through) passes (re-measured after the review fixes): `perf` 1.02×, `perf_causal` 1.27×, `perf_d64` 1.02×,
+`./lab selftest 43 --perf` (target 0.9) passes (re-measured after the review fixes): `perf` 1.02×, `perf_causal` 1.27×, `perf_d64` 1.02×,
 `perf_8k` 0.98×, `perf_causal_bh16` 1.03× (FA4 in the same run 1.16×, 1.32×, 1.15×, 1.11×, 1.14×). The tightest is `perf_8k`.
 
 Nsight Compute (locked clocks) `sm__cycles_active.max / avg`: `perf_causal_bh16` steps 1/2/3 = 1.33/1.52/1.04 (FA4 1.07);
