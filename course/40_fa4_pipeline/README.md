@@ -200,7 +200,7 @@ if (leader) { mma...; lab::tcgen05_commit(...); }
 __syncwarp();
 ```
 
-Instrumentation on this machine (§7.2): with only lane 0 running, the MMA thread takes several hundred cycles after `p_ready` has completed to issue the next MMA; with the whole warp, this drops to a few dozen cycles, and the whole kernel is about 5–8% faster. This is a measured effect; we have not verified its hardware cause (how a divergent warp is scheduled). The TMA warp loads several stages ahead, so a slower reaction does not matter there, and it keeps the lane-0 style.
+Measured with instrumentation (§7.2): with only lane 0 running, the MMA thread takes several hundred cycles after `p_ready` has completed to issue the next MMA; with the whole warp, this drops to a few dozen cycles, and the whole kernel is about 5–8% faster. This is a measured effect; we have not verified its hardware cause (how a divergent warp is scheduled). The TMA warp loads several stages ahead, so a slower reaction does not matter there, and it keeps the lane-0 style.
 
 ### 4.7 Common misuses
 

@@ -22,7 +22,7 @@
 | `<128,3>` TMA write-back (2 CTA/SM) | ≈ 0.34–0.6× (unstable) | ≈ 0.60× |
 | step 3: `<256,4>` TMA write-back | ≈ 0.81–0.83× | ≈ 0.74–0.77× |
 
-- `selftest --perf`: square 0.830, wide 0.751, perf gate 0.6 (the task description expected 0.5–0.7; the measured values are higher, and the gate leaves a margin because this machine's GPU occasionally slows down across the board between runs).
+- `selftest --perf`: square 0.830, wide 0.751, perf gate 0.6 (the task description expected 0.5–0.7; the measured values are higher, and the gate leaves a margin because the GPU occasionally slows down across the board between runs).
 - NCU (square): `sm__pipe_tensor_cycles_active` step 2 ≈ 26%, step 3 ≈ 68%; DRAM writes step 2 ≈ 99 MB (C is 67 MB; per-row stores produce scattered partial-sector writes), step 3 ≈ 42 MB; the epilogue's shared stores have 0 bank conflicts.
 - Remaining gap (inferred, not measured item by item): the epilogue does not overlap the main loop (1 CTA per SM), a single thread waits on TMA and MMA serially, the 3.46-wave tail of square, and every CTA re-reads A/B from L2. These are handled by lab 32 (warp specialization, TMEM double buffering, persistent) and lab 33 (2-CTA, multicast).
 

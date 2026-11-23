@@ -123,7 +123,7 @@ A static `__shared__` array is limited to 48 KB. For larger buffers, use dynamic
 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
 ```
 
-B200 has 228 KB of shared memory per SM, and a single CTA can use at most 227 KB. Shared memory and L1 share the same storage on each SM; the driver picks the split (the carveout) per kernel. The skeleton's `allow_smem` also sets `cudaFuncAttributePreferredSharedMemoryCarveout = cudaSharedmemCarveoutMaxShared`: on this machine, without it, the 3–4 stage versions occasionally had runs that were twice as slow (as if only one CTA fit per SM); with it, those runs disappeared. This part is already written.
+B200 has 228 KB of shared memory per SM, and a single CTA can use at most 227 KB. Shared memory and L1 share the same storage on each SM; the driver picks the split (the carveout) per kernel. The skeleton's `allow_smem` also sets `cudaFuncAttributePreferredSharedMemoryCarveout = cudaSharedmemCarveoutMaxShared`: in measurements, without it, the 3–4 stage versions occasionally had runs that were twice as slow (as if only one CTA fit per SM); with it, those runs disappeared. This part is already written.
 
 ### 4.5 Common misuses
 
@@ -252,7 +252,7 @@ Change `kGroupM` to 1, profile again, and compare `dram__bytes_read.sum` and `lt
 
 ## 7. Performance
 
-Measured on this machine (CUDA Graph; larger `vs cublas` is better; "% of mma.sync upper bound" is TFLOP/s divided by the 560 TFLOP/s measured in lab 20 §4.1):
+Measured (CUDA Graph; larger `vs cublas` is better; "% of mma.sync upper bound" is TFLOP/s divided by the 560 TFLOP/s measured in lab 20 §4.1):
 
 | Version | `square` `vs cublas` | `wide` `vs cublas` | % of mma.sync upper bound |
 |---|---|---|---|
@@ -268,7 +268,7 @@ If step 3 reaches 0.22× of cuBLAS or more (about 55% of the mma.sync upper boun
 
 - **Step 1 gives the largest gain**: loads and compute overlap for the first time.
 - **Step 2 changes almost nothing**: this matches the §3.1 estimate: with double buffering, each of the two CTAs on an SM has one tile in flight, which is already close to the amount needed. Multistage pipelines matter when "only one CTA fits per SM" or "latency is longer", for example the TMA pipelines of Part 3.
-- **The step 3 gain comes from the tile shape**, not from rasterization. Step 3 configuration experiments (`square`, this machine):
+- **The step 3 gain comes from the tile shape**, not from rasterization. Step 3 configuration experiments (`square`):
 
 | Configuration | `vs cublas` |
 |---|---|

@@ -336,7 +336,7 @@ The FA1 of lab 12 is FP32 SIMT and reaches about 25 TFLOP/s on `perf` ([4,4096,6
 ./lab profile 22 --case perf --step 2
 ```
 
-Nsight Compute results on this machine (`perf`):
+Measured Nsight Compute results (`perf`):
 
 | Metric | Step 2 | Step 4 | Notes |
 |---|---|---|---|
@@ -352,7 +352,7 @@ The remaining ≈1/3 idle time comes from: one `__syncthreads()` per block; the 
 
 Experiments to try yourself:
 
-- Change D = 128 to 8 warps with Br = 128 (`Config<128, 8, 1, 64, …>`). On this machine this is **slower** (step 4 about 0.22×): only one CTA fits per SM, and no other CTA fills in at its barriers.
+- Change D = 128 to 8 warps with Br = 128 (`Config<128, 8, 1, 64, …>`). In measurements this is **slower** (step 4 about 0.22×): only one CTA fits per SM, and no other CTA fills in at its barriers.
 - Change D = 64 to Bc = 64, look for spills with `./lab sass 22`, then bench.
 
 ## 8. Self-check questions

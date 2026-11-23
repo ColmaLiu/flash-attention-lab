@@ -235,7 +235,7 @@ Write the `Strides` of P, V (read as (d, j)) and O, and call `gemm()` with `alph
 
 ### 7.1 Time and library baseline
 
-Measured on this machine (CUDA Graph timing; `vs efficient` is the time of PyTorch memory-efficient attention divided by the time of this implementation):
+Measured (CUDA Graph timing; `vs efficient` is the time of PyTorch memory-efficient attention divided by the time of this implementation):
 
 | case | shape [B, N, H, D] | vs efficient |
 |---|---|---|

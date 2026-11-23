@@ -26,7 +26,7 @@ x: [rows, cols]   address of x[r][c] = x + (r * cols + c)
 y: [cols, rows]   address of y[c][r] = y + (c * rows + r)
 ```
 
-A transpose must read `rows*cols*4` bytes and write the same number of bytes. The `big` case is 8192×8192, so reads plus writes total 512 MiB. B200 HBM3e has a nominal bandwidth of 8 TB/s, so the lower bound on time is about 0.067 ms. On this machine, the simplest `y.copy_(x)` (a contiguous copy, no transpose) measures about 6.5 TB/s, which is a more realistic upper bound.
+A transpose must read `rows*cols*4` bytes and write the same number of bytes. The `big` case is 8192×8192, so reads plus writes total 512 MiB. B200 HBM3e has a nominal bandwidth of 8 TB/s, so the lower bound on time is about 0.067 ms. The simplest `y.copy_(x)` (a contiguous copy, no transpose) measures about 6.5 TB/s, which is a more realistic upper bound.
 
 The `GB/s` that `./lab bench` reports is `2 * rows * cols * 4 / time`, and `% peak` is that value as a fraction of 8 TB/s.
 
@@ -56,7 +56,7 @@ In the naive transpose, the 32 threads of a warp have the same `r` and consecuti
 - reading `x[r][c]`: the addresses are contiguous, so the access is coalesced;
 - writing `y[c][r]`: adjacent threads' addresses differ by `rows * 4` bytes, so the access is not coalesced.
 
-Below is the result of `./lab profile 00 --solution --step 1` on this machine (8192×8192). Each store request maps to 32 sectors:
+Below is a measured result of `./lab profile 00 --solution --step 1` (8192×8192). Each store request maps to 32 sectors:
 
 | Metric | read x | write y |
 |---|---|---|
@@ -96,7 +96,7 @@ HBM access latency is on the order of a few hundred nanoseconds to 1 microsecond
 At most 2048 threads are resident on one SM. Data in flight = resident threads × loads in flight per thread × bytes per load. The last two factors depend on how you write the code:
 
 - **The loads must be able to issue together.** After a thread issues a load, it does not stop to wait for the data. It keeps executing later instructions that do not depend on that data, and waits only when it uses the data. So the more independent loads a thread can issue back to back, the more data is in flight at once. This is called instruction-level parallelism (ILP).
-- **How you write the loop affects whether the compiler can do this.** With `for (k = 0; k < 4; ++k)`, the trip count is a compile-time constant, so the compiler fully unrolls the loop and issues the 4 loads back to back. With `for (i = threadIdx.y; i < 32; i += 8)`, the trip count depends on `threadIdx.y`, so the compiler generates code with branches: after each load it immediately writes the result into shared memory, and the next load waits for the previous one to return. Measured on this machine, this one change moves step 3 from about 2.8 TB/s to about 5.0 TB/s. You can check it in the SASS file that `./lab sass 00` generates: count the `LDG` instructions before the first `STS` in the kernel.
+- **How you write the loop affects whether the compiler can do this.** With `for (k = 0; k < 4; ++k)`, the trip count is a compile-time constant, so the compiler fully unrolls the loop and issues the 4 loads back to back. With `for (i = threadIdx.y; i < 32; i += 8)`, the trip count depends on `threadIdx.y`, so the compiler generates code with branches: after each load it immediately writes the result into shared memory, and the next load waits for the previous one to return. In measurements, this one change moves step 3 from about 2.8 TB/s to about 5.0 TB/s. You can check it in the SASS file that `./lab sass 00` generates: count the `LDG` instructions before the first `STS` in the kernel.
 
 In step 3, each thread has 4 loads in flight. A fully loaded SM then has about 2048 × 4 × 4 B = 32 KB in flight, right around the estimate above. Also, each block reads no data in its write phase after `__syncthreads()`. Step 4 keeps the tile the same and cuts each block's threads from 32×8 to 32×2: each thread handles 16 elements and issues 16 loads back to back, which raises the data in flight to 4 times the previous amount. This is common on GPUs: **per-thread ILP and the number of threads on the SM (TLP) together determine the memory traffic in flight**, and fewer threads that each do more work are often faster.
 
@@ -197,7 +197,7 @@ In `case 4`, choose `kThreadsY` so that each thread handles 16 elements, and lau
 
 ## 7. Performance
 
-Measured on this machine (8192×8192, CUDA Graph timing; `vs torch` is the time of PyTorch `y.copy_(x.t())` divided by the time of this version):
+Measured (8192×8192, CUDA Graph timing; `vs torch` is the time of PyTorch `y.copy_(x.t())` divided by the time of this version):
 
 | Version | `vs torch` | % nominal HBM peak |
 |---|---|---|

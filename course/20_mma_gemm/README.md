@@ -69,7 +69,7 @@ A 4096³ GEMM is 137 GFLOP in total, and at 64 FLOP/B it needs to read about 2.1
 | `wgmma.mma_async` | Hopper only (SM90) | 4 warps | shared memory / registers | registers |
 | `tcgen05.mma` | Blackwell (SM100) | one thread | shared memory / TMEM | TMEM |
 
-B200 still supports `mma.sync`, but it is the "old path". A microbenchmark on this machine that issues only `mma.sync` measures:
+B200 still supports `mma.sync`, but it is the "old path". A microbenchmark that issues only `mma.sync` measures:
 
 | | BF16 throughput | relative to nominal 2250 TFLOP/s |
 |---|---|---|
@@ -301,7 +301,7 @@ Bank conflicts should drop to nearly 0, and the wavefront count to 1/4 of step 2
 
 ## 7. Performance
 
-Measured on this machine (CUDA Graph timing; `vs cublas` is the time of cuBLAS BF16→FP32 divided by the time of this version; "% of mma.sync limit" is TFLOP/s divided by the 560 TFLOP/s of §4.1):
+Measured (CUDA Graph timing; `vs cublas` is the time of cuBLAS BF16→FP32 divided by the time of this version; "% of mma.sync limit" is TFLOP/s divided by the 560 TFLOP/s of §4.1):
 
 | version | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | % of mma.sync limit |
 |---|---|---|---|

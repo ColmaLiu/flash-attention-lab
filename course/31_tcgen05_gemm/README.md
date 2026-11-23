@@ -351,7 +351,7 @@ For TODO(3b), start experimenting from the table below; run `check` and then `be
 
 ## 7. Performance
 
-Measured on this machine (CUDA Graph; larger `vs cublas` is better):
+Measured (CUDA Graph; larger `vs cublas` is better):
 
 | Version | `square` 4096³ `vs cublas` | `wide` 8192×8192×4096 `vs cublas` | `square` TFLOP/s |
 |---|---|---|---|
@@ -362,7 +362,7 @@ Measured on this machine (CUDA Graph; larger `vs cublas` is better):
 | Step 3 (solution): BN = 256, 4 stages, TMA write-back | ≈ 0.8× | ≈ 0.75× | ≈ 1150–1200 |
 | cuBLAS | 1 | 1 | ≈ 1440 |
 
-The absolute speed of this machine's GPU sometimes drops across the board between runs (cuBLAS slows down as well), while the ratios stay relatively stable, so read the ratios. If step 3 reaches 0.6× cuBLAS or more, the mechanism works.
+The absolute speed of the GPU sometimes drops across the board between runs (cuBLAS slows down as well), while the ratios stay relatively stable, so read the ratios. If step 3 reaches 0.6× cuBLAS or more, the mechanism works.
 
 **Reading this table**:
 

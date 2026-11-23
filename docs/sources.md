@@ -50,7 +50,7 @@ Parts of this repository's solutions that are adapted directly from upstream cit
 
 ## 4. NVIDIA documentation
 
-The online docs change over time. For instruction usage, the authority is PTX ISA 8.7, which matches the local CUDA 12.8; the wrappers in `include/lab/*.cuh` name the PTX ISA 8.7 sections.
+The online docs change over time. For instruction usage, the authority is PTX ISA 8.7, which matches the CUDA 12.8 the course uses; the wrappers in `include/lab/*.cuh` name the PTX ISA 8.7 sections.
 
 | Doc | Use |
 |---|---|

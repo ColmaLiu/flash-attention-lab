@@ -39,7 +39,7 @@ Group size (step 3, change in absolute time relative to step 2, at most 3 repeti
 - Accumulator double buffering by itself is worth only about 1% on square and about 10% on flat: with K = 4096 the main loop of a tile is about 6–8 times the epilogue, and the single accumulator is also "released as soon as TMEM is read", so the MMA only waits for the TMEM→register part. With K = 1024 the epilogue and the main loop are of the same order, and only then does overlap show its value. The `flat` perf case was added for this.
 - G > 0 is slightly slower on cases where A and B both fit in L2; the reason has not been found (inferred to be related to the separate L2 partitions of the two B200 dies, or to the same panel being read by more CTAs at the same time; not verified). G = 8 is the choice with the best worst-case ratio across the three perf cases.
 - `--cold` (L2 flushed before each iteration) step 3: square ≈ 0.91×, wide ≈ 0.87×, flat ≈ 1.0×.
-- `selftest --perf` perf gate 0.85: the measured worst case is about 0.91 (square, wide), leaving about 6% margin. The GPU on this machine occasionally has periods of slowing down across the board (cuBLAS slows down too); the ratios stay basically the same.
+- `selftest --perf` perf gate 0.85: the measured worst case is about 0.91 (square, wide), leaving about 6% margin. The GPU occasionally has periods of slowing down across the board (cuBLAS slows down too); the ratios stay basically the same.
 - Remaining gap (inferred): each 128×256 tile reads 48 KB from L2 per K tile, and the 148 SMs together approach the L2 bandwidth; square has 512 tiles = 3.46 waves, and 46% of the SMs are idle in the last wave. The former is handled by lab 33's 2-CTA MMA and TMA multicast.
 
 ## Verification

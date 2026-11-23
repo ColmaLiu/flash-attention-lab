@@ -469,7 +469,7 @@ All correctness cases of step 3 have very few rounds, so they all take cluster 4
 
 ## 7. Performance
 
-Measured on this machine (B200, CUDA Graph median; larger `vs cublas` is better):
+Measured (B200, CUDA Graph median; larger `vs cublas` is better):
 
 | Version | `square` 4096³ | `wide` 8192×8192×4096 | `flat` 8192×8192×1024 |
 |---|---|---|---|
@@ -480,7 +480,7 @@ Measured on this machine (B200, CUDA Graph median; larger `vs cublas` is better)
 | Control: forced cluster 4 multicast | ≈ 1.00× | about 8% slower than step 2 | about 5% slower than step 2 |
 | Step 3, `--cold` (L2 flushed before each run) | ≈ 1.01× | ≈ 1.05× | ≈ 1.10× |
 
-cuBLAS on `wide` varies a lot on this machine (0.39–0.43 ms on the same GPU), so the ratio moves between 1.0 and 1.16 with it; the time of this lab relative to lab 32 is more stable: step 2 takes about 0.83–0.94 times the time of lab 32 on all three cases. The perf gate is 0.9× cuBLAS on all perf cases.
+cuBLAS on `wide` varies a lot (0.39–0.43 ms on the same GPU), so the ratio moves between 1.0 and 1.16 with it; the time of this lab relative to lab 32 is more stable: step 2 takes about 0.83–0.94 times the time of lab 32 on all three cases. The perf gate is 0.9× cuBLAS on all perf cases.
 
 **Reading this table**:
 

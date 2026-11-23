@@ -21,7 +21,7 @@ From lab 31 on, [`include/lab/mbarrier.cuh`](../../include/lab/mbarrier.cuh) and
 
 ## 2. Motivation: free the threads from moving data
 
-On the same GPU of this machine, lab 00 step 4 reaches about 5.9 TB/s, already close to a contiguous copy. But it pays a price: 32 CTAs (64 threads each) are resident per SM, 2048 threads in total, and every byte passes through a thread:
+On the same GPU, lab 00 step 4 measures about 5.9 TB/s, already close to a contiguous copy. But it pays a price: 32 CTAs (64 threads each) are resident per SM, 2048 threads in total, and every byte passes through a thread:
 
 ```
 LDG (global → registers) → STS (registers → shared) → __syncthreads → LDS → STG
@@ -37,7 +37,7 @@ The first idea of section 3.1 of the FlashAttention-3 paper is exactly this: **p
 
 ### 3.1 Lower bound and bytes in flight
 
-A transpose reads and writes `rows·cols·4` bytes each. `big` (8192×8192) totals 512 MiB; the lower bound is about 0.067 ms at the nominal 8 TB/s peak, and about 0.083 ms at the ≈6.4 TB/s measured for `y.copy_(x)` on this machine.
+A transpose reads and writes `rows·cols·4` bytes each. `big` (8192×8192) totals 512 MiB; the lower bound is about 0.067 ms at the nominal 8 TB/s peak, and about 0.083 ms at the ≈6.4 TB/s measured for `y.copy_(x)`.
 
 Little's law (lab 00 §4.5): to run at 6.4 TB/s with an estimated latency of about 700 ns, the whole GPU needs about 4.5 MB in flight, about 30 KB per SM. With TMA, the number of read bytes in flight is set directly by the number of buffers:
 
@@ -241,7 +241,7 @@ All active threads of the warp execute it together, and exactly one gets `p = tr
 | No `fence_barrier_init` + `__syncthreads` after `mbar_init` | Other threads or the TMA see an uninitialized barrier; occasional hangs or wrong results |
 | Wrong parity when waiting on `full` | Hangs on the first lap (waiting for a phase that never comes), or passes immediately and reads stale data |
 | Producer's first lap does not use `(n & 1) ^ 1` | Hang: nobody will perform release number −1 on `empty` |
-| No `fence.proxy.async` after writing `out` | The TMA store may read stale values. **Neither the tests on this machine nor racecheck found this bug**, so correctness here must come from reasoning, not testing |
+| No `fence.proxy.async` after writing `out` | The TMA store may read stale values. **Neither the tests nor racecheck found this bug**, so correctness here must come from reasoning, not testing |
 | Only lane 0 executes the fence | Same as above: the writes of the other lanes are not fenced |
 | No `wait_group` before the CTA exits | The store has not finished reading shared memory when the buffer is freed |
 | 128B swizzle buffer not 1024-byte aligned | TMA error, or swizzle indices that do not match |
@@ -374,10 +374,10 @@ Compare `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` and `smsp__in
 
 ## 7. Performance
 
-Measured on this machine (CUDA Graph). `./lab bench 30` prints two baselines:
+Measured (CUDA Graph). `./lab bench 30` prints two baselines:
 
 - `torch`: PyTorch `y.copy_(x.t())`, a general-purpose transposing copy;
-- `copy`: `y.copy_(x)`, which moves the same number of bytes but reads and writes fully contiguously, without transposing. It is the **practical upper bound** of HBM on this machine.
+- `copy`: `y.copy_(x)`, which moves the same number of bytes but reads and writes fully contiguously, without transposing. It is the **practical upper bound** of HBM.
 
 The `vs` column is the ratio against the first baseline, `torch`. The main yardstick of this lab is **`vs copy`** (`copy` time / your time, the last column of the table below): a transpose can at best be as fast as a contiguous copy, and the closer the ratio is to 1, the better.
 
@@ -421,7 +421,7 @@ During `./lab profile`, Nsight Compute locks the clocks and times are longer tha
 3. In step 2, what happens if the count of `empty[s]` is set to the number of consumer threads (128) while each warp still arrives only once?
 4. Why does a consumer use `wait_group.read 1` rather than `wait_group.read 0` before reusing an out buffer?
 5. With 128B swizzle, what is the byte offset (relative to a 1024-aligned buffer) of row 13, column 22 (float) of `in`?
-6. After deleting `fence_proxy_async()`, all tests on this machine still pass. Why does this not show that the fence can be omitted?
+6. After deleting `fence_proxy_async()`, all tests still pass. Why does this not show that the fence can be omitted?
 
 <details>
 <summary>Answers</summary>

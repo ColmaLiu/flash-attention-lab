@@ -221,7 +221,7 @@ The SASS that three ways of writing it compile to (with `x - m` already computed
 **Subtract first, then multiply.** The `shifted` case adds 5000 to each row. Subtracting two close numbers, `x - m`, is exact (Sterbenz lemma: when `m/2 ≤ x ≤ 2m`, `x - m` has no rounding), and multiplying by `log₂e` adds only one rounding, a relative error of about 6 × 10⁻⁸. Much code (including the FlashAttention source) writes this as one FMA, `fmaf(x, log2e, -m * log2e)`, to save an instruction. In that form, `m · log₂e ≈ 7200` is first rounded to FP32. Call the rounding error `δ(m)`; `|δ(m)|` is at most half an ulp, which is 2⁻¹² ≈ 2.4 × 10⁻⁴. So the FMA form computes `e^{x-m} · 2^{-δ(m)}`: an extra factor that depends only on the shift `m`.
 
 - **Steps 1 and 2**: the whole row uses one shift `M`. The numerator `e^{x-M}` and the denominator `Σ e^{x-M}` carry the same factor `2^{-δ(M)}`, which cancels exactly in the division. The FMA form also passes `shifted` in these two steps.
-- **Steps 3 and 4**: the partial states each use their own shift `m_t` (in step 3, the running max that each thread updates element by element; in step 4, the thread's local maximum), so `l_t` carries `2^{-δ(m_t)}`. The factor `e^{m_t - M}` applied at merge time, also computed in FMA form, adds only `2^{-δ(M)}` and cannot cancel `2^{-δ(m_t)}`. Different `m_t` have different rounding errors, so the denominator becomes a sum with unequal weights and no longer cancels with the numerator. Measured on this machine, this form fails `shifted` in steps 3 and 4, with a maximum relative error of about 2.5–4 × 10⁻⁴.
+- **Steps 3 and 4**: the partial states each use their own shift `m_t` (in step 3, the running max that each thread updates element by element; in step 4, the thread's local maximum), so `l_t` carries `2^{-δ(m_t)}`. The factor `e^{m_t - M}` applied at merge time, also computed in FMA form, adds only `2^{-δ(M)}` and cannot cancel `2^{-δ(m_t)}`. Different `m_t` have different rounding errors, so the denominator becomes a sum with unequal weights and no longer cancels with the numerator. In measurements, this form fails `shifted` in steps 3 and 4, with a maximum relative error of about 2.5–4 × 10⁻⁴.
 
 In attention, logits are usually only a few tens, `δ` is on the order of 10⁻⁶, and the output is BF16, so FA's use of FMA is fine. This lab's output is FP32 with a tolerance of 1e-4, so it subtracts first, then multiplies. Another form, "multiply `x` by `log₂e` first, then subtract", is even worse: each element's `x · log₂e` is rounded separately, and the errors do not cancel even in steps 1 and 2.
 
@@ -355,7 +355,7 @@ Implement `softmax_regs`. The configuration choice, `load_chunk`/`store_chunk` a
 
 ## 7. Performance
 
-Measured on this machine (CUDA Graph timing; `vs torch` is the time of PyTorch softmax (`aten::_softmax`) divided by the time of this version):
+Measured (CUDA Graph timing; `vs torch` is the time of PyTorch softmax (`aten::_softmax`) divided by the time of this version):
 
 | Version | rows4096 `[16384, 4096]` | rows32768 `[4096, 32768]` | rows256 `[262144, 256]` |
 |---|---|---|---|

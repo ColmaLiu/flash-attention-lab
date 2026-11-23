@@ -349,7 +349,7 @@ The `persistent` case has 372 tiles: some CTAs process 3 tiles, with accumulator
 
 ## 7. Performance
 
-Measured on this machine (B200, CUDA Graph; larger `vs cublas` is better):
+Measured (B200, CUDA Graph; larger `vs cublas` is better):
 
 | Version | `square` 4096³ | `wide` 8192×8192×4096 | `flat` 8192×8192×1024 |
 |---|---|---|---|
@@ -360,7 +360,7 @@ Measured on this machine (B200, CUDA Graph; larger `vs cublas` is better):
 | Step 3: grouped G = 8 | ≈ 0.92× | ≈ 0.91× | ≈ 0.95× |
 | cuBLAS | 1 | 1 | 1 |
 
-The GPU on this machine occasionally slows down across the board (cuBLAS slows down too), so read the ratios. Step 3 passes when it reaches 0.85× cuBLAS or more on all perf cases.
+The GPU occasionally slows down across the board (cuBLAS slows down too), so read the ratios. Step 3 passes when it reaches 0.85× cuBLAS or more on all perf cases.
 
 **Reading this table**:
 

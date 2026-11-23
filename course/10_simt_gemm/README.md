@@ -61,7 +61,7 @@ AI            = FLOP / bytes             (arithmetic intensity)
 
 The two "roofs" of B200:
 
-- **FP32 CUDA core peak**: 148 SMs × 128 FP32 lanes per SM × 2 FLOP (one FFMA) × 1.965 GHz (Max Clocks in `nvidia-smi -q -d CLOCK`; the measured clock under full-load timing is still 1965 MHz) ≈ **74.4 TFLOP/s**. The `% peak` of `./lab bench` uses the rounded value of 75 TFLOP/s. A microbenchmark that does only independent FFMAs reaches about 97% of this value on this machine.
+- **FP32 CUDA core peak**: 148 SMs × 128 FP32 lanes per SM × 2 FLOP (one FFMA) × 1.965 GHz (Max Clocks in `nvidia-smi -q -d CLOCK`; the measured clock under full-load timing is still 1965 MHz) ≈ **74.4 TFLOP/s**. The `% peak` of `./lab bench` uses the rounded value of 75 TFLOP/s. A microbenchmark that does only independent FFMAs measures about 97% of this value.
 - **HBM bandwidth**: nominal 8 TB/s.
 
 The ratio of the two is the **ridge point**: `74.4 / 8 ≈ 9.3 FLOP/B`. A kernel with AI below 9.3 is bandwidth-bound; one above 9.3 is compute-bound.
@@ -319,7 +319,7 @@ Compare `smsp__inst_executed_op_shared_ld.sum` (should drop to 1/4) and `l1tex__
 
 ## 7. Performance
 
-Measured on this machine (CUDA Graph timing; `vs cublas` is the time of cuBLAS SGEMM (TF32 off) divided by the time of this version):
+Measured (CUDA Graph timing; `vs cublas` is the time of cuBLAS SGEMM (TF32 off) divided by the time of this version):
 
 | Version | `square4k` vs cublas | `wide` vs cublas | `square4k` % FP32 peak |
 |---|---|---|---|

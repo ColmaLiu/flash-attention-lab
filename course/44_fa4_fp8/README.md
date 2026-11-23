@@ -351,7 +351,7 @@ In this step the MMA warp does not issue P·V and the epilogue does not write O;
 
 ### 7.1 Against FA4 FP8 and lab 40
 
-Measured on this machine (CUDA Graph, median; `vs FA4 FP8` = FA4 FP8 time / time of this version; ranges come from 2–3 runs, with about ±3% variation between single runs):
+Measured (CUDA Graph, median; `vs FA4 FP8` = FA4 FP8 time / time of this version; ranges come from 2–3 runs, with about ±3% variation between single runs):
 
 | Version | `perf` [4,4096,16,128] | `perf_causal` | `perf_d64` [4,4096,32,64] | `perf_8k` [2,8192,16,128] |
 |---|---|---|---|---|

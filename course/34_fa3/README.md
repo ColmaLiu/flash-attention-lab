@@ -125,7 +125,7 @@ tcgen05.ld.32x32b.x32 (lane 32w, col c): thread r gets S[r][c .. c+31]
 one row of 128 columns = 4 x32 loads, into float s[128]
 ```
 
-**No computation between `tcgen05.ld` and `wait::ld`.** `tcgen05.ld` is asynchronous: the registers are valid only after `tcgen05.wait::ld`. In lab 31, `tmem_ld_32x32b_x32` + `tmem_wait_ld()` are two separate asm statements. The `wait` has no register operands, so the compiler does not know that `v[]` depends on it, and it may schedule "pure register arithmetic on v[]" (taking the max, multiplying by α) before the wait, reading registers that are not written yet. The epilogue of lab 31 stores to memory right after the load, which happens to be safe; this lab computes right after the load, so it always uses **`lab::tmem_ld_32x32b_x32_sync`** from the header: ld and wait are in the same asm statement, so the output registers "exist" only after the wait. The cost is that the 4 loads of one thread cannot be in flight at the same time (measured on this machine: about 1–3% difference, see NOTES).
+**No computation between `tcgen05.ld` and `wait::ld`.** `tcgen05.ld` is asynchronous: the registers are valid only after `tcgen05.wait::ld`. In lab 31, `tmem_ld_32x32b_x32` + `tmem_wait_ld()` are two separate asm statements. The `wait` has no register operands, so the compiler does not know that `v[]` depends on it, and it may schedule "pure register arithmetic on v[]" (taking the max, multiplying by α) before the wait, reading registers that are not written yet. The epilogue of lab 31 stores to memory right after the load, which happens to be safe; this lab computes right after the load, so it always uses **`lab::tmem_ld_32x32b_x32_sync`** from the header: ld and wait are in the same asm statement, so the output registers "exist" only after the wait. The cost is that the 4 loads of one thread cannot be in flight at the same time (measured: about 1–3% difference, see NOTES).
 
 ### 4.2 S = Q·Kᵀ: the same as the GEMM of lab 31
 
@@ -477,7 +477,7 @@ Only when step 5 reaches at least 0.48× of cuDNN on all three perf cases does i
 ./lab profile 34 --case perf
 ```
 
-Nsight Compute on this machine (`perf`):
+Measured Nsight Compute (`perf`):
 
 | Metric | Step 3 | Step 5 | Notes |
 |---|---|---|---|

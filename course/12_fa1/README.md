@@ -342,7 +342,7 @@ Do only item 1 first: also delete the `if (causal) LAB_TODO(3);` in `first_q_blo
 
 ### 7.1 Relative to the library baseline
 
-Measured on this machine (CUDA Graph timing, FP32; `vs efficient` is the time of PyTorch memory-efficient attention divided by the time of this version):
+Measured (CUDA Graph timing, FP32; `vs efficient` is the time of PyTorch memory-efficient attention divided by the time of this version):
 
 | case | version | `vs efficient` | % of FP32 nominal peak |
 |---|---|---|---|
@@ -365,7 +365,7 @@ Some observations:
 ./lab profile 12 --case perf
 ```
 
-Nsight Compute results on this machine (`perf`, as ratios):
+Measured Nsight Compute results (`perf`, as ratios):
 
 | metric | result | explanation |
 |---|---|---|
@@ -379,7 +379,7 @@ Conclusion: in SIMT FP32, **the extra HBM round trips of FA1 are not the bottlen
 
 ### 7.3 Why it is about 2 times slower than the library
 
-PyTorch's FP32 memory-efficient attention runs the CUTLASS kernel `fmha_cutlassF_f32_aligned_64x64_rf_sm80` on this machine. Compared with this lab:
+PyTorch's FP32 memory-efficient attention runs the CUTLASS kernel `fmha_cutlassF_f32_aligned_64x64_rf_sm80` on B200. Compared with this lab:
 
 | | this lab | library |
 |---|---|---|
