@@ -40,10 +40,12 @@ inline PTX 字符串的内容不会被改动。
 
 ## 不会被格式化的目录
 
-`.pre-commit-config.yaml` 排除了 `students/`、`third_party/`、`artifacts/`、`.cache/`、`progress/` 等目录：
+`.pre-commit-config.yaml` 排除了 `third_party/`、`artifacts/`、`.cache/`、`progress/`：
 
-- `students/` 是学习者的练习区，批量工具不应改动你的实现和笔记。你可以自己对正在编辑的文件运行 `clang-format -i students/<ID>/kernel.cu`；
-- `third_party/` 是固定版本的上游源码。
+- `third_party/` 是固定版本的上游源码；
+- 其余是 Git 忽略的输出目录。
+
+`students/` 也在检查范围内：提交练习代码时，hook 会格式化暂存的 `kernel.cu`。注意 `run --all-files` 会直接改写工作区里所有已跟踪的文件，包括还没写完的练习；只想检查正在改的文件时，用 `--files`。
 
 ## 格式化之后
 
