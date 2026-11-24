@@ -141,7 +141,7 @@ shared memory has two "windows": `.shared::cta` (this CTA) and `.shared::cluster
 
 ```cpp
 // p points to this CTA's shared memory; returns the .shared::cluster address of the same offset in CTA `rank`
-uint32_t remote = lab::map_shared_rank(&sm.acc_empty[a], /*rank=*/0);   // mapa.shared::cluster.u32
+uint32_t remote = map_shared_rank(&sm.acc_empty[a], /*rank=*/0);   // mapa.shared::cluster.u32
 ```
 
 The two CTAs run the same kernel, so the offsets of static `__shared__` and of aligned dynamic shared memory are identical; "the same offset" is therefore "the other CTA's same variable".
@@ -150,9 +150,9 @@ Arriving and waiting across CTAs:
 
 ```cpp
 // arrive on another CTA's barrier (release at cluster scope)
-lab::mbar_arrive_cluster(remote);         // mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remote]
+mbar_arrive_cluster(remote);         // mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remote]
 // wait on our own barrier whose arriver is in another CTA (acquire at cluster scope)
-lab::mbar_wait_cluster(&bar, parity);     // mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64
+mbar_wait_cluster(&bar, parity);     // mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64
 ```
 
 `mbarrier.try_wait` can only wait on a barrier in **its own** CTA. When another CTA needs to know something, that CTA arrives on your barrier; you do not wait on theirs.
@@ -160,8 +160,8 @@ lab::mbar_wait_cluster(&bar, parity);     // mbarrier.try_wait.parity.acquire.cl
 **cluster barrier**:
 
 ```cpp
-lab::cluster_arrive();   // barrier.cluster.arrive.release.aligned
-lab::cluster_wait();     // barrier.cluster.wait.acquire.aligned
+cluster_arrive();   // barrier.cluster.arrive.release.aligned
+cluster_wait();     // barrier.cluster.wait.acquire.aligned
 ```
 
 The wait returns only after **all threads of all CTAs** in the cluster have arrived. It replaces the `__syncthreads()` in lab 32's setup / teardown (Section 4.6).
@@ -172,7 +172,7 @@ The `.cta_group::2` form of the TMA load writes the box into **this CTA's** shar
 
 ```cpp
 // cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [dst], [map, {x, y}], [bar]
-lab::tma_load_2d_cg2(sm.a(s), &a_map, lab::map_shared_rank(&sm.full[s], leader), x, y);
+tma_load_2d_cg2(sm.a(s), &a_map, map_shared_rank(&sm.full[s], leader), x, y);
 ```
 
 So the data of both CTAs "reports" to the leader's `full[s]`, and the thread that issues the MMA is in the leader.
@@ -183,7 +183,7 @@ So the data of both CTAs "reports" to the leader's `full[s]`, and the thread tha
 
 ```cpp
 constexpr uint32_t idesc = lab::make_idesc_f16(/*M=*/256, /*N=*/256, /*bf16=*/true);
-lab::mma_f16_ss_cg2(d_tmem, a_desc, b_desc, idesc, accumulate);
+mma_f16_ss_cg2(d_tmem, a_desc, b_desc, idesc, accumulate);
 // tcgen05.mma.cta_group::2.kind::f16 [d], a_desc, b_desc, idesc, p;
 ```
 
@@ -222,7 +222,7 @@ A `.multicast::cluster` TMA load reads the box from L2 once and writes it to the
 
 ```cpp
 // ...complete_tx::bytes.multicast::cluster [dst], [map, {x, y}], [bar], cta_mask
-lab::tma_load_2d_cg2_multicast(dst, &a_map, bar, /*cta_mask=*/0b0101, x, y);
+tma_load_2d_cg2_multicast(dst, &a_map, bar, /*cta_mask=*/0b0101, x, y);
 ```
 
 Each copy received by a target CTA does its own `complete_tx`. Combined with `.cta_group::2`, the completion signal of that copy goes to the same offset in **the leader of the pair the target CTA belongs to** (`bar` gives the address of this pair's leader; the hardware translates it for the target pair).

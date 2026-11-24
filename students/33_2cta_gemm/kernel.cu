@@ -31,6 +31,10 @@
 #include <algorithm>
 #include <cuda_bf16.h>
 
+namespace {
+
+using bf16 = __nv_bfloat16;
+
 // ===========================================================================
 // Cluster and pair primitives (lesson §4). You write them here; from lab 34
 // on they come from include/lab/cluster.cuh. One PTX instruction each
@@ -38,7 +42,6 @@
 // ("r" operand); 16-bit masks are "h" operands; "memory" clobber on
 // everything except reading special registers and mapa.
 // ===========================================================================
-namespace lab {
 
 // ---------------------------------------------------------------------------
 // TODO(1a) — cluster identity, cluster barrier, DSMEM address (lesson §4.1,
@@ -183,12 +186,6 @@ int max_active_clusters(void (*kernel)(KArgs...), dim3 block, int smem_bytes,
   return n;
 }
 
-} // namespace lab
-
-namespace {
-
-using bf16 = __nv_bfloat16;
-
 constexpr int kBM = 128;        // rows of C per CTA (= TMEM lanes)
 constexpr int kPairM = 2 * kBM; // MMA M of the pair
 constexpr int kBN = 256;        // MMA N (columns of C per tile)
@@ -236,7 +233,7 @@ __device__ __forceinline__ void mma_k_tile_pair(uint32_t d_tmem, const bf16 *sa,
   // -------------------------------------------------------------------------
   // TODO(1d) — four pair MMAs of K = 16 (lesson §4.4). As lab 32's
   // mma_k_tile, but the instruction descriptor describes the WHOLE pair
-  // MMA (M = ?, N = ?) and you call lab::mma_f16_ss_cg2. The descriptors
+  // MMA (M = ?, N = ?) and you call mma_f16_ss_cg2. The descriptors
   // point at the leader's buffers only.
   // -------------------------------------------------------------------------
   LAB_TODO(1);
@@ -272,7 +269,7 @@ struct PairInfo {
   uint32_t leader_rank; // cluster rank of our pair's leader
   bool leader;
   __device__ static PairInfo get() {
-    const uint32_t r = lab::cluster_ctarank();
+    const uint32_t r = cluster_ctarank();
     return PairInfo{r % kPairSize, r / kPairSize, r & ~1u, r % kPairSize == 0};
   }
 };
@@ -289,7 +286,7 @@ __device__ __forceinline__ void load_a(bf16 *dst, const CUtensorMap *a_map,
                                        uint32_t full_l, const PairInfo &pair,
                                        int x, int a_row) {
   if constexpr (Cfg::kPairs == 1) {
-    lab::tma_load_2d_cg2(dst, a_map, full_l, x, a_row);
+    tma_load_2d_cg2(dst, a_map, full_l, x, a_row);
   } else {
     // -----------------------------------------------------------------------
     // TODO(3b) — multicast A (lesson §4.5, §5.5). Here a_map's box has
@@ -299,7 +296,7 @@ __device__ __forceinline__ void load_a(bf16 *dst, const CUtensorMap *a_map,
     //   - which bits must cta_mask have so the box lands in both CTAs?
     //   - which barrier address do you pass, and on which leader's barrier
     //     does the copy for the other pair complete?
-    // Then one call to lab::tma_load_2d_cg2_multicast.
+    // Then one call to tma_load_2d_cg2_multicast.
     // -----------------------------------------------------------------------
     (void)pair;
     LAB_TODO(3);
@@ -328,7 +325,7 @@ produce_tile(const Smem<Cfg> &sm, RingPos<Cfg::kStages> &ring,
   //   - full_l = the .shared::cluster address of full[s] in the leader
   //     (pair.leader_rank);
   //   - load_a<Cfg>(sm.a(s), a_map, full_l, pair, x = 64t, a_row = this
-  //     CTA's first A row) and the B half with lab::tma_load_2d_cg2 (which
+  //     CTA's first A row) and the B half with tma_load_2d_cg2 (which
   //     B rows does this CTA hold?);
   //   - ring.advance().
   // -------------------------------------------------------------------------
@@ -445,8 +442,8 @@ __device__ __forceinline__ uint32_t setup(Smem<Cfg> &sm, uint32_t *tmem_slot,
   }
   if (warp == kMmaWarp) {
     __syncwarp();
-    lab::tmem_alloc_cg2(tmem_slot, Cfg::kTmemCols);
-    lab::tmem_relinquish_alloc_permit_cg2();
+    tmem_alloc_cg2(tmem_slot, Cfg::kTmemCols);
+    tmem_relinquish_alloc_permit_cg2();
   }
   // -------------------------------------------------------------------------
   // TODO(1h) — make the barrier inits and the TMEM address visible (lesson
@@ -463,7 +460,7 @@ __device__ __forceinline__ uint32_t setup(Smem<Cfg> &sm, uint32_t *tmem_slot,
 template <class Cfg> __device__ __forceinline__ void teardown(uint32_t tmem) {
   // -------------------------------------------------------------------------
   // TODO(1h) — the same synchronization as setup, then warp kMmaWarp frees
-  // the TMEM (lab::tmem_dealloc_cg2, Cfg::kTmemCols columns).
+  // the TMEM (tmem_dealloc_cg2, Cfg::kTmemCols columns).
   // -------------------------------------------------------------------------
   (void)tmem;
   LAB_TODO(1);
@@ -498,7 +495,7 @@ __global__ void __launch_bounds__(kThreads, 1)
   static_assert(Cfg::kPairs == 1, "step 1: one pair per cluster");
   const PairInfo pair = PairInfo::get();
   const int n_tiles = (n + kBN - 1) / kBN;
-  const int tile = lab::cluster_id_x();
+  const int tile = cluster_id_x();
   const int m0 = (tile / n_tiles) * kPairM, n0 = (tile % n_tiles) * kBN;
   const int k_tiles = (k + kBK - 1) / kBK;
 
@@ -566,7 +563,7 @@ __global__ void __launch_bounds__(kThreads, 1)
   const int n_tiles = (n + Cfg::kClusterN - 1) / Cfg::kClusterN;
   const int num_tiles = m_tiles * n_tiles;
   const int k_tiles = (k + kBK - 1) / kBK;
-  const int first = lab::cluster_id_x(), stride = lab::num_clusters_x();
+  const int first = cluster_id_x(), stride = num_clusters_x();
 
   if (warp == kProducerWarp) {
     if (lab::elect_one()) {
@@ -664,11 +661,11 @@ Plan make_plan(const lab::GemmProblem &p) {
   allow_smem(gemm_pair_persistent<Step2>, Step2::kSmemBytes);
   allow_smem(gemm_pair_persistent<Step3>, Step3::kSmemBytes);
   plan.clusters2 =
-      lab::max_active_clusters(gemm_pair_persistent<Step2>, dim3(kThreads),
-                               Step2::kSmemBytes, Step2::kClusterSize);
+      max_active_clusters(gemm_pair_persistent<Step2>, dim3(kThreads),
+                          Step2::kSmemBytes, Step2::kClusterSize);
   plan.clusters3 =
-      lab::max_active_clusters(gemm_pair_persistent<Step3>, dim3(kThreads),
-                               Step3::kSmemBytes, Step3::kClusterSize);
+      max_active_clusters(gemm_pair_persistent<Step3>, dim3(kThreads),
+                          Step3::kSmemBytes, Step3::kClusterSize);
   LAB_REQUIRE(plan.clusters2 > 0 && plan.clusters3 > 0,
               "no 2-CTA cluster fits on this GPU");
   plan.a_map = operand_map(p.a, p.m, p.k, kBM);
@@ -686,18 +683,18 @@ void launch_persistent(const Plan &plan, const CUtensorMap &a_map, int clusters,
   const int tiles = ((p.m + kPairM - 1) / kPairM) *
                     ((p.n + Cfg::kClusterN - 1) / Cfg::kClusterN);
   const int grid = Cfg::kClusterSize * std::min(tiles, clusters);
-  lab::launch_cluster(gemm_pair_persistent<Cfg>, dim3(grid), dim3(kThreads),
-                      Cfg::kSmemBytes, stream, Cfg::kClusterSize, a_map,
-                      plan.b_map, plan.c_map, p.m, p.n, p.k);
+  launch_cluster(gemm_pair_persistent<Cfg>, dim3(grid), dim3(kThreads),
+                 Cfg::kSmemBytes, stream, Cfg::kClusterSize, a_map, plan.b_map,
+                 plan.c_map, p.m, p.n, p.k);
 }
 
 void run(const Plan &plan, const lab::GemmProblem &p, cudaStream_t stream) {
   switch (p.step) {
   case 1:
-    lab::launch_cluster(
-        gemm_pair_tile<Step1>, dim3(Step1::kClusterSize * num_tiles(p)),
-        dim3(kThreads), Step1::kSmemBytes, stream, Step1::kClusterSize,
-        plan.a_map, plan.b_map, plan.c_map, p.n, p.k);
+    launch_cluster(gemm_pair_tile<Step1>,
+                   dim3(Step1::kClusterSize * num_tiles(p)), dim3(kThreads),
+                   Step1::kSmemBytes, stream, Step1::kClusterSize, plan.a_map,
+                   plan.b_map, plan.c_map, p.n, p.k);
     break;
   case 2:
     launch_persistent<Step2>(plan, plan.a_map, plan.clusters2, p, stream);
