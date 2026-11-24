@@ -141,7 +141,7 @@ shared memory 有两个“窗口”：`.shared::cta`（本 CTA）和 `.shared::c
 
 ```cpp
 // p 指向本 CTA 的 shared memory；返回 CTA `rank` 中同一偏移的 .shared::cluster 地址
-uint32_t remote = lab::map_shared_rank(&sm.acc_empty[a], /*rank=*/0);   // mapa.shared::cluster.u32
+uint32_t remote = map_shared_rank(&sm.acc_empty[a], /*rank=*/0);   // mapa.shared::cluster.u32
 ```
 
 两个 CTA 运行同一个 kernel，静态 `__shared__` 与对齐后的动态 shared memory 偏移完全相同，所以“同一偏移”就是“对方的同一个变量”。
@@ -150,9 +150,9 @@ uint32_t remote = lab::map_shared_rank(&sm.acc_empty[a], /*rank=*/0);   // mapa.
 
 ```cpp
 // 到达另一个 CTA 的 barrier（release 到 cluster 作用域）
-lab::mbar_arrive_cluster(remote);         // mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remote]
+mbar_arrive_cluster(remote);         // mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remote]
 // 等待自己的 barrier，但到达者在别的 CTA（acquire 到 cluster 作用域）
-lab::mbar_wait_cluster(&bar, parity);     // mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64
+mbar_wait_cluster(&bar, parity);     // mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64
 ```
 
 `mbarrier.try_wait` 只能等**自己** CTA 的 barrier；需要别人知道的事，由别人来到达你的 barrier，而不是你去等别人的。
@@ -160,8 +160,8 @@ lab::mbar_wait_cluster(&bar, parity);     // mbarrier.try_wait.parity.acquire.cl
 **cluster 屏障**：
 
 ```cpp
-lab::cluster_arrive();   // barrier.cluster.arrive.release.aligned
-lab::cluster_wait();     // barrier.cluster.wait.acquire.aligned
+cluster_arrive();   // barrier.cluster.arrive.release.aligned
+cluster_wait();     // barrier.cluster.wait.acquire.aligned
 ```
 
 cluster 中**所有 CTA 的所有线程**都到达后，wait 才返回。它取代 32 关 setup / teardown 里的 `__syncthreads()`（4.6 节）。
@@ -172,7 +172,7 @@ cluster 中**所有 CTA 的所有线程**都到达后，wait 才返回。它取�
 
 ```cpp
 // cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [dst], [map, {x, y}], [bar]
-lab::tma_load_2d_cg2(sm.a(s), &a_map, lab::map_shared_rank(&sm.full[s], leader), x, y);
+tma_load_2d_cg2(sm.a(s), &a_map, map_shared_rank(&sm.full[s], leader), x, y);
 ```
 
 于是两个 CTA 的数据都“报到”leader 的 `full[s]`，而发 MMA 的线程就在 leader 里。
@@ -183,7 +183,7 @@ lab::tma_load_2d_cg2(sm.a(s), &a_map, lab::map_shared_rank(&sm.full[s], leader),
 
 ```cpp
 constexpr uint32_t idesc = lab::make_idesc_f16(/*M=*/256, /*N=*/256, /*bf16=*/true);
-lab::mma_f16_ss_cg2(d_tmem, a_desc, b_desc, idesc, accumulate);
+mma_f16_ss_cg2(d_tmem, a_desc, b_desc, idesc, accumulate);
 // tcgen05.mma.cta_group::2.kind::f16 [d], a_desc, b_desc, idesc, p;
 ```
 
@@ -222,7 +222,7 @@ TMEM（peer）  lane 0..127│ C[m0 + 128..255, n0 + 0..255]       │
 
 ```cpp
 // ...complete_tx::bytes.multicast::cluster [dst], [map, {x, y}], [bar], cta_mask
-lab::tma_load_2d_cg2_multicast(dst, &a_map, bar, /*cta_mask=*/0b0101, x, y);
+tma_load_2d_cg2_multicast(dst, &a_map, bar, /*cta_mask=*/0b0101, x, y);
 ```
 
 每个目标 CTA 收到的那一份各自做一次 `complete_tx`。配合 `.cta_group::2`，那一份的完成信号发到**目标 CTA 所在 pair 的 leader** 的同一偏移（`bar` 给的是本 pair leader 的地址，硬件按目标 pair 换算）。
