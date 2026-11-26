@@ -18,7 +18,7 @@
 ## 正确性
 
 - 先确认命令作用于哪个实现：不带 `--solution` 是学生代码，带 `--solution` 是参考答案；`bench` 中的 `cublas`、`cudnn`、`fa4` 等是库基线。
-- 先用小 case 定位：`./lab check ID --step n --case <小 case>`，再跑本关完整检查 `./lab check ID`。
+- 先用小 case 定位：`./lab check ID --step n --case <小 case>`，再跑本关完整检查 `./lab check ID`。学习者自己的 case 写在 `students/<ID>/cases.json` 或用 `--shape` 指定（见 README），不能改容差。
 - 失败要如实报告。不删除测试、不无条件 skip、不放宽容差。
 - 库基线不可用时，`bench` 显示 “unavailable”。不要用别的实现静默顶替。
 

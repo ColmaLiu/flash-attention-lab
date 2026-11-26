@@ -121,16 +121,42 @@ bash scripts/bootstrap.sh            # 可加 --with-cuda、--with-fa4，见下�
 
 ```
 ./lab list                                     课程列表与进度
-./lab check ID [--step N] [--case NAME]        正确性
-./lab bench ID [--step N] [--case NAME] [--cold]   计时
+./lab check ID [--step N] [--case NAME | --shape S]   正确性
+./lab bench ID [--step N] [--case NAME | --shape S] [--cold]   计时
 ./lab sass ID                                  寄存器、spill、指令统计
-./lab profile ID [--step N] [--case NAME]      Nsight Compute
-./lab sanitize ID --case NAME [--tool memcheck|racecheck|synccheck|initcheck]
+./lab profile ID [--step N] [--case NAME | --shape S]   Nsight Compute
+./lab sanitize ID --case NAME | --shape S [--tool memcheck|racecheck|synccheck|initcheck]
 ./lab doctor                                   环境检查
 ./lab clean [--yes]                            删除编译缓存和 bench/profile/sass 输出（不动 students/ 和进度）
 ```
 
 在 check、bench、sass、profile、sanitize 后加 `--solution`，就改为运行参考答案。ID 可以写唯一前缀，例如 `00` 或 `31_tc`。
+
+### 自定义 case
+
+除了 `course/<ID>/spec.json` 里的 case，你也可以测自己的 shape，例如把一个失败缩小到更小的输入上复现。临时用一次时，用 `--shape` 代替 `--case`（check、bench、profile、sanitize 都支持）：
+
+```bash
+./lab check 33 --shape 300,500,72                                    # M,N,K
+./lab check 22 --step 2 --shape 1,300,2,64 --opt causal=true --pattern position
+```
+
+要保留下来，就写 `students/<ID>/cases.json`，字段与 spec.json 相同，再用 `--case NAME` 选：
+
+```json
+{
+  "cases": [
+    {"name": "my_tail", "shape": [300, 500, 72], "pattern": "int", "purpose": "M、N 都有尾部"},
+    {"name": "early", "shape": [256, 256, 64], "steps": [1, 2, 3]}
+  ]
+}
+```
+
+- `shape` 的顺序：转置和 softmax 是 `[rows, cols]`，GEMM 是 `[M, N, K]`，attention 是 `[B, N, H, D]`。
+- `dtype` 默认取本关第一个 case 的类型，只能用本关 case 用过的类型。`pattern` 默认 `random`，其他取值见本关 spec.json。`causal`、`scale` 等选项只有本关 spec.json 用到时才能写；容差不能改。
+- case 默认只在最后一个 step 上跑，列出 `steps` 则在这些 step 上跑。用 `--case` 或 `--shape` 单独选它时，`--step N` 决定在哪个 step 跑。
+- `./lab check ID` 会在每个 step 自带的 case 之后，以 “your cases” 为标题跑你的 case。`./lab list` 的进度只按本关自带的 case 计算；你的 case 失败照样报告，并且检查就此停止。
+- 超出本关支持域的 shape 会被 `make_plan` 拒绝，报 `requirement failed: ...`（例如 31–33 关要求 K 是 8 的倍数）。
 
 ## 仓库结构
 
