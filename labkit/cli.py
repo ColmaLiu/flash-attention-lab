@@ -22,6 +22,8 @@ USAGE = """\
 ./lab clean [--yes]                delete build caches, bench/profile/sass output
 Add --solution to check/bench/sass/profile/sanitize to run the reference solution.
 ID may be a unique prefix, e.g. 00 or 31_tc.
+Your own cases: students/ID/cases.json (used by --case NAME and by check), or
+--shape 300,500,72 [--dtype D] [--pattern P] [--opt key=value] in place of --case.
 """
 
 
@@ -35,6 +37,10 @@ def _parser():
         q.add_argument("--solution", action="store_true")
         q.add_argument("--step", type=int)
         q.add_argument("--case")
+        q.add_argument("--shape", help="a one-off case, e.g. 300,500,72")
+        q.add_argument("--dtype", help="with --shape")
+        q.add_argument("--pattern", help="with --shape")
+        q.add_argument("--opt", action="append", default=[], help="with --shape: k=v")
         q.add_argument("--timeout", type=int, default=300)
         return q
 
@@ -108,8 +114,10 @@ def _dispatch(args):
     if cmd == "profile":
         from .tools import profile_command
 
-        case = args.case or _default_perf_case(lab)
-        command, report = profile_command(lab, case, args.step, args.solution)
+        case = _selected_case(lab, args) or lab.case(_default_perf_case(lab))
+        command, report = profile_command(
+            lab, case.name, _case_args(args, case), args.step, args.solution
+        )
         code = _child_raw(command, args.timeout)
         if code == 0:
             from .tools import print_metrics
@@ -123,12 +131,17 @@ def _dispatch(args):
     if cmd == "sanitize":
         from .tools import sanitize_command
 
-        if not args.case:
-            raise LabError("choose a small case with --case (sanitizers are slow)")
+        case = _selected_case(lab, args)
+        if not case:
+            raise LabError(
+                "choose a small case with --case or --shape (sanitizers are slow)"
+            )
         # Without the caching allocator every tensor is its own cudaMalloc,
         # so memcheck can see out-of-bounds accesses between tensors.
         code = _child_raw(
-            sanitize_command(lab, args.tool, args.case, args.step, args.solution),
+            sanitize_command(
+                lab, args.tool, _case_args(args, case), args.step, args.solution
+            ),
             args.timeout,
             {"PYTORCH_NO_CUDA_MEMORY_CACHING": "1"},
         )
@@ -151,8 +164,34 @@ def _forward(args, lab):
             out.append("--" + flag.replace("_", "-"))
     if args.step:
         out += ["--step", str(args.step)]
-    if args.case:
-        out += ["--case", args.case]
+    case = _selected_case(lab, args)  # validate before starting the child
+    if case:
+        out += _case_args(args, case)
+    return out
+
+
+def _selected_case(lab, args):
+    """The case chosen by --case NAME or --shape ..., or None."""
+    extra = [f for f in ("dtype", "pattern", "opt") if getattr(args, f, None)]
+    if args.shape:
+        if args.case:
+            raise LabError("use --case or --shape, not both")
+        return spec.inline_case(lab, args.shape, args.dtype, args.pattern, args.opt)
+    if extra:
+        raise LabError(f"--{extra[0]} only goes with --shape")
+    return spec.find_case(lab, args.case) if args.case else None
+
+
+def _case_args(args, case):
+    """Command-line arguments that select `case` again in a child process."""
+    if not args.shape:
+        return ["--case", case.name]
+    out = ["--shape", args.shape]
+    for flag in ("dtype", "pattern"):
+        if getattr(args, flag):
+            out += ["--" + flag, getattr(args, flag)]
+    for item in args.opt:
+        out += ["--opt", item]
     return out
 
 
@@ -206,46 +245,66 @@ def _list():
 
 def _do_check(lab, args):
     from . import progress
-    from .runner import check_case
     import torch  # noqa: F401  (after env.configure)
 
     from .env import require_gpu
 
     require_gpu()
     who = "solution" if args.solution else "student"
+    selected = _selected_case(lab, args)
+    last = lab.steps[-1].step
     steps = [lab.step_info(args.step)] if args.step else list(lab.steps)
-    if args.case and not args.step:
+    if isinstance(selected, spec.CustomCase) and not args.step:
+        # Your own case: its "steps", else the last step.
+        steps = [s for s in steps if s.step in (selected.steps or (last,))]
+    elif selected and not args.step:
         # Only the steps that list this case (perf cases: the last step).
-        lab.case(args.case)
-        steps = [s for s in steps if args.case in s.cases] or [lab.steps[-1]]
+        steps = [s for s in steps if selected.name in s.cases] or [lab.steps[-1]]
+    # Your own cases join a full check of your code, after each step's cases.
+    custom = () if selected or args.solution else spec.custom_cases(lab)
     # Maintainer runs (selftest, tests) set LAB_NO_PROGRESS to keep progress clean.
     record = (
-        not args.solution and not args.case and not os.environ.get("LAB_NO_PROGRESS")
+        not args.solution and not selected and not os.environ.get("LAB_NO_PROGRESS")
     )
     print(f"{lab.id} · {lab.title}  [{who}]")
     for s in steps:
         print(f"\nstep {s.step}: {s.title}")
-        cases = [lab.case(args.case)] if args.case else [lab.case(n) for n in s.cases]
+        cases = [selected] if selected else [lab.case(n) for n in s.cases]
         for c in cases:
-            try:
-                metrics = check_case(lab, c, s.step, args.solution, full=not c.perf)
-            except LabError as exc:
-                print(
-                    f"  {'TODO' if isinstance(exc, NotImplementedYet) else 'FAIL'}  {c.label()}"
-                )
-                print(f"        purpose: {c.purpose}")
-                if record:
-                    progress.record(lab, s.step, False, str(exc))
-                raise
-            worst = max(m.get("max_abs_err", 0.0) for m in metrics.values())
-            print(f"  ok    {c.label():<52} max|err| {worst:.2e}")
+            _check_one(lab, c, s.step, args.solution, record)
         if record:
             progress.record(lab, s.step, True)
+        mine = [c for c in custom if s.step in (c.steps or (last,))]
+        if mine:
+            print(f"  -- your cases ({lab.custom_path().relative_to(ROOT)}) --")
+        for c in mine:
+            _check_one(lab, c, s.step, args.solution, False)
     done = "all steps" if not args.step else f"step {args.step}"
-    print(f"\nPASS: {done} of {lab.id}" + (f" (case {args.case})" if args.case else ""))
+    print(
+        f"\nPASS: {done} of {lab.id}"
+        + (f" (case {selected.label()})" if selected else "")
+    )
     if not args.solution and args.step and args.step < len(lab.steps):
         print(f"Next: step {args.step + 1} — {lab.step_info(args.step + 1).title}")
     return 0
+
+
+def _check_one(lab, c, step, solution, record):
+    from . import progress
+    from .runner import check_case
+
+    try:
+        metrics = check_case(lab, c, step, solution, full=not c.perf)
+    except LabError as exc:
+        print(
+            f"  {'TODO' if isinstance(exc, NotImplementedYet) else 'FAIL'}  {c.label()}"
+        )
+        print(f"        purpose: {c.purpose}")
+        if record:
+            progress.record(lab, step, False, str(exc))
+        raise
+    worst = max(m.get("max_abs_err", 0.0) for m in metrics.values())
+    print(f"  ok    {c.label():<52} max|err| {worst:.2e}")
 
 
 def _do_bench(lab, args):
@@ -253,7 +312,7 @@ def _do_bench(lab, args):
     from .runner import bench
 
     require_gpu()
-    case = lab.case(args.case or _default_perf_case(lab))
+    case = _selected_case(lab, args) or lab.case(_default_perf_case(lab))
     report = bench(
         lab,
         case,
@@ -295,7 +354,7 @@ def _do_profile(lab, args):
 
     from .runner import Prepared, make_case
 
-    case = lab.case(args.case)
+    case = _selected_case(lab, args)
     inputs, options = make_case(lab, case)
     p = Prepared(lab, case, inputs, options, args.step, args.solution)
     for _ in range(3):

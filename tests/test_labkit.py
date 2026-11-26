@@ -54,6 +54,64 @@ def test_spec_rejects_bad_case(tmp_path, monkeypatch):
         spec._parse(bad / "spec.json")
 
 
+def test_custom_cases_file(tmp_path):
+    lab = spec.get("22_fa2")
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"name": "mine", "shape": [1, 300, 2, 64], "causal": True},
+                    {
+                        "name": "early",
+                        "shape": [2, 64, 1, 128],
+                        "dtype": "fp16",
+                        "pattern": "uniform",
+                        "steps": [1, 2],
+                    },
+                ]
+            }
+        )
+    )
+    mine, early = spec.custom_cases(lab, path)
+    assert mine.dtype == lab.cases[0].dtype and mine.pattern == "random"
+    assert mine.options == {"causal": True} and mine.steps == ()
+    assert early.steps == (1, 2) and early.dtype == "fp16"
+    assert spec.custom_cases(lab, tmp_path / "absent.json") == ()
+
+
+@pytest.mark.parametrize(
+    "case, message",
+    [
+        ({"name": "a", "shape": [1, 2, 3]}, "4 positive integers"),
+        ({"name": "a", "shape": [1, 2, 3, 0]}, "4 positive integers"),
+        ({"name": "a", "shape": [1, 8, 1, 64], "dtype": "fp32"}, "dtype"),
+        ({"name": "a", "shape": [1, 8, 1, 64], "pattern": "nope"}, "pattern"),
+        ({"name": "a", "shape": [1, 8, 1, 64], "o_tol": 1}, "unknown field"),
+        ({"name": "a", "shape": [1, 8, 1, 64], "steps": [9]}, "steps"),
+        ({"name": "a b", "shape": [1, 8, 1, 64]}, "bad case name"),
+        ({"name": "n1", "shape": [1, 8, 1, 64]}, "already in spec.json"),
+    ],
+)
+def test_custom_cases_rejects_bad_case(tmp_path, case, message):
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps({"cases": [case]}))
+    with pytest.raises(LabError, match=message):
+        spec.custom_cases(spec.get("22_fa2"), path)
+
+
+def test_inline_case():
+    lab = spec.get("22_fa2")
+    c = spec.inline_case(lab, "1,300,2,64", "fp16", None, ["causal=true", "scale=0.5"])
+    assert c.shape == (1, 300, 2, 64) and c.dtype == "fp16"
+    assert c.options == {"causal": True, "scale": 0.5}
+    assert spec.inline_case(spec.get("33"), "300x500x72").shape == (300, 500, 72)
+    with pytest.raises(LabError, match="key=value"):
+        spec.inline_case(lab, "1,8,1,64", opts=["causal"])
+    with pytest.raises(LabError, match="unknown field"):
+        spec.inline_case(spec.get("33"), "8,8,8", opts=["causal=true"])
+
+
 def test_selected_device_respects_mask():
     assert selected_device({}) == "0"
     assert selected_device({"LAB_GPU": "3"}) == "3"
