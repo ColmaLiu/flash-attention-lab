@@ -63,6 +63,12 @@ def test_wrong_answer_and_unwritten_output(scratch_lab):
     assert "never written" in out and "col=0" in out
 
 
+def test_custom_shape():
+    code, out = lab("_check", "00_transpose", "--solution", "--shape", "37,1000")
+    assert code == 0, out
+    assert "custom [37, 1000]" in out and "step 4" in out
+
+
 def test_bench_reports_baseline():
     code, out = lab("_bench", "00_transpose", "--solution")
     assert code == 0, out

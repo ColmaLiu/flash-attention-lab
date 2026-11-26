@@ -111,7 +111,7 @@ BASE_METRICS = [
 ]
 
 
-def profile_command(lab, case, step, solution):
+def profile_command(lab, case, case_args, step, solution):
     ncu = require_tool("ncu", "LAB_NCU")
     out = ROOT / "artifacts" / "profiles"
     out.mkdir(parents=True, exist_ok=True)
@@ -129,8 +129,7 @@ def profile_command(lab, case, step, solution):
         "labkit",
         "_profile",
         lab.id,
-        "--case",
-        case,
+        *case_args,
     ]
     if step:
         cmd += ["--step", str(step)]
@@ -139,7 +138,7 @@ def profile_command(lab, case, step, solution):
     return cmd, report
 
 
-def sanitize_command(lab, tool, case, step, solution):
+def sanitize_command(lab, tool, case_args, step, solution):
     sanitizer = require_tool("compute-sanitizer", "LAB_SANITIZER")
     cmd = [
         sanitizer,
@@ -152,8 +151,7 @@ def sanitize_command(lab, tool, case, step, solution):
         "labkit",
         "_check",
         lab.id,
-        "--case",
-        case,
+        *case_args,
     ]
     if step:
         cmd += ["--step", str(step)]
