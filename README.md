@@ -122,16 +122,42 @@ All commands:
 
 ```
 ./lab list                                     course list and progress
-./lab check ID [--step N] [--case NAME]        correctness
-./lab bench ID [--step N] [--case NAME] [--cold]   timing
+./lab check ID [--step N] [--case NAME | --shape S]   correctness
+./lab bench ID [--step N] [--case NAME | --shape S] [--cold]   timing
 ./lab sass ID                                  registers, spills, instruction counts
-./lab profile ID [--step N] [--case NAME]      Nsight Compute
-./lab sanitize ID --case NAME [--tool memcheck|racecheck|synccheck|initcheck]
+./lab profile ID [--step N] [--case NAME | --shape S]   Nsight Compute
+./lab sanitize ID --case NAME | --shape S [--tool memcheck|racecheck|synccheck|initcheck]
 ./lab doctor                                   environment check
 ./lab clean [--yes]                            delete build cache and bench/profile/sass output (keeps students/ and progress)
 ```
 
 Add `--solution` after check, bench, sass, profile or sanitize to run the reference solution instead. An ID can be any unique prefix, for example `00` or `31_tc`.
+
+### Your own cases
+
+Besides the cases in `course/<ID>/spec.json`, you can test shapes of your own, for example to reproduce a failure on a smaller input. For a one-off case, use `--shape` in place of `--case` (check, bench, profile and sanitize all accept it):
+
+```bash
+./lab check 33 --shape 300,500,72                                    # M,N,K
+./lab check 22 --step 2 --shape 1,300,2,64 --opt causal=true --pattern position
+```
+
+To keep cases, write `students/<ID>/cases.json` with the same fields as spec.json and select one with `--case NAME`:
+
+```json
+{
+  "cases": [
+    {"name": "my_tail", "shape": [300, 500, 72], "pattern": "int", "purpose": "M and N tails"},
+    {"name": "early", "shape": [256, 256, 64], "steps": [1, 2, 3]}
+  ]
+}
+```
+
+- `shape` is `[rows, cols]` for transpose and softmax, `[M, N, K]` for GEMM, `[B, N, H, D]` for attention.
+- `dtype` defaults to the dtype of the lab's first case and must be one that the lab's cases use. `pattern` defaults to `random`; the other values are the ones in the lab's spec.json. Options such as `causal` and `scale` are allowed when the lab's spec.json uses them; tolerances cannot be changed.
+- A case runs on the last step unless it lists `steps`. When you select it with `--case` or `--shape`, `--step N` picks the step.
+- `./lab check ID` runs your cases after each step's own cases, under "your cases". Progress in `./lab list` counts only the lab's own cases; a failure in one of your cases is still reported and stops the check.
+- Shapes outside the lab's support domain are rejected by `make_plan` with `requirement failed: ...` (for example, K not a multiple of 8 in labs 31-33).
 
 ## Repository layout
 

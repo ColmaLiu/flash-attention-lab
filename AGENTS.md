@@ -18,7 +18,7 @@ This project is a CUDA C++ / PTX course: on B200 (SM100), with FlashAttention 1â
 ## Correctness
 
 - First confirm which implementation a command runs: without `--solution` it is the student code, with `--solution` it is the reference solution; `cublas`, `cudnn`, `fa4` and so on in `bench` are library baselines.
-- Locate problems with a small case first: `./lab check ID --step n --case <small case>`, then run the full check for the lab: `./lab check ID`.
+- Locate problems with a small case first: `./lab check ID --step n --case <small case>`, then run the full check for the lab: `./lab check ID`. The learner's own cases go in `students/<ID>/cases.json` or `--shape` (see the README); they cannot change tolerances.
 - Report failures as they are. Do not delete tests, do not skip unconditionally, do not loosen tolerances.
 - When a library baseline is unavailable, `bench` shows "unavailable". Do not silently substitute another implementation.
 
